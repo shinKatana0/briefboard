@@ -3,6 +3,7 @@
 [English](README.md) | Русский | [日本語](README.ja.md)
 
 [![npm version](https://img.shields.io/npm/v/briefboard.svg)](https://www.npmjs.com/package/briefboard)
+[![tests](https://github.com/shinKatana0/briefboard/actions/workflows/test.yml/badge.svg)](https://github.com/shinKatana0/briefboard/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node >=21](https://img.shields.io/badge/node-%3E%3D21-brightgreen.svg)](#требования)
 
