@@ -22,7 +22,7 @@ const SERVER_PATH = path.join(__dirname, '..', 'server', 'server.js');
 // withBriefDir:false starts a project WITHOUT doc/brief/ — used to exercise the
 // lazy watch that must attach when the first brief appears at runtime (T-0047).
 function makeFixtureRoot({ backlog = '', briefFiles = {}, withBriefDir = true } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-server-test-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-server-test-'));
   const docDir = path.join(root, 'doc');
   const briefDir = path.join(docDir, 'brief');
   if (withBriefDir || Object.keys(briefFiles).length) {

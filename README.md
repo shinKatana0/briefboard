@@ -15,6 +15,8 @@ with a mandatory brief before implementation starts and a review before merge.
 > deploys it into any project (see [Quick start](#quick-start) below). Cloning
 > the repository is an alternative path for contributors and local development.
 
+![briefboard — live board + CLI demo](doc/img/demo.gif)
+
 ## Why
 
 Agents that work straight from a chat conversation lose structure quickly: it is

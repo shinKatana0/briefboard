@@ -18,7 +18,7 @@ const REAL_BRIEF_DIR = path.join(__dirname, '..', 'doc', 'brief');
 // Create an isolated, throwaway doc/brief/-like directory so synthetic fixtures never
 // depend on (or risk colliding with) the real project's doc/brief/.
 function makeTmpBriefDir(fileNames) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-validate-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-validate-test-'));
   for (const name of fileNames) fs.writeFileSync(path.join(dir, name), '# fixture brief\n');
   return dir;
 }

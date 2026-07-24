@@ -482,7 +482,7 @@ describe('findBriefFile() — shared brief lookup (used by server.js + validate.
   // Build a throwaway brief directory so the lookup rules can be asserted in
   // isolation, independent of the real doc/brief/ contents.
   function makeBriefDir(files) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-brief-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-brief-'));
     for (const f of files) fs.writeFileSync(path.join(dir, f), '# brief\n');
     return dir;
   }
@@ -503,7 +503,7 @@ describe('findBriefFile() — shared brief lookup (used by server.js + validate.
   });
 
   it('returns null for a non-existent briefDir', () => {
-    const dir = path.join(os.tmpdir(), 'agentboard-brief-does-not-exist-xyz');
+    const dir = path.join(os.tmpdir(), 'briefboard-brief-does-not-exist-xyz');
     assert.strictEqual(findBriefFile(dir, 'T-0007-01'), null);
   });
 

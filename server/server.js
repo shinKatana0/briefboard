@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * agentboard server — zero dependencies (Node >= 18).
+ * briefboard server — zero dependencies (Node >= 21).
  *   /            → ui/index.html
  *   /api/board   → parsed tasks JSON
  *   /api/brief/T-0007-01 → brief file content
@@ -368,7 +368,7 @@ ensureBriefWatch(); // attach now if doc/brief/ already exists; otherwise lazily
 
 server.listen(PORT, HOST, () => {
   const addr = server.address();
-  console.log(`agentboard: http://${HOST}:${PORT}`);
+  console.log(`briefboard: http://${HOST}:${PORT}`);
   console.log(`bound:      ${addr.address}:${addr.port}`);
   console.log(`watching:   ${BACKLOG}`);
   if (!isLoopbackHost(HOST)) {

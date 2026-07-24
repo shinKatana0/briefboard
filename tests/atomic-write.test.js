@@ -16,7 +16,7 @@ const os = require('node:os');
 const { atomicWrite } = require('../server/parser.js');
 
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-atomic-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-atomic-test-'));
 }
 
 function fsError(code) {

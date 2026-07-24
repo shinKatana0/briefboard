@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-24
+
+### Changed
+
+- Renamed the in-app brand from "agentboard" to **briefboard** (board title,
+  header, exported `.xlsx` filename, and the server startup banner). The
+  `AGENTBOARD_ROOT` / `AGENTBOARD_HOST` environment variable names are unchanged.
+
+### Added
+
+- A demo GIF of the live board + CLI at the top of the README.
+
 ## [0.1.1] - 2026-07-24
 
 ### Changed
@@ -46,5 +58,6 @@ First public slice.
 - Zero runtime dependencies; requires Node.js >= 21.
 
 [Unreleased]: https://keepachangelog.com/en/1.1.0/
+[0.1.2]: https://github.com/shinKatana0/briefboard/releases/tag/v0.1.2
 [0.1.1]: https://github.com/shinKatana0/briefboard/releases/tag/v0.1.1
 [0.1.0]: https://keepachangelog.com/en/1.1.0/

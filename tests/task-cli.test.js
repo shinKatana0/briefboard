@@ -29,7 +29,7 @@ function runCli(root, args) {
 }
 
 function makeTmpRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-cli-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-cli-test-'));
 }
 
 function backlogPath(root) {

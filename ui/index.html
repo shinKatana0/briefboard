@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agentboard · doc/backlog.md</title>
+<title>briefboard · doc/backlog.md</title>
 <script>
   // Resolve the theme as early as possible (before first paint) to avoid a
   // flash of the wrong theme: explicit user choice from localStorage wins,
@@ -248,7 +248,7 @@
 </head>
 <body>
 <header>
-  <h1>agentboard <span class="path">· doc/backlog.md</span></h1>
+  <h1>briefboard <span class="path">· doc/backlog.md</span></h1>
   <div class="type-filter" id="type-filter">
     <button class="tf-btn active" data-type="all">All</button>
     <button class="tf-btn" data-type="feature">Feature</button>
@@ -1138,7 +1138,7 @@ function exportXlsx() {
   const dateStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
   const a = document.createElement('a');
   a.href = url;
-  a.download = `agentboard-tasks-${dateStr}.xlsx`;
+  a.download = `briefboard-tasks-${dateStr}.xlsx`;
   document.body.appendChild(a);
   a.click();
   a.remove();

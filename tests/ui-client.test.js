@@ -797,7 +797,7 @@ describe('XLSX export', () => {
         removed: anchor.removed,
       };
     })()`);
-    assert.match(result.download, /^agentboard-tasks-\d{4}-\d{2}-\d{2}\.xlsx$/);
+    assert.match(result.download, /^briefboard-tasks-\d{4}-\d{2}-\d{2}\.xlsx$/);
     assert.strictEqual(result.clicked, true);
     assert.strictEqual(result.href, 'blob:mock');
     assert.strictEqual(result.removed, true);
@@ -819,7 +819,7 @@ describe('XLSX export', () => {
 
     let tmpDir;
     try {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-xlsx-'));
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-xlsx-'));
       const zipPath = path.join(tmpDir, 'tasks.zip');
       const outDir = path.join(tmpDir, 'unzipped');
       fs.writeFileSync(zipPath, buf);

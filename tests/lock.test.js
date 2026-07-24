@@ -17,7 +17,7 @@ const { withFileLock, updateBacklog, atomicWrite, parseBacklog } = require('../s
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-lock-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-lock-test-'));
 }
 
 function mkTask(id) {

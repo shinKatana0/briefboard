@@ -21,7 +21,7 @@ const SERVER_PATH = path.join(__dirname, '..', 'server', 'server.js');
 // ---------- fixture helpers ----------
 
 function makeFixtureRoot(backlog) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentboard-sec-test-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-sec-test-'));
   const docDir = path.join(root, 'doc');
   fs.mkdirSync(path.join(docDir, 'brief'), { recursive: true });
   fs.writeFileSync(path.join(docDir, 'backlog.md'), backlog);
