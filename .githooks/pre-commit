@@ -1,0 +1,21 @@
+#!/bin/sh
+# Pre-commit hook: validates the structure of doc/backlog.md before allowing a commit.
+#
+# This hook lives under .githooks/ (versioned in git) rather than .git/hooks/ (which is
+# not versioned). It is only active once a developer opts in with:
+#   git config core.hooksPath .githooks
+# (see CLAUDE.md). Without that one-time setup command, git will not run this hook at
+# all - there is no way to make git auto-enable it from inside the repository itself.
+
+node tools/task.mjs validate
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-commit: doc/backlog.md failed validation (see errors above)." >&2
+  echo "Fix doc/backlog.md, or run 'node tools/task.mjs validate' locally to see the" >&2
+  echo "same errors again, then retry the commit." >&2
+  exit 1
+fi
+
+exit 0

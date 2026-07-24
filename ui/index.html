@@ -1,0 +1,1203 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentboard · doc/backlog.md</title>
+<script>
+  // Resolve the theme as early as possible (before first paint) to avoid a
+  // flash of the wrong theme: explicit user choice from localStorage wins,
+  // otherwise fall back to the OS-level color-scheme preference.
+  (function () {
+    try {
+      var stored = localStorage.getItem('theme');
+      var theme = (stored === 'light' || stored === 'dark')
+        ? stored
+        : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.setAttribute('data-theme', theme);
+    } catch (e) {
+      // localStorage/matchMedia unavailable (e.g. privacy mode) - keep the
+      // static "dark" default already set on <html>.
+    }
+  })();
+</script>
+<style>
+  :root {
+    /* theme-independent tokens: status/priority hues and chip ink stay the
+       same regardless of light/dark page theme (see T-0005-02 brief) */
+    --st-backlog: #6B7684;
+    --st-open: #4E9AF1;
+    --st-ready: #84CC16;
+    --st-in_progress: #E0A33B;
+    --st-review: #A78BFA;
+    --st-done: #43A467;
+    --st-cancelled: #59616B;
+    --p0: #E5544B; --p1: #E0A33B; --p2: #4E9AF1; --p3: #6B7684;
+    --prio-blocker: #C0392B; --prio-critical: #E5544B; --prio-major: #E0A33B;
+    --prio-medium: #84CC16; --prio-minor: #6B7684;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    /* ink color used on top of saturated chip backgrounds (prio/status chips) */
+    --chip-ink: #0E1116;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0E1116;
+    --surface: #161B22;
+    --surface-2: #1C232C;
+    --border: #232B36;
+    --text: #DCE3EB;
+    --muted: #7D8894;
+    --surface-inset: #10151B;
+    --overlay: rgba(5,8,12,.62);
+  }
+  :root[data-theme="light"] {
+    --bg: #E9EDF3;
+    --surface: #FFFFFF;
+    --surface-2: #F1F4F8;
+    --border: #C7D0DA;
+    --text: #1B222B;
+    --muted: #5B6572;
+    --surface-inset: #EDF0F4;
+    --overlay: rgba(17,24,33,.45);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  /* ---- header ---- */
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 14px 20px 10px; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font: 600 15px/1 var(--mono); letter-spacing: .02em; }
+  header h1 .path { color: var(--muted); font-weight: 400; }
+  #live { font: 12px var(--mono); color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  #live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--st-done); }
+  #live.off .dot { background: var(--p0); }
+
+  .type-filter { display: flex; gap: 6px; }
+  .tf-btn {
+    font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 9px 2px; cursor: pointer; transition: background .12s, border-color .12s, color .12s;
+  }
+  .tf-btn:hover { border-color: #2E3945; color: var(--text); }
+  .tf-btn.active { background: var(--st-open); color: var(--chip-ink); border-color: var(--st-open); }
+
+  /* Priority filter (T-0044): visually tf-btn-like, but its own class since the
+     interaction differs - each button toggles independently (checkbox-style,
+     multi-select) rather than the type filter's single exclusive selection, so
+     it must not be swept up by the type filter's `.tf-btn` reset-then-activate
+     click handler. Inactive state mirrors the neutral .tf-btn look; active
+     state fills with that priority's own hue (same tokens as the .prio chips
+     on cards) so the selected state reads with the same color language. */
+  .priority-filter { display: flex; gap: 6px; }
+  .prio-toggle {
+    font: 700 12px var(--mono); line-height: 1;
+    color: var(--muted); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 8px 2px; cursor: pointer; transition: background .12s, border-color .12s, color .12s;
+  }
+  .prio-toggle:hover { border-color: #2E3945; color: var(--text); }
+  .prio-toggle.active { color: var(--chip-ink); }
+  .prio-toggle.active[data-priority="Blocker"] { background: var(--prio-blocker); border-color: var(--prio-blocker); }
+  .prio-toggle.active[data-priority="Critical"] { background: var(--prio-critical); border-color: var(--prio-critical); }
+  .prio-toggle.active[data-priority="Major"] { background: var(--prio-major); border-color: var(--prio-major); }
+  .prio-toggle.active[data-priority="Medium"] { background: var(--prio-medium); border-color: var(--prio-medium); }
+  .prio-toggle.active[data-priority="Minor"] { background: var(--prio-minor); border-color: var(--prio-minor); }
+
+  /* Search box (T-0042): shares the .tf-btn look (mono font, theme surface/
+     border/colors) with the type filter so both read as one "filtering"
+     cluster, but needs its own overrides since it holds free-form typed text
+     rather than a short fixed label. The extra margin-right pulls #export-excel
+     visually away, marking it as the separate, non-filter action. */
+  .search-input {
+    text-transform: none; letter-spacing: normal; cursor: text;
+    width: 200px; margin-right: 14px;
+  }
+  .search-input::placeholder { color: var(--muted); }
+  .search-input:focus { outline: none; border-color: var(--st-open); color: var(--text); }
+  /* Native WebKit clear ("x") button on type=search inputs - recolor to match theme. */
+  .search-input::-webkit-search-cancel-button { filter: grayscale(1); opacity: .7; }
+
+  #lang-toggle { margin-left: auto; }
+  #theme-toggle { font-size: 13px; line-height: 1; padding: 3px 8px 2px; }
+
+  /* #lang-toggle is a <select>, not a <button>: reset UA chrome and re-apply
+     .tf-btn look explicitly so browser default select styling can't win. */
+  select#lang-toggle {
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 20px 2px 9px; cursor: pointer;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  select#lang-toggle:hover { border-color: #2E3945; color: var(--text); }
+
+  /* ---- board ----
+     Vertical scroll lives inside each column's .cards box (T-0043), not on
+     `main` anymore: `main` keeps overflow:auto so it can still scroll
+     vertically for the done/cancelled strips below the board (and
+     horizontally when .board's min-width exceeds the viewport), but with
+     hundreds of cards in a single column the board itself no longer forces
+     that scroll - only the offending column's .cards grows a scrollbar. */
+  main { flex: 1; overflow: auto; padding: 16px 20px 28px; }
+  .board {
+    display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr));
+    gap: 14px; align-items: start; min-width: 1140px;
+  }
+  .col-head {
+    font: 600 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em;
+    padding: 4px 2px 10px; display: flex; align-items: baseline; gap: 7px;
+    position: sticky; top: -16px; background: var(--bg); z-index: 1;
+  }
+  .col-head .hash { color: var(--muted); font-weight: 400; }
+  .col-head .count { color: var(--muted); font-weight: 400; margin-left: auto; }
+  .col { display: flex; flex-direction: column; }
+  .cards { display: flex; flex-direction: column; gap: 8px; min-height: 20px; }
+  /* Scoped to board columns (not `.strip .cards`, which keeps scrolling with
+     the page as before). max-height (not height) is load-bearing: it caps
+     tall columns without stretching short/empty ones, so a nearly-empty
+     column still shrinks to its content instead of showing a scrollbar or
+     dead space. The subtracted amount is header + main's top padding +
+     .col-head, plus a bit of breathing room, so the header and all 5
+     column titles stay on screen without scrolling `main`. */
+  .col .cards {
+    max-height: calc(100vh - 200px);
+    overflow-y: auto;
+    /* keep the scrollbar itself theme-aware instead of hardcoding colors */
+    scrollbar-color: var(--border) transparent;
+  }
+  .col .cards::-webkit-scrollbar { width: 9px; }
+  .col .cards::-webkit-scrollbar-track { background: transparent; }
+  .col .cards::-webkit-scrollbar-thumb { background-color: var(--border); border-radius: 5px; border: 2px solid var(--bg); }
+  .col .cards::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--muted); border-radius: 6px;
+    padding: 9px 11px 8px; cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  .card[draggable="true"] { cursor: grab; }
+  .card:hover, .card:focus-visible { background: var(--surface-2); outline: none; border-color: #2E3945; }
+  .card:focus-visible { box-shadow: 0 0 0 2px var(--st-open); }
+  .card .top { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+  .id { font: 500 11.5px var(--mono); color: var(--muted); background: var(--surface-inset); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+  .prio { font: 700 10px var(--mono); border-radius: 4px; padding: 2px 5px 1px; color: var(--chip-ink); }
+  .prio.Blocker { background: var(--prio-blocker); } .prio.Critical { background: var(--prio-critical); }
+  .prio.Major { background: var(--prio-major); } .prio.Medium { background: var(--prio-medium); }
+  .prio.Minor { background: var(--prio-minor); color: #DCE3EB; }
+  .tag-bug { font: 600 10px var(--mono); color: var(--p0); border: 1px solid color-mix(in srgb, var(--p0) 50%, transparent); border-radius: 4px; padding: 1px 5px; }
+  .card .title { font-size: 13.5px; font-weight: 500; }
+  .card.closed-task .title { color: var(--muted); }
+  .card .foot { display: flex; gap: 10px; margin-top: 7px; font: 11px var(--mono); color: var(--muted); }
+
+  /* done / cancelled strips */
+  .strip { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 10px; min-width: 1140px; }
+  /* "available target" - shown for the whole drag, weaker than the hover state below */
+  .strip.drag-available { outline: 1px dashed color-mix(in srgb, var(--st-cancelled) 45%, transparent); border-radius: 6px; }
+  .strip.drop-target { outline: 2px dashed var(--st-cancelled); outline-offset: 4px; border-radius: 6px; }
+  .strip summary {
+    cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 7px;
+    font: 600 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; padding: 4px 2px 10px;
+  }
+  .strip summary::-webkit-details-marker { display: none; }
+  .strip summary .chev { color: var(--muted); transition: transform .15s; display: inline-block; }
+  .strip[open] summary .chev { transform: rotate(90deg); }
+  .strip .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+
+  /* ---- modals ---- */
+  .overlay {
+    position: fixed; inset: 0; background: var(--overlay);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 7vh 16px 16px; z-index: 10;
+  }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    width: min(720px, 100%); max-height: 84vh; overflow: auto; padding: 20px 24px 22px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.5);
+  }
+  /* The panel takes focus (tabindex="-1") when a dialog opens; suppress the
+     focus ring on the container itself - inner controls keep their own. */
+  .panel:focus { outline: none; }
+  .panel .head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 8px; }
+  .panel h2 { font-size: 17px; font-weight: 600; margin: 2px 0 14px; }
+  .status-chip { font: 600 10.5px var(--mono); text-transform: uppercase; letter-spacing: .06em; border-radius: 4px; padding: 3px 7px 2px; color: var(--chip-ink); }
+  .meta { display: grid; grid-template-columns: 120px 1fr; gap: 5px 12px; font-size: 13px; margin-bottom: 14px; }
+  .meta dt { color: var(--muted); font: 12px var(--mono); padding-top: 1px; }
+  .brief-link {
+    font: 500 12px var(--mono); color: var(--st-open); background: var(--surface-inset);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px;
+    cursor: pointer; margin: 0 6px 4px 0; display: inline-block;
+  }
+  .brief-link:hover { border-color: var(--st-open); }
+  .desc { border-top: 1px solid var(--border); padding-top: 12px; font-size: 13.5px; }
+  .desc h1, .desc h2, .desc h3 { font-size: 13px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 14px 0 6px; }
+  .desc p { margin: 6px 0; } .desc ul { margin: 6px 0 6px 20px; }
+  .desc code { font: 12.5px var(--mono); background: var(--surface-inset); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .desc pre { background: var(--surface-inset); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; overflow: auto; margin: 8px 0; }
+  .desc pre code { border: 0; padding: 0; background: none; }
+  .hint { margin-top: 16px; font: 11px var(--mono); color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>agentboard <span class="path">· doc/backlog.md</span></h1>
+  <div class="type-filter" id="type-filter">
+    <button class="tf-btn active" data-type="all">All</button>
+    <button class="tf-btn" data-type="feature">Feature</button>
+    <button class="tf-btn" data-type="bug">Bug</button>
+  </div>
+  <div class="priority-filter" id="priority-filter">
+    <button class="prio-toggle" data-priority="Blocker" title="Blocker">⛔</button>
+    <button class="prio-toggle" data-priority="Critical" title="Critical">▲</button>
+    <button class="prio-toggle" data-priority="Major" title="Major">◆</button>
+    <button class="prio-toggle" data-priority="Medium" title="Medium">●</button>
+    <button class="prio-toggle" data-priority="Minor" title="Minor">▽</button>
+  </div>
+  <input type="search" id="search-filter" class="tf-btn search-input" placeholder="">
+  <button id="export-excel" class="tf-btn" type="button">Export Excel</button>
+  <select id="lang-toggle" class="tf-btn">
+    <option value="en">English</option>
+    <option value="ru">Русский</option>
+    <option value="ja">日本語</option>
+  </select>
+  <button id="theme-toggle" class="tf-btn" type="button"><span id="theme-icon" aria-hidden="true"></span></button>
+  <div id="live"><span class="dot"></span><span id="live-text">live</span></div>
+</header>
+<main>
+  <div class="board" id="board"></div>
+  <details class="strip" id="strip-done"></details>
+  <details class="strip" id="strip-cancelled"></details>
+</main>
+
+<script>
+'use strict';
+
+// ---------- i18n ----------
+// Flat key -> string dictionaries per language. UI chrome only: task titles,
+// descriptions and brief markdown are user content and are never translated.
+const I18N = {
+  en: {
+    filter_all: 'All', filter_feature: 'Feature', filter_bug: 'Bug', tag_bug: 'bug',
+    status_backlog: 'Backlog', status_open: 'Open', status_ready: 'Ready to work',
+    status_in_progress: 'In Progress', status_review: 'Review', status_done: 'Done',
+    status_done_plural: 'Completed', status_cancelled: 'Cancelled', status_cancelled_plural: 'Cancelled',
+    created_label: 'created', closed_label: 'closed', briefs_label: 'briefs',
+    empty_list: 'empty', empty_desc: 'no description', empty_briefs: 'none',
+    hint_close: 'esc — close', brief_loading: 'Loading brief…', brief_error: 'error',
+    brief_unavailable: 'Server unavailable', meta_type: 'type', meta_status: 'status',
+    meta_created: 'created', meta_closed: 'closed', meta_briefs: 'briefs',
+    lang_switch_title: 'Switch language', reconnecting: 'reconnecting…',
+    export_button: 'Export Excel', xlsx_col_id: 'ID', xlsx_col_priority: 'Priority', xlsx_col_title: 'Title',
+    xlsx_col_description: 'Description', xlsx_col_brief: 'Brief', xlsx_col_status: 'Status',
+    xlsx_col_created: 'Created', xlsx_col_closed: 'Closed',
+    confirm_cancel: 'Cancel task {id} "{title}"?', cancel_failed: 'Failed to cancel the task',
+    search_placeholder: 'Search title/description…',
+    theme_toggle_to_light: 'Switch to light theme', theme_toggle_to_dark: 'Switch to dark theme',
+  },
+  ru: {
+    filter_all: 'Все', filter_feature: 'Фича', filter_bug: 'Баг', tag_bug: 'баг',
+    status_backlog: 'Бэклог', status_open: 'Открыта', status_ready: 'Готова к работе',
+    status_in_progress: 'В работе', status_review: 'Ревью', status_done: 'Завершена',
+    status_done_plural: 'Завершённые', status_cancelled: 'Отменена', status_cancelled_plural: 'Отменённые',
+    created_label: 'созд.', closed_label: 'закр.', briefs_label: 'брифы',
+    empty_list: 'пусто', empty_desc: 'без описания', empty_briefs: 'нет',
+    hint_close: 'esc — закрыть', brief_loading: 'Загрузка брифа…', brief_error: 'ошибка',
+    brief_unavailable: 'Сервер недоступен', meta_type: 'тип', meta_status: 'статус',
+    meta_created: 'создана', meta_closed: 'закрыта', meta_briefs: 'брифы',
+    lang_switch_title: 'Сменить язык', reconnecting: 'переподключение…',
+    export_button: 'Экспорт Excel', xlsx_col_id: 'ID', xlsx_col_priority: 'Приоритет', xlsx_col_title: 'Заголовок',
+    xlsx_col_description: 'Описание', xlsx_col_brief: 'Бриф', xlsx_col_status: 'Статус',
+    xlsx_col_created: 'Дата создания', xlsx_col_closed: 'Дата завершения',
+    confirm_cancel: 'Отменить задачу {id} «{title}»?', cancel_failed: 'Не удалось отменить задачу',
+    search_placeholder: 'Поиск по названию/описанию…',
+    theme_toggle_to_light: 'Переключить на светлую тему', theme_toggle_to_dark: 'Переключить на тёмную тему',
+  },
+  ja: {
+    filter_all: 'すべて', filter_feature: '機能', filter_bug: 'バグ', tag_bug: 'バグ',
+    status_backlog: 'バックログ', status_open: 'オープン', status_ready: '着手可能',
+    status_in_progress: '作業中', status_review: 'レビュー', status_done: '完了',
+    status_done_plural: '完了済み', status_cancelled: 'キャンセル', status_cancelled_plural: 'キャンセル済み',
+    created_label: '作成', closed_label: '終了', briefs_label: 'ブリーフ',
+    empty_list: 'なし', empty_desc: '説明なし', empty_briefs: 'なし',
+    hint_close: 'esc — 閉じる', brief_loading: 'ブリーフを読み込み中…', brief_error: 'エラー',
+    brief_unavailable: 'サーバーに接続できません', meta_type: '種類', meta_status: 'ステータス',
+    meta_created: '作成日', meta_closed: '終了日', meta_briefs: 'ブリーフ',
+    lang_switch_title: '言語を切り替え', reconnecting: '再接続中…',
+    export_button: 'Excelエクスポート', xlsx_col_id: 'ID', xlsx_col_priority: '優先度', xlsx_col_title: 'タイトル',
+    xlsx_col_description: '説明', xlsx_col_brief: 'ブリーフ', xlsx_col_status: 'ステータス',
+    xlsx_col_created: '作成日時', xlsx_col_closed: '終了日時',
+    confirm_cancel: 'タスク {id}「{title}」をキャンセルしますか?', cancel_failed: 'タスクのキャンセルに失敗しました',
+    search_placeholder: 'タイトル・説明を検索…',
+    theme_toggle_to_light: 'ライトテーマに切り替え', theme_toggle_to_dark: 'ダークテーマに切り替え',
+  },
+};
+// Default is always 'en' when nothing is stored - unlike the theme, language
+// is never inferred from the browser/OS, only from an explicit user choice.
+let lang = localStorage.getItem('lang') || 'en';
+function t(key) {
+  return (I18N[lang] && I18N[lang][key]) ?? I18N.en[key];
+}
+
+// ---------- status metadata ----------
+// Colors are theme tokens (language-independent). Labels are looked up live
+// via t() so they follow the current language instead of being frozen at
+// object-creation time.
+const STATUS_COLOR = {
+  backlog: 'var(--st-backlog)', open: 'var(--st-open)', ready: 'var(--st-ready)',
+  in_progress: 'var(--st-in_progress)', review: 'var(--st-review)',
+  done: 'var(--st-done)', cancelled: 'var(--st-cancelled)',
+};
+const STATUS_LABEL_KEY = {
+  backlog: 'status_backlog', open: 'status_open', ready: 'status_ready',
+  in_progress: 'status_in_progress', review: 'status_review',
+  done: 'status_done', cancelled: 'status_cancelled',
+};
+// Direct key-based lookup for the done/cancelled strip headings - deliberately
+// not a string comparison against a translated label (that breaks on any
+// language other than the one it was written for).
+const STATUS_STRIP_LABEL_KEY = { done: 'status_done_plural', cancelled: 'status_cancelled_plural' };
+function statusLabel(st) { return t(STATUS_LABEL_KEY[st]); }
+
+const ACTIVE = ['backlog', 'open', 'ready', 'in_progress', 'review'];
+const PRIO_ORDER = { Blocker: 0, Critical: 1, Major: 2, Medium: 3, Minor: 4 };
+const PRIO_ICON = { Blocker: '⛔', Critical: '▲', Major: '◆', Medium: '●', Minor: '▽' };
+// Only tasks not yet "in active work" can be dragged onto the Cancelled strip
+// (see doc/brief/T-0017-01-drag-cancel.md) - literally backlog/open, nothing else.
+const DRAG_CANCELLABLE = ['backlog', 'open'];
+
+let tasks = [];
+let typeFilter = 'all'; // 'all' | 'feature' | 'bug'
+let searchQuery = ''; // free-text filter (T-0042), combined with typeFilter by AND
+let priorityFilter = new Set(); // multi-select priority filter (T-0044); empty = inactive (all priorities shown)
+const modals = []; // stack for Esc handling
+
+// Applies typeFilter first (as before), then - if searchQuery is non-empty -
+// narrows further by a case-insensitive substring match against title,
+// description or id, then - if priorityFilter is non-empty - narrows to only
+// the selected priorities. All three filters combine by AND: each step only
+// narrows the current list, it never widens it back.
+function filteredTasks() {
+  const byType = typeFilter === 'all' ? tasks : tasks.filter((task) => task.type === typeFilter);
+  const q = searchQuery.toLowerCase();
+  const byText = !searchQuery ? byType : byType.filter((task) =>
+    String(task.title || '').toLowerCase().includes(q) ||
+    String(task.description || '').toLowerCase().includes(q) ||
+    String(task.id || '').toLowerCase().includes(q)
+  );
+  if (priorityFilter.size === 0) return byText;
+  return byText.filter((task) => priorityFilter.has(task.priority));
+}
+
+// ---------- tiny markdown renderer (safe: escapes HTML first) ----------
+function esc(s) {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function md(src) {
+  const blocks = esc(src).split(/```/);
+  let out = '';
+  blocks.forEach((block, i) => {
+    if (i % 2 === 1) { out += '<pre><code>' + block.replace(/^\w*\n/, '') + '</code></pre>'; return; }
+    const lines = block.split('\n');
+    let inList = false, html = '';
+    for (let line of lines) {
+      line = line
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+      const h = line.match(/^(#{1,3}) (.+)/);
+      const li = line.match(/^\s*- (?:\[([ x])\] )?(.*)/);
+      if (li) {
+        if (!inList) { html += '<ul>'; inList = true; }
+        const box = li[1] === undefined ? '' : (li[1] === 'x' ? '☑ ' : '☐ ');
+        html += '<li>' + box + li[2] + '</li>';
+        continue;
+      }
+      if (inList) { html += '</ul>'; inList = false; }
+      if (h) { html += `<h${h[1].length}>${h[2]}</h${h[1].length}>`; }
+      else if (line.trim()) { html += '<p>' + line + '</p>'; }
+    }
+    if (inList) html += '</ul>';
+    out += html;
+  });
+  return out;
+}
+
+// ---------- rendering ----------
+function sortTasks(list, byClosed) {
+  return [...list].sort((a, b) =>
+    byClosed
+      ? (b.closed || '').localeCompare(a.closed || '')
+      : (PRIO_ORDER[a.priority] - PRIO_ORDER[b.priority]) || a.created.localeCompare(b.created)
+  );
+}
+
+function cardEl(task) {
+  const div = document.createElement('div');
+  div.className = 'card' + (task.status === 'done' || task.status === 'cancelled' ? ' closed-task' : '');
+  div.style.borderLeftColor = STATUS_COLOR[task.status];
+  div.tabIndex = 0;
+  div.dataset.id = task.id; // stable key for focus restore across re-render (T-0048)
+  div.innerHTML = `
+    <div class="top">
+      <span class="id">${task.id}</span>
+      <span class="prio ${task.priority}" title="${task.priority}" aria-label="${task.priority}">${PRIO_ICON[task.priority] || task.priority}</span>
+      ${task.type === 'bug' ? `<span class="tag-bug">${t('tag_bug')}</span>` : ''}
+    </div>
+    <div class="title">${esc(task.title)}</div>
+    <div class="foot">
+      <span>${t('created_label')} ${task.created || '—'}</span>
+      ${task.briefs.length ? `<span>${t('briefs_label')}: ${task.briefs.length}</span>` : ''}
+      ${task.closed ? `<span>${t('closed_label')} ${task.closed}</span>` : ''}
+    </div>`;
+  const open = () => openTask(task.id);
+  div.addEventListener('click', open);
+  div.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+  if (DRAG_CANCELLABLE.includes(task.status)) {
+    div.draggable = true;
+    div.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', task.id);
+      e.dataTransfer.effectAllowed = 'move';
+      cancelStrip.classList.add('drag-available');
+    });
+    // dragend always fires (drop, Esc cancel, or release outside any target),
+    // so it's the reliable place to clear both highlight states - this is a
+    // safety net in case dragleave didn't fire for some reason (e.g. the
+    // drag was cancelled while the window lost focus).
+    div.addEventListener('dragend', () => {
+      cancelStrip.classList.remove('drag-available');
+      cancelStrip.classList.remove('drop-target');
+    });
+  }
+  // Signature of the task fields this node was built from, so the incremental
+  // renderer (T-0068) can tell whether an existing node can be reused as-is.
+  div._sig = cardSig(task);
+  return div;
+}
+
+// Persistent board structure (T-0068). The columns, their `.cards` scroll
+// containers and the strip summaries are built once and then reused across every
+// SSE `changed`. Earlier render() tore the whole board down with innerHTML='' on
+// each event, which recreated every card node (expensive on large backlogs) and
+// snapped each column's independent scroll (T-0043) back to the top - T-0048
+// then captured/restored scroll and focus around that teardown. Keeping the
+// containers alive makes both problems disappear: card nodes are diffed in place
+// (see reconcileCards) and column scroll survives naturally because the
+// scrollable element itself is never replaced.
+let scrollContainers = {}; // status key -> live `.cards` container
+let columnHeads = {};      // status key -> active-column `.col-head` element
+let stripSummaries = {};   // status key -> done/cancelled strip <summary> element
+let boardBuilt = false;
+
+// Builds the static board skeleton once: five active columns (head + cards) and
+// the done/cancelled strips (summary + cards). Each per-status `.cards` container
+// carries a stable data-status key and is cached, so later renders update its
+// contents in place without ever recreating the scrollable element.
+function buildBoardStructure() {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  scrollContainers = {};
+  columnHeads = {};
+  stripSummaries = {};
+  for (const st of ACTIVE) {
+    const col = document.createElement('div');
+    col.className = 'col';
+    const head = document.createElement('div');
+    head.className = 'col-head';
+    head.style.color = STATUS_COLOR[st];
+    const cards = document.createElement('div');
+    cards.className = 'cards';
+    cards.dataset.status = st; // stable key for scroll + diff across re-render
+    col.appendChild(head);
+    col.appendChild(cards);
+    board.appendChild(col);
+    columnHeads[st] = head;
+    scrollContainers[st] = cards;
+  }
+  for (const st of ['done', 'cancelled']) {
+    const strip = document.getElementById('strip-' + st);
+    strip.innerHTML = '';
+    const summary = document.createElement('summary');
+    summary.style.color = STATUS_COLOR[st];
+    const cards = document.createElement('div');
+    cards.className = 'cards';
+    cards.dataset.status = st;
+    strip.appendChild(summary);
+    strip.appendChild(cards);
+    stripSummaries[st] = summary;
+    scrollContainers[st] = cards;
+  }
+  boardBuilt = true;
+}
+
+// A compact signature of every task field the card DOM depends on (including the
+// active language, since a few card labels are translated). Two renders with an
+// equal signature can safely reuse the same card node; any difference forces a
+// fresh node so the card's content stays correct.
+function cardSig(task) {
+  return [
+    task.id, task.priority, task.type, task.status,
+    task.created, task.closed, (task.briefs || []).length, task.title, lang,
+  ].join('\u0001');
+}
+
+// True when `container`'s current children are exactly `desired`, same order.
+function sameChildren(children, desired) {
+  if (children.length !== desired.length) return false;
+  for (let i = 0; i < desired.length; i++) {
+    if (children[i] !== desired[i]) return false;
+  }
+  return true;
+}
+
+// Reconciles the card nodes inside `container` to match `list` (already sorted):
+// reuses an existing node when a task with the same id is unchanged (same
+// signature), builds a fresh node otherwise, and drops nodes whose task is gone.
+// Returns the node whose task id equals `focusId` when it lives in this
+// container (else null), so render() can restore keyboard focus to it.
+function reconcileCards(container, list, focusId) {
+  // Index reusable nodes from the previous render by their stable data-id key.
+  const existing = new Map();
+  for (const child of container.children) {
+    if (child.dataset && child.dataset.id) existing.set(child.dataset.id, child);
+  }
+  let focusNode = null;
+  const desired = list.map((task) => {
+    const prev = existing.get(task.id);
+    const node = prev && prev._sig === cardSig(task) ? prev : cardEl(task);
+    if (task.id === focusId) focusNode = node;
+    return node;
+  });
+  // Fast path: an unaffected column keeps its exact node set/order untouched.
+  if (desired.length && sameChildren(container.children, desired)) return focusNode;
+  // Detach all current children first (removeChild works on both the real DOM
+  // and the tests' fake DOM), then re-append the desired nodes in order. Reused
+  // nodes keep their identity across this move; only genuinely changed cards were
+  // rebuilt above, so unchanged cards are never recreated.
+  while (container.children.length) container.removeChild(container.children[0]);
+  if (!desired.length) {
+    container.innerHTML = `<div class="empty" style="font-size:12px">${t('empty_list')}</div>`;
+  } else {
+    container.innerHTML = ''; // clear any leftover empty placeholder from before
+    for (const node of desired) container.appendChild(node);
+  }
+  return focusNode;
+}
+
+// If a card (or something inside it) currently holds focus, return its task id
+// so the reconciled board can restore keyboard focus to the same card. (T-0048)
+function focusedCardId() {
+  const active = document.activeElement;
+  const card = active && active.closest ? active.closest('.card') : null;
+  return card ? card.dataset.id : null;
+}
+
+function render() {
+  // Preserve card focus across the in-place reconcile (T-0048). Column scroll is
+  // preserved for free now that the containers are never torn down (T-0068).
+  const focusId = focusedCardId();
+  let cardToFocus = null;
+
+  const list = filteredTasks();
+  if (!boardBuilt) buildBoardStructure();
+
+  for (const st of ACTIVE) {
+    const inCol = sortTasks(list.filter((task) => task.status === st));
+    // The head text (count + translated label) is cheap to refresh every render.
+    columnHeads[st].innerHTML = `<span class="hash">##</span> ${statusLabel(st)}
+        <span class="count">${inCol.length}</span>`;
+    const f = reconcileCards(scrollContainers[st], inCol, focusId);
+    if (f) cardToFocus = f;
+  }
+  for (const st of ['done', 'cancelled']) {
+    const inStrip = sortTasks(list.filter((task) => task.status === st), true);
+    stripSummaries[st].innerHTML = `<span class="chev">›</span><span class="hash" style="color:var(--muted)">##</span>
+        ${t(STATUS_STRIP_LABEL_KEY[st])}
+        <span class="count" style="color:var(--muted);font-weight:400">${inStrip.length}</span>`;
+    const f = reconcileCards(scrollContainers[st], inStrip, focusId);
+    if (f) cardToFocus = f;
+  }
+
+  // Return focus to the same card if it still exists; preventScroll keeps the
+  // preserved column scroll from being nudged by the focus call.
+  if (cardToFocus) cardToFocus.focus({ preventScroll: true });
+}
+
+// ---------- modals ----------
+// Elements matching this are considered keyboard-focusable inside a dialog; used
+// for the initial focus target and the Tab/Shift+Tab focus-trap.
+const FOCUSABLE_SEL =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+  'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+let modalTitleSeq = 0; // makes aria-labelledby ids unique per opened dialog
+
+// Background page chrome that must be inert while any dialog is open, so the
+// board underneath is neither reachable by Tab nor announced by screen readers.
+function backgroundRegions() {
+  return [document.querySelector('header'), document.querySelector('main')].filter(Boolean);
+}
+
+function setInert(el, on) {
+  if (!el) return;
+  if (on) {
+    el.setAttribute('inert', '');
+    el.setAttribute('aria-hidden', 'true');
+    el.inert = true;
+  } else {
+    el.removeAttribute('inert');
+    el.removeAttribute('aria-hidden');
+    el.inert = false;
+  }
+}
+
+function focusablesIn(panel) {
+  return Array.prototype.slice
+    .call(panel.querySelectorAll(FOCUSABLE_SEL))
+    .filter((el) => !el.hasAttribute('disabled'));
+}
+
+// Recompute inertness across the whole stack: the page chrome is inert whenever
+// a modal is open, and every overlay except the top one is inert too (so a brief
+// opened over a task leaves the task dimmed and unreachable).
+function refreshModalChrome() {
+  const anyOpen = modals.length > 0;
+  const top = modals[modals.length - 1];
+  for (const el of backgroundRegions()) setInert(el, anyOpen);
+  modals.forEach((overlay) => setInert(overlay, overlay !== top));
+}
+
+// Move focus into a dialog: first focusable element, else the panel itself
+// (which carries tabindex="-1" so it can hold focus without being tabbable).
+function focusIntoModal(overlay) {
+  const panel = overlay.querySelector('.panel');
+  const f = focusablesIn(panel);
+  (f.length ? f[0] : panel).focus();
+}
+
+// Give the dialog an accessible name from its <h2>, if it has one. Best-effort:
+// the brief modal has no <h2>, and openBrief replaces .panel.innerHTML async, so
+// the label may not apply there - the role/aria-modal attributes still do.
+function labelModal(panel) {
+  const h2 = panel.querySelector('h2');
+  if (!h2) return;
+  if (!h2.id) h2.id = 'modal-title-' + ++modalTitleSeq;
+  panel.setAttribute('aria-labelledby', h2.id);
+}
+
+function openModal(innerHTML) {
+  const trigger = document.activeElement; // element to restore focus to on close
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `<div class="panel">${innerHTML}</div>`;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeTop(); });
+  document.body.appendChild(overlay);
+
+  // Set a11y attributes with setAttribute (not in the innerHTML string) so they
+  // survive openBrief replacing .panel.innerHTML after the fetch resolves.
+  const panel = overlay.querySelector('.panel');
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.setAttribute('tabindex', '-1');
+  labelModal(panel);
+
+  overlay._trigger = trigger;
+  modals.push(overlay);
+  refreshModalChrome();
+  focusIntoModal(overlay);
+  return overlay;
+}
+
+function closeTop() {
+  const m = modals.pop();
+  if (!m) return;
+  m.remove();
+  refreshModalChrome();
+  const trigger = m._trigger;
+  if (trigger && typeof trigger.focus === 'function' && document.contains(trigger)) {
+    trigger.focus(); // return focus to the card/element that opened the dialog
+  } else if (modals.length) {
+    focusIntoModal(modals[modals.length - 1]); // fell back to the underlying modal
+  }
+}
+
+// Keep Tab focus cycling within the top dialog (focus-trap).
+function trapTab(e) {
+  const overlay = modals[modals.length - 1];
+  if (!overlay) return;
+  const panel = overlay.querySelector('.panel');
+  const f = focusablesIn(panel);
+  const active = document.activeElement;
+  if (!f.length) {
+    // Nothing focusable inside: hold focus on the panel itself.
+    e.preventDefault();
+    if (active !== panel) panel.focus();
+    return;
+  }
+  const first = f[0];
+  const last = f[f.length - 1];
+  const inside = active === panel || f.indexOf(active) !== -1;
+  if (e.shiftKey) {
+    if (!inside || active === first) { e.preventDefault(); last.focus(); }
+  } else {
+    if (!inside || active === last) { e.preventDefault(); first.focus(); }
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!modals.length) return;
+  if (e.key === 'Escape') closeTop();
+  else if (e.key === 'Tab') trapTab(e);
+});
+
+function openTask(id) {
+  const task = tasks.find((x) => x.id === id);
+  if (!task) return;
+  const color = STATUS_COLOR[task.status];
+  const label = statusLabel(task.status);
+  const overlay = openModal(`
+    <div class="head">
+      <span class="id">${task.id}</span>
+      <span class="prio ${task.priority}" title="${task.priority}" aria-label="${task.priority}">${PRIO_ICON[task.priority] || task.priority}</span>
+      ${task.type === 'bug' ? `<span class="tag-bug">${t('tag_bug')}</span>` : ''}
+      <span class="status-chip" style="background:${color}">${label}</span>
+    </div>
+    <h2>${esc(task.title)}</h2>
+    <dl class="meta">
+      <dt>${t('meta_type')}</dt><dd>${task.type}</dd>
+      <dt>${t('meta_status')}</dt><dd style="color:${color}">${task.status}</dd>
+      <dt>${t('meta_created')}</dt><dd>${task.created || '—'}</dd>
+      <dt>${t('meta_closed')}</dt><dd>${task.closed || '—'}</dd>
+      <dt>${t('meta_briefs')}</dt><dd>${
+        task.briefs.length
+          ? task.briefs.map((b) => `<span class="brief-link" data-brief="${b}">${b}</span>`).join('')
+          : `<span class="empty">${t('empty_briefs')}</span>`
+      }</dd>
+    </dl>
+    <div class="desc">${task.description ? md(task.description) : `<span class="empty">${t('empty_desc')}</span>`}</div>
+    <div class="hint">${t('hint_close')}</div>`);
+  overlay.querySelectorAll('[data-brief]').forEach((el) =>
+    el.addEventListener('click', () => openBrief(el.dataset.brief))
+  );
+}
+
+async function openBrief(briefId) {
+  const overlay = openModal(`<div class="empty">${t('brief_loading')}</div>`);
+  try {
+    const r = await fetch('/api/brief/' + encodeURIComponent(briefId));
+    const data = await r.json();
+    overlay.querySelector('.panel').innerHTML = r.ok
+      ? `<div class="head"><span class="id">${data.file}</span></div>
+         <div class="desc" style="border-top:0;padding-top:4px">${md(data.markdown)}</div>
+         <div class="hint">${t('hint_close')}</div>`
+      : `<div class="empty">${esc(data.error || t('brief_error'))}</div>`;
+  } catch {
+    overlay.querySelector('.panel').innerHTML = `<div class="empty">${t('brief_unavailable')}</div>`;
+  }
+}
+
+// ---------- theme toggle ----------
+// The icon/label shown is the theme the click would switch TO (the target),
+// so the button always advertises the action it performs.
+const THEME_TARGET_ICON = { dark: '☀', light: '☾' }; // dark -> sun (switch to light), light -> moon (switch to dark)
+
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+function paintThemeButton() {
+  const theme = currentTheme();
+  // Target = the theme the click would switch TO; the label is looked up live
+  // via t() so it follows the current UI language instead of being hardcoded.
+  const target = theme === 'dark' ? 'light' : 'dark';
+  const btn = document.getElementById('theme-toggle');
+  const label = t('theme_toggle_to_' + target);
+  document.getElementById('theme-icon').textContent = THEME_TARGET_ICON[theme];
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+}
+function toggleTheme() {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('theme', next); } catch (e) { /* storage unavailable, non-fatal */ }
+  paintThemeButton();
+}
+document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+paintThemeButton();
+
+// ---------- language toggle ----------
+// Updates the static header labels that live outside render() - the type
+// filter chips, the language select, and (when currently offline)
+// the live/reconnect indicator. Called once at load and again on every
+// language switch.
+function applyStaticLabels() {
+  document.querySelector('[data-type="all"]').textContent = t('filter_all');
+  document.querySelector('[data-type="feature"]').textContent = t('filter_feature');
+  document.querySelector('[data-type="bug"]').textContent = t('filter_bug');
+  document.getElementById('export-excel').textContent = t('export_button');
+  document.getElementById('search-filter').placeholder = t('search_placeholder');
+  const langSelect = document.getElementById('lang-toggle');
+  langSelect.value = lang;
+  const langTitle = t('lang_switch_title');
+  langSelect.title = langTitle;
+  langSelect.setAttribute('aria-label', langTitle);
+  const live = document.getElementById('live');
+  if (live.classList.contains('off')) {
+    document.getElementById('live-text').textContent = t('reconnecting');
+  }
+  // Refresh the theme button title/aria-label so it follows the current language.
+  paintThemeButton();
+}
+function setLang(next) {
+  lang = next;
+  // Keep the <html lang> attribute in sync so screen readers, browser
+  // typography/hyphenation and translation heuristics see the real UI language.
+  document.documentElement.lang = lang;
+  try { localStorage.setItem('lang', lang); } catch (e) { /* storage unavailable, non-fatal */ }
+  applyStaticLabels();
+  render();
+}
+document.getElementById('lang-toggle').addEventListener('change', (e) => setLang(e.target.value));
+// Apply the language resolved at load (default 'en' or the stored choice) to the
+// <html lang> attribute, matching what setLang() does on every later switch.
+document.documentElement.lang = lang;
+applyStaticLabels();
+
+// ---------- type filter ----------
+document.getElementById('type-filter').addEventListener('click', (e) => {
+  const btn = e.target.closest('.tf-btn');
+  if (!btn) return;
+  typeFilter = btn.dataset.type;
+  document.querySelectorAll('.tf-btn').forEach((b) => b.classList.toggle('active', b === btn));
+  render();
+});
+
+// ---------- priority filter (T-0044) ----------
+// Unlike the type filter above, this is multi-select: each button toggles
+// only its own priority in/out of `priorityFilter`, independently of the
+// others (checkbox semantics, not radio-button semantics).
+document.getElementById('priority-filter').addEventListener('click', (e) => {
+  const btn = e.target.closest('.prio-toggle');
+  if (!btn) return;
+  const prio = btn.dataset.priority;
+  if (priorityFilter.has(prio)) priorityFilter.delete(prio);
+  else priorityFilter.add(prio);
+  btn.classList.toggle('active', priorityFilter.has(prio));
+  render();
+});
+
+// ---------- text search filter (T-0042) ----------
+// `input` (not `change`) so filtering happens on every keystroke, without
+// waiting for blur. No debounce: filtering an in-memory array is cheap.
+document.getElementById('search-filter').addEventListener('input', (e) => {
+  searchQuery = e.target.value;
+  render();
+});
+
+// ---------- XLSX export ----------
+// Generates a real .xlsx file (ZIP container + minimal OOXML) from scratch,
+// with zero dependencies. This replaces the earlier CSV/TXT heuristics, which
+// relied on guessing how desktop Excel detects the column separator/encoding
+// of a text file - a real .xlsx is parsed by Excel's native OOXML reader, so
+// column splitting is deterministic regardless of locale/version/settings.
+
+// CRC-32 (IEEE 802.3, polynomial 0xEDB88320), table-driven. Used by the ZIP
+// writer: computed over the raw (uncompressed) bytes of each part.
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+function crc32(bytes) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Escapes XML special characters for use inside a text node or attribute, and
+// strips control characters that are not valid in XML 1.0 (they may appear in
+// task descriptions and would make the file corrupt). Kept characters: \t \n
+// \r and everything >= \x20.
+function xmlEscape(value) {
+  const s = String(value ?? '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// Column letter for a zero-based index (0 -> A, 1 -> B, ...). Only single
+// letters A-Z are needed here (8 columns), so no need to handle indices > 25.
+function colLetter(n) {
+  return String.fromCharCode(65 + n);
+}
+
+// The 6 static XLSX parts (everything except the worksheet, which is dynamic).
+const XLSX_CONTENT_TYPES =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n' +
+  '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n' +
+  '<Default Extension="xml" ContentType="application/xml"/>\n' +
+  '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>\n' +
+  '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>\n' +
+  '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>\n' +
+  '</Types>';
+const XLSX_ROOT_RELS =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n' +
+  '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\n' +
+  '</Relationships>';
+const XLSX_WORKBOOK =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\n' +
+  '<sheets><sheet name="Tasks" sheetId="1" r:id="rId1"/></sheets>\n' +
+  '</workbook>';
+const XLSX_WORKBOOK_RELS =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n' +
+  '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>\n' +
+  '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n' +
+  '</Relationships>';
+const XLSX_STYLES =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+  '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">\n' +
+  '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>\n' +
+  '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>\n' +
+  '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>\n' +
+  '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>\n' +
+  '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>\n' +
+  '</styleSheet>';
+
+// Builds xl/worksheets/sheet1.xml from ALL tasks regardless of the active type
+// filter - this is a full backlog dump, not a snapshot of the current board
+// view. Columns and getters mirror the previous CSV version (8 columns, same
+// order); only the row backend changed from CSV to inline-string XML cells.
+function buildSheetXml() {
+  const columns = [
+    ['xlsx_col_id', (task) => task.id],
+    ['xlsx_col_priority', (task) => task.priority],
+    ['xlsx_col_title', (task) => task.title],
+    ['xlsx_col_description', (task) => task.description || ''],
+    ['xlsx_col_brief', (task) => (task.briefs || []).join(', ')],
+    ['xlsx_col_status', (task) => statusLabel(task.status)],
+    ['xlsx_col_created', (task) => task.created || ''],
+    ['xlsx_col_closed', (task) => task.closed || ''],
+  ];
+  const cell = (colIdx, rowNum, value) =>
+    `<c r="${colLetter(colIdx)}${rowNum}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+  const rowsXml = [];
+  // Header row (row 1).
+  rowsXml.push(
+    `<row r="1">${columns.map(([key], i) => cell(i, 1, t(key))).join('')}</row>`
+  );
+  // Data rows (row 2..N).
+  tasks.forEach((task, idx) => {
+    const rowNum = idx + 2;
+    const cells = columns.map(([, get], i) => cell(i, rowNum, get(task))).join('');
+    rowsXml.push(`<row r="${rowNum}">${cells}</row>`);
+  });
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">\n' +
+    '<sheetData>\n' + rowsXml.join('\n') + '\n</sheetData>\n' +
+    '</worksheet>';
+}
+
+// Packs the given parts into a ZIP archive (stored method, no compression -
+// avoids implementing DEFLATE) built from scratch: one local file header +
+// data per part, then the central directory, then the end-of-central-directory
+// record. Returns a Uint8Array of the whole archive.
+// Each file is { name: string, data: Uint8Array }.
+function buildZip(files) {
+  const encoder = new TextEncoder();
+  const now = new Date();
+  // DOS date/time packing for the last-modified fields.
+  const dosTime = ((now.getHours() & 0x1F) << 11) |
+    ((now.getMinutes() & 0x3F) << 5) |
+    ((now.getSeconds() >> 1) & 0x1F);
+  const dosDate = (((now.getFullYear() - 1980) & 0x7F) << 9) |
+    (((now.getMonth() + 1) & 0x0F) << 5) |
+    (now.getDate() & 0x1F);
+
+  const localChunks = [];   // bytes of local headers + data, in order
+  const centralChunks = []; // bytes of central directory records
+  let offset = 0;           // running offset of the next local header
+
+  const entries = files.map((file) => {
+    const nameBytes = encoder.encode(file.name);
+    const crc = crc32(file.data);
+    const size = file.data.length;
+
+    // Local file header (30 bytes fixed + name + extra=0).
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);     // signature PK\x03\x04
+    lv.setUint16(4, 20, true);             // version needed to extract
+    lv.setUint16(6, 0, true);              // flags
+    lv.setUint16(8, 0, true);              // method = 0 (stored)
+    lv.setUint16(10, dosTime, true);       // last mod time
+    lv.setUint16(12, dosDate, true);       // last mod date
+    lv.setUint32(14, crc, true);           // CRC-32
+    lv.setUint32(18, size, true);          // compressed size
+    lv.setUint32(22, size, true);          // uncompressed size
+    lv.setUint16(26, nameBytes.length, true); // file name length
+    lv.setUint16(28, 0, true);             // extra field length
+    local.set(nameBytes, 30);
+
+    localChunks.push(local, file.data);
+    const localHeaderOffset = offset;
+    offset += local.length + file.data.length;
+    return { nameBytes, crc, size, localHeaderOffset };
+  });
+
+  let centralSize = 0;
+  entries.forEach((e) => {
+    // Central directory record (46 bytes fixed + name + extra=0 + comment=0).
+    const central = new Uint8Array(46 + e.nameBytes.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);     // signature PK\x01\x02
+    cv.setUint16(4, 20, true);             // version made by
+    cv.setUint16(6, 20, true);             // version needed to extract
+    cv.setUint16(8, 0, true);              // flags
+    cv.setUint16(10, 0, true);             // method = 0 (stored)
+    cv.setUint16(12, dosTime, true);       // last mod time
+    cv.setUint16(14, dosDate, true);       // last mod date
+    cv.setUint32(16, e.crc, true);         // CRC-32
+    cv.setUint32(20, e.size, true);        // compressed size
+    cv.setUint32(24, e.size, true);        // uncompressed size
+    cv.setUint16(28, e.nameBytes.length, true); // file name length
+    cv.setUint16(30, 0, true);             // extra field length
+    cv.setUint16(32, 0, true);             // file comment length
+    cv.setUint16(34, 0, true);             // disk number start
+    cv.setUint16(36, 0, true);             // internal file attributes
+    cv.setUint32(38, 0, true);             // external file attributes
+    cv.setUint32(42, e.localHeaderOffset, true); // offset of local header
+    central.set(e.nameBytes, 46);
+    centralChunks.push(central);
+    centralSize += central.length;
+  });
+
+  const centralOffset = offset;
+
+  // End of central directory record (22 bytes, no comment).
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);       // signature PK\x05\x06
+  ev.setUint16(4, 0, true);                // disk number
+  ev.setUint16(6, 0, true);                // disk with central directory
+  ev.setUint16(8, entries.length, true);   // entries on this disk
+  ev.setUint16(10, entries.length, true);  // total entries
+  ev.setUint32(12, centralSize, true);     // central directory size
+  ev.setUint32(16, centralOffset, true);   // central directory offset
+  ev.setUint16(20, 0, true);               // comment length
+
+  // Concatenate everything: local chunks, central chunks, EOCD.
+  const totalSize = offset + centralSize + eocd.length;
+  const out = new Uint8Array(totalSize);
+  let pos = 0;
+  for (const chunk of localChunks) { out.set(chunk, pos); pos += chunk.length; }
+  for (const chunk of centralChunks) { out.set(chunk, pos); pos += chunk.length; }
+  out.set(eocd, pos);
+  return out;
+}
+
+// Assembles all 6 XLSX parts (5 static + the dynamic worksheet) and packs them
+// into a ZIP. Returns a Uint8Array of the finished .xlsx.
+function buildXlsx() {
+  const encoder = new TextEncoder();
+  const parts = [
+    { name: '[Content_Types].xml', text: XLSX_CONTENT_TYPES },
+    { name: '_rels/.rels', text: XLSX_ROOT_RELS },
+    { name: 'xl/workbook.xml', text: XLSX_WORKBOOK },
+    { name: 'xl/_rels/workbook.xml.rels', text: XLSX_WORKBOOK_RELS },
+    { name: 'xl/styles.xml', text: XLSX_STYLES },
+    { name: 'xl/worksheets/sheet1.xml', text: buildSheetXml() },
+  ];
+  return buildZip(parts.map((p) => ({ name: p.name, data: encoder.encode(p.text) })));
+}
+function exportXlsx() {
+  const blob = new Blob([buildXlsx()], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const today = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const dateStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `agentboard-tasks-${dateStr}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+document.getElementById('export-excel').addEventListener('click', exportXlsx);
+
+// ---------- drag & drop cancel (backlog/open -> cancelled, T-0017) ----------
+// The strip element itself is static (only its innerHTML is replaced by
+// render()), so listeners are attached once here, not per-render.
+const cancelStrip = document.getElementById('strip-cancelled');
+cancelStrip.addEventListener('dragover', (e) => {
+  e.preventDefault(); // required to allow drop
+  e.dataTransfer.dropEffect = 'move';
+  cancelStrip.classList.add('drop-target');
+});
+cancelStrip.addEventListener('dragleave', () => {
+  cancelStrip.classList.remove('drop-target');
+});
+cancelStrip.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  cancelStrip.classList.remove('drop-target');
+  const id = e.dataTransfer.getData('text/plain');
+  const task = tasks.find((x) => x.id === id);
+  // Client-side check is just a UX guard against a stale drag; the server
+  // re-validates the status itself and is the actual source of truth.
+  if (!task || !DRAG_CANCELLABLE.includes(task.status)) return;
+  const msg = t('confirm_cancel').replace('{id}', task.id).replace('{title}', task.title);
+  if (!confirm(msg)) return;
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
+    if (!r.ok) throw new Error('cancel request failed');
+    // Success: don't touch the DOM here - the existing SSE "changed" event
+    // will fire once the server finishes writing doc/backlog.md, and load()
+    // re-renders the whole board from the fresh data.
+  } catch {
+    alert(t('cancel_failed'));
+  }
+});
+
+// ---------- data + live reload ----------
+async function load() {
+  try {
+    const r = await fetch('/api/board');
+    tasks = (await r.json()).tasks || [];
+    render();
+  } catch { /* server restarting; SSE reconnect will retrigger */ }
+}
+
+function connect() {
+  const es = new EventSource('/events');
+  const live = document.getElementById('live');
+  es.onmessage = (e) => { if (e.data === 'changed') load(); };
+  es.onopen = () => { live.classList.remove('off'); document.getElementById('live-text').textContent = 'live'; load(); };
+  es.onerror = () => { live.classList.add('off'); document.getElementById('live-text').textContent = t('reconnecting'); };
+}
+
+load();
+connect();
+</script>
+</body>
+</html>

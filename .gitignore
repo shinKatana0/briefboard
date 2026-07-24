@@ -1,0 +1,20 @@
+# Dependencies
+node_modules
+
+# Agent worktrees (isolated task branches created by tooling)
+.claude/worktrees/
+
+# Local artifacts
+# tools/task.mjs writes doc/backlog.md.tmp during an atomic save
+*.tmp
+*.log
+# withFileLock creates cross-process lock files (e.g. doc/backlog.md.lock)
+*.lock
+
+# OS clutter
+.DS_Store
+Thumbs.db
+# User task data - the tool tracks YOUR tasks; they are not part of the tool
+doc/backlog.md
+doc/brief/*
+!doc/brief/.gitkeep
