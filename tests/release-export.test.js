@@ -20,8 +20,15 @@ const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 const { removeTree } = require('./helpers/rm.js');
+const { isPublicTree, skipOutsideExport, SEEDED_IGNORE_RULES } = require('./helpers/public-tree.js');
 
 const REAL_SCRIPT = path.join(__dirname, '..', 'tools', 'release-export.mjs');
+
+// The script exports itself out of the public tree, so there is no script to copy
+// there and every case that runs it is skipped (T-0252) — on a positive marker of
+// the public tree; see tests/helpers/public-tree.js for why absence would be the
+// wrong key.
+const SKIP_NO_SCRIPT = skipOutsideExport('tools/release-export.mjs');
 
 const dirs = [];
 
@@ -83,7 +90,7 @@ function exportFrom(root) {
 const has = (dir, rel) => fs.existsSync(path.join(dir, rel));
 
 describe('release-export: the public tree', () => {
-  it('leaves the maintainer\'s task data behind', () => {
+  it('leaves the maintainer\'s task data behind', { skip: SKIP_NO_SCRIPT }, () => {
     const root = makeRepo();
 
     // Guard the fixture: the files below have to be IN the source repo and tracked,
@@ -109,7 +116,7 @@ describe('release-export: the public tree', () => {
     assert.ok(has(outDir, 'doc/brief/.gitkeep'), 'the empty brief dir is not preserved');
   });
 
-  it('seeds a .gitignore that keeps a public user\'s own tasks out of git', () => {
+  it('seeds a .gitignore that keeps a public user\'s own tasks out of git', { skip: SKIP_NO_SCRIPT }, () => {
     const root = makeRepo();
     const { outDir, status, out } = exportFrom(root);
     assert.strictEqual(status, 0, out);
@@ -121,7 +128,7 @@ describe('release-export: the public tree', () => {
     assert.ok(gi.includes('node_modules/'), 'the exported .gitignore lost its own rules');
   });
 
-  it('refuses to write into a non-empty dir', () => {
+  it('refuses to write into a non-empty dir', { skip: SKIP_NO_SCRIPT }, () => {
     const root = makeRepo();
     const outDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-public-')));
     dirs.push(outDir);
@@ -132,5 +139,66 @@ describe('release-export: the public tree', () => {
     });
     assert.notStrictEqual(res.status, 0);
     assert.match(res.stderr, /refusing to write into a non-empty dir/);
+  });
+});
+
+// The marker that decides whether the three cases above run at all (T-0252). It
+// is what stands between "this check does not apply in the public repo" and "this
+// check has quietly stopped running", so it gets tests of its own — and these run
+// in BOTH trees, because a marker nobody checks is the dead guard one level up.
+describe('the public-tree marker', () => {
+  // The one assertion that holds on either side, so neither side can skip it: here
+  // the export script is present and the tree is not public; in the exported tree
+  // the script is gone and it is. Lose release-export.mjs by accident here and this
+  // fails rather than flipping the whole file to skipped.
+  it('agrees with whether this checkout still carries the export script', () => {
+    const carriesScript = fs.existsSync(REAL_SCRIPT);
+    assert.strictEqual(
+      isPublicTree(),
+      !carriesScript,
+      carriesScript
+        ? 'this checkout has tools/release-export.mjs, so it is the dev repo, but the marker says public'
+        : 'tools/release-export.mjs is gone but the marker does not see a public tree — either the export changed what it writes, or a file was deleted here by accident'
+    );
+  });
+
+  it('fires on a tree the real export has just produced', { skip: SKIP_NO_SCRIPT }, () => {
+    const { outDir, status, out } = exportFrom(makeRepo());
+    assert.strictEqual(status, 0, out);
+    // Direct evidence rather than a restatement of the marker's own rule: the tree
+    // under it came out of the shipped script.
+    assert.strictEqual(isPublicTree(outDir), true, 'the export produced a tree the marker does not recognise');
+  });
+
+  // The trap this task exists for. A marker keyed on "RELEASING.md is missing" —
+  // or on any other absence — turns a deletion in this repository into a silent
+  // skip. This fixture is that accident: every file the naive key would look for is
+  // gone, and nothing the export writes is there. The marker must stay false.
+  it('stays false on a dev tree that lost the very files those tests read', () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-lost-files-')));
+    dirs.push(root);
+    write(root, 'README.md', '# briefboard\n');
+    write(root, 'doc/brief/T-0001-01-thing.md', '# brief\n');
+    // This repository's own .gitignore, which carries none of the seeded rules.
+    fs.copyFileSync(path.join(__dirname, '..', '.gitignore'), path.join(root, '.gitignore'));
+    // No RELEASING.md, no tools/release-export.mjs, no doc/backlog.md: the deletion.
+    assert.ok(!has(root, 'RELEASING.md') && !has(root, 'tools/release-export.mjs') && !has(root, 'doc/backlog.md'));
+
+    assert.strictEqual(isPublicTree(root), false, 'a missing file must not read as a public tree');
+  });
+
+  // Each mark alone is one plausible accident away from being true here, which is
+  // why both are required; these fix that so it cannot be relaxed unnoticed.
+  it('needs both marks, not either one', () => {
+    const onlyGitkeep = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-mark-keep-')));
+    const onlyRules = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-mark-rules-')));
+    dirs.push(onlyGitkeep, onlyRules);
+
+    write(onlyGitkeep, 'doc/brief/.gitkeep', '');
+    write(onlyGitkeep, '.gitignore', 'node_modules\n');
+    assert.strictEqual(isPublicTree(onlyGitkeep), false, '.gitkeep alone must not read as a public tree');
+
+    write(onlyRules, '.gitignore', `node_modules\n${SEEDED_IGNORE_RULES.join('\n')}\n`);
+    assert.strictEqual(isPublicTree(onlyRules), false, 'the ignore rules alone must not read as a public tree');
   });
 });

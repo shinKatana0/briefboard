@@ -12,6 +12,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { skipOutsideExport } = require('./helpers/public-tree.js');
+
 const ROOT = path.join(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n');
 
@@ -248,7 +250,11 @@ describe('the rule that produces the lag, and the step that ends it (T-0106)', (
     assert.match(text, /i18n/);
   });
 
-  it('RELEASING.md translates before it bumps the version and publishes', () => {
+  // RELEASING.md is the private repo's release checklist and the export drops it,
+  // so in the public tree there is no file to read (T-0252). Skipped on a positive
+  // marker of that tree, never on "the file is missing" — deleted here by accident,
+  // RELEASING.md must make this fail, not fall silent.
+  it('RELEASING.md translates before it bumps the version and publishes', { skip: skipOutsideExport('RELEASING.md') }, () => {
     const text = read('RELEASING.md');
     const translate = text.indexOf('README.ru.md');
     const bump = text.indexOf('Bump `package.json` version');
