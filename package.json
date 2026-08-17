@@ -1,6 +1,6 @@
 {
   "name": "briefboard",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Lightweight kanban board + CLI for coding agents: backlog, briefs, and a review/merge workflow they must follow.",
   "license": "MIT",
   "author": "briefboard contributors",
@@ -28,6 +28,7 @@
   "files": [
     "server",
     "tools/task.mjs",
+    "tools/screenshot.mjs",
     "ui",
     "agents",
     "bin",
@@ -40,6 +41,8 @@
     "node": ">=21"
   },
   "scripts": {
-    "test": "node --test tests/**/*.test.js"
+    "test": "node tools/test-run.mjs",
+    "test:verbose": "node --test --test-timeout=120000 --test-reporter=spec tests/**/*.test.js",
+    "sync:worker-agent": "node tools/sync-worker-agent.mjs"
   }
 }

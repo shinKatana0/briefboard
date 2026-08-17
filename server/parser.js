@@ -5,17 +5,23 @@ const path = require('path');
 
 const STATUSES = ['backlog', 'open', 'ready', 'in_progress', 'review', 'done', 'cancelled'];
 const PRIORITIES = ['Blocker', 'Critical', 'Major', 'Medium', 'Minor'];
+// `external` (T-0092) is work we wait on from a third party - access, keys, an
+// answer from the client, someone else's release. It exists so that waiting can
+// be modelled as an ordinary task another task `depends` on, instead of a status
+// or a free-text note the dependency graph cannot see.
+const TASK_TYPES = ['feature', 'bug', 'external'];
+const DEFAULT_TASK_TYPE = 'feature';
 
-// Allowed lifecycle transitions, mirroring the state graph in agents/PROTOCOL.md:
-//   backlog -> open -> ready -> in_progress -> review -> done
-//   (any non-terminal) -> cancelled
-//   review -> in_progress (when review is rejected)
-// This is the single source of truth for what status change is permitted; the
-// task CLI enforces it (see tools/task.mjs `status`). Terminal statuses
-// (done/cancelled) have no outgoing transitions.
+// The state graph of agents/PROTOCOL.md, and the single source of truth for what
+// status change is permitted; the CLI enforces it (tools/task.mjs `status`).
 const TRANSITIONS = {
   backlog: ['open', 'cancelled'],
-  open: ['ready', 'cancelled'],
+  // `open -> backlog` (T-0141) exists because the only way back used to be
+  // `cancelled`, which is terminal: a card pulled into Open by mistake, or one
+  // whose answer is "not now", could be shelved only by burying it. Deliberately
+  // no counterpart out of `ready` — that step is guarded by a written brief, and
+  // undoing it is a different decision from putting a card back down.
+  open: ['ready', 'backlog', 'cancelled'],
   ready: ['in_progress', 'cancelled'],
   in_progress: ['review', 'cancelled'],
   review: ['done', 'in_progress', 'cancelled'],
@@ -23,23 +29,59 @@ const TRANSITIONS = {
   cancelled: [],
 };
 
-const HEADER_RE = /^## (T-\d{4})\s*·\s*(Blocker|Critical|Major|Medium|Minor)\s*·\s*(.+)$/;
-const FIELD_RE = /^- ([a-z]+):\s*(.*)$/;
-const BRIEF_ID_RE = /^T-\d{4}-\d{2}$/;
+// The fields this version understands; everything else field-shaped is unknown.
+const KNOWN_FIELDS = ['type', 'status', 'created', 'closed', 'briefs', 'depends', 'profile'];
 
-// Local date+time stamp "YYYY-MM-DD HH:MM:SS" (machine local time, not UTC).
-// No Intl / date libraries - Date getters only, per project's zero-dependency
-// style. Shared by tools/task.mjs (CLI) and server.js (POST /api/task/:id/cancel)
-// so both use the exact same stamp format (introduced in T-0011).
+// An unknown "- key: value" line survives a read-write cycle verbatim (T-0095).
+// briefboard versions read each other's files, and before this rule an older
+// parser silently deleted a field a newer one had written - measured on
+// `- depends:`, which a downgrade to 0.1.x erased from every task on the first
+// save, taking the dependency graph with it. Keeping unknown lines makes each
+// future field addition non-destructive in both directions. The value is stored
+// exactly as read: we do not know what it means and must not pretend otherwise.
+// A repeated key follows the same "last one wins" rule as a known field, keeping
+// the position of its first line.
+function extraFields(fields) {
+  const extra = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!KNOWN_FIELDS.includes(key)) extra[key] = value;
+  }
+  return extra;
+}
+
+const HEADER_RE = /^## (T-\d{4})\s*·\s*(Blocker|Critical|Major|Medium|Minor)\s*·\s*(.+)$/;
+// The single definition of "this line is a field": the parser, the escaping on
+// write, the unescaping on read and validate.js's raw scan all take it from
+// here, because a second copy would move the fields/description boundary in one
+// place only. A name must start with a letter, so an ordinary list item ("- 2:
+// item") stays description; digits, "_" and "-" are allowed after it so that a
+// future field name is not limited to letters - with letters only, "- due_date:
+// ..." was not a field at all and sank into the description, out of reach of the
+// unknown-field rule above (T-0097).
+const FIELD_RE = /^- ([a-z][a-z0-9_-]*):\s*(.*)$/;
+const BRIEF_ID_RE = /^T-\d{4}-\d{2}$/;
+const TASK_ID_RE = /^T-\d{4}$/;
+
+// A prerequisite in one of these statuses stops blocking its dependents. `done`
+// is obvious; `cancelled` unblocks too, because a cancelled task will never
+// arrive and a forever-blocked dependent is worse than a visible one built on a
+// cancelled premise (T-0087 refinement, which is also why the UI marks a
+// cancelled dependency distinctly instead of showing it as satisfied).
+const DEPENDS_SATISFIED = ['done', 'cancelled'];
+
+// Local date+time stamp "YYYY-MM-DD HH:MM:SS" (machine local time, not UTC), with
+// no Intl / date library, per the project's zero-dependency style. Shared by the
+// CLI and server.js so both write the exact same stamp format (T-0011).
 const pad2 = (n) => String(n).padStart(2, '0');
-function nowStamp() {
-  const d = new Date();
+function localStamp(d) {
   const date = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   return `${date} ${time}`;
 }
+function nowStamp() {
+  return localStamp(new Date());
+}
 
-/** Parse backlog.md text into an array of task objects. */
 function parseBacklog(text) {
   const tasks = [];
   let cur = null;
@@ -67,24 +109,19 @@ function parseBacklog(text) {
       cur.fields[f[1]] = f[2].trim();
       continue;
     }
-    // While still in the fields section (no description accumulated yet), skip
-    // blank lines instead of treating them as the start of the description. A
-    // human/agent may insert a blank line between the "## T-XXXX" header and
-    // "- type:", or between field lines, for readability (PROTOCOL.md item 1
-    // allows manual markdown edits). If such a blank line were pushed to desc,
-    // desc.length would become 1 and every subsequent "- key: value" would stop
-    // being recognized as a field and leak into the description, silently
-    // defaulting the task's type/status/dates (T-0055). Blank lines INSIDE the
-    // description (desc.length > 0) still fall through and are preserved.
+    // A hand-edited file may have blank lines between the header and "- type:",
+    // or between field lines (PROTOCOL.md item 1 allows manual edits). Pushing
+    // one to desc would end the fields section, so every later "- key: value"
+    // would leak into the description and the task would silently fall back to
+    // default type/status/dates (T-0055).
     if (desc.length === 0 && line.trim() === '') {
       continue;
     }
-    // Unescape a "## "-lookalike line that serializeBacklog() escaped with a
+    // Unescape a structure-lookalike line that serializeBacklog() escaped with a
     // leading backslash (see the matching comment there). Known, accepted
-    // trade-off: description text that literally started with "\## " in the
-    // original (backslash followed by "## ") loses one leading backslash on
-    // round-trip - considered acceptable, see serializeBacklog().
-    if (line.startsWith('\\## ')) {
+    // trade-off: description text that literally started with "\## " or with
+    // "\- key: value" loses one leading backslash on round-trip.
+    if (line.startsWith('\\## ') || (line.startsWith('\\- ') && FIELD_RE.test(line.slice(1)))) {
       desc.push(line.slice(1));
       continue;
     }
@@ -96,7 +133,7 @@ function parseBacklog(text) {
     id: t.id,
     priority: PRIORITIES.includes(t.priority) ? t.priority : 'Medium',
     title: t.title,
-    type: t.fields.type === 'bug' ? 'bug' : 'feature',
+    type: TASK_TYPES.includes(t.fields.type) ? t.fields.type : DEFAULT_TASK_TYPE,
     status: STATUSES.includes(t.fields.status) ? t.fields.status : 'backlog',
     created: t.fields.created || '',
     closed: t.fields.closed && t.fields.closed !== '—' ? t.fields.closed : '',
@@ -104,18 +141,25 @@ function parseBacklog(text) {
       .split(',')
       .map((s) => s.trim())
       .filter((s) => BRIEF_ID_RE.test(s)),
+    depends: (t.fields.depends || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => TASK_ID_RE.test(s)),
+    // Never interpreted here: the set of legal values is declared by the user
+    // (BRIEFBOARD_PROFILES) and checked where a session is started (T-0108).
+    profile: (t.fields.profile || '').trim(),
+    extra: extraFields(t.fields),
     description: t.description,
   }));
 }
 
-// Resolve a brief id to its file in briefDir: a file named exactly "<id>.md",
-// or any file starting with "<id>-" (e.g. "T-0052-01-slug.md"). Returns the
-// absolute path or null. Shared by server.js (GET /api/brief/:id) and
-// validate.js (dangling brief-reference check) so both use identical lookup
-// rules. The BRIEF_ID_RE guard also blocks path traversal: an id must match the
-// strict "T-XXXX-YY" shape before it is ever concatenated into a filename.
+// Resolve a brief id to its file in briefDir ("<id>.md" or "<id>-<slug>.md"),
+// or null. Shared by server.js (GET /api/brief/:id) and validate.js (dangling
+// brief-reference check) so both use identical lookup rules. The BRIEF_ID_RE
+// guard also blocks path traversal: an id must match the strict "T-XXXX-YY"
+// shape before it is ever concatenated into a filename.
 function findBriefFile(briefDir, briefId) {
-  if (!BRIEF_ID_RE.test(briefId)) return null; // also guards against path traversal
+  if (!BRIEF_ID_RE.test(briefId)) return null;
   if (!briefDir || !fs.existsSync(briefDir)) return null;
   const match = fs
     .readdirSync(briefDir)
@@ -123,11 +167,325 @@ function findBriefFile(briefDir, briefId) {
   return match ? path.join(briefDir, match) : null;
 }
 
-/** Serialize task objects back into backlog.md text (used by the CLI). */
+// ---------- open questions of an agent session (T-0083) ----------
+
+// A refinement session runs headless (T-0076): stdin is closed and there is no
+// TTY, so it cannot ask a human anything. Its only channel is this section,
+// appended to the task's own description while the task stays in `open`. The
+// heading is one exact string on both sides - the session prompt shipped in the
+// README tells the agent to write it, this constant is what recognizes it. It is
+// English like every other token of the format ("- status:", "## T-NNNN"): the
+// prose of a backlog is written in whatever language its project speaks, the
+// format contract is not, and this one travels in a published README.
+const SESSION_QUESTIONS_SECTION = 'Session questions';
+const SESSION_QUESTIONS_HEADING = `### ${SESSION_QUESTIONS_SECTION}`;
+
+// The section the board's answer endpoint appends under, as the name
+// appendDescriptionSection() takes (the heading it writes is "### Answers").
+// English for the same reason as the questions heading above.
+const ANSWERS_SECTION = 'Answers';
+const ANSWERS_HEADING = `### ${ANSWERS_SECTION}`;
+
+// What the review session writes instead of a status (T-0122): what it read in
+// the diff, what the tests did, and whether it would merge. It never sets `done`
+// and never merges - both are judgements that stay with a human - so this
+// section IS its whole output. English like the two headings above, for the same
+// reason: it is part of the format contract and travels in a published README.
+const REVIEW_VERDICT_SECTION = 'Review verdict';
+const REVIEW_VERDICT_HEADING = `### ${REVIEW_VERDICT_SECTION}`;
+
+// These are correspondence, and correspondence is chronological: every call
+// opens a new section at the end, so which of them was written last is what
+// says whose turn it is (T-0114). Every other heading - "Worker report",
+// "Review comments" - is one document that later calls add to (T-0098).
+//
+// A verdict joins them for a reason of its own: a task returned for rework comes
+// back to review with a different branch behind it, and merging the second
+// verdict into the first would present a judgement of the old code as the
+// current one.
+//
+// The rule belongs to the heading, not to a flag on the call: a flag the agent
+// has to remember is the class of mistake we have already been bitten by twice
+// (T-0107, T-0118). The heading it writes anyway.
+const CHRONOLOGICAL_SECTIONS = [SESSION_QUESTIONS_SECTION, ANSWERS_SECTION, REVIEW_VERDICT_SECTION];
+
+// The worker's report - the one section `tools/task.mjs show` leaves out by
+// default (T-0161): reports are 63% of this backlog (267 KB of 423), and nobody
+// who opens a task for its statement of work needs them. Two spellings, because
+// old files carry both: the English heading the protocol names, and the Russian
+// one written before the "English in code and GitHub docs" rule. The legacy form
+// is recognized for reading only - nothing writes it any more.
+//
+// This project's own 77 legacy headings were renamed to the English form by a
+// one-off pass (T-0166), and the legacy constant deliberately stayed: what was
+// renamed is our data, and a user's backlog is not ours to rewrite. Dropping the
+// constant would make every such heading read as ordinary description text, so
+// `show` would print reports it is supposed to leave out. Do not "tidy" it away.
+const WORKER_REPORT_SECTION = 'Worker report';
+const LEGACY_WORKER_REPORT_SECTION = 'Отчёт воркера';
+const WORKER_REPORT_SECTIONS = [WORKER_REPORT_SECTION, LEGACY_WORKER_REPORT_SECTION];
+
+// Where a question can still be open: `open` is where the briefing session stops
+// to ask (T-0083), `in_progress` where the worker session does (T-0101), and
+// `review` where the review session does (T-0122). Nowhere else - answering never
+// changes the status, so the marker is cleared by the session moving the task on,
+// and the statuses past review are set by a human who has read the description.
+//
+// `review` was deliberately left out when the list was written (T-0101): back
+// then awaitsAnswer() went by presence alone, so one question asked in
+// `in_progress` would have kept the marker lit through review until `done`. The
+// order rule of T-0114 retired that objection - the marker is out as soon as an
+// answer is written below the questions - and without `review` here the review
+// session would have the protocol on paper only: no marker on its card and an
+// answer endpoint that refuses it with 409.
+const ANSWER_STATUSES = ['open', 'in_progress', 'review'];
+
+// The heading only counts on a line of its own: quoting it inside a sentence is
+// talking about the protocol, not invoking it. The LAST such line is the one
+// that matters - either section can stand more than once - and -1 means absent.
+function lastHeadingLine(description, heading) {
+  const lines = String(description == null ? '' : description).split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) return i;
+  }
+  return -1;
+}
+
+function hasSessionQuestions(description) {
+  return lastHeadingLine(description, SESSION_QUESTIONS_HEADING) !== -1;
+}
+
+// How many verdicts a description carries, by the same line rule. A count and
+// not a boolean because a second review round adds a second section, and the
+// session runner tells "this run wrote a verdict" from "this run wrote nothing"
+// by that difference (T-0109).
+function countReviewVerdicts(description) {
+  return String(description == null ? '' : description)
+    .split('\n')
+    .filter((line) => line.trim() === REVIEW_VERDICT_HEADING).length;
+}
+
+// Order, not presence (T-0114). An answer written below the questions closes
+// them, so the marker is lit only while the questions section is the last of the
+// two - otherwise a long-answered section lights the card again the moment the
+// task passes back through one of ANSWER_STATUSES.
+function awaitsAnswer(task) {
+  if (!task || !ANSWER_STATUSES.includes(task.status)) return false;
+  const asked = lastHeadingLine(task.description, SESSION_QUESTIONS_HEADING);
+  return asked !== -1 && asked > lastHeadingLine(task.description, ANSWERS_HEADING);
+}
+
+// The line index a "### " section ends at: the next heading of the same or a
+// higher level, or the end of the text. A deeper "#### " heading is part of it.
+// One rule, used both by the append below and by the omission of T-0161 - two
+// copies of "where does a section end" would eventually disagree.
+function sectionEnd(lines, at) {
+  const end = lines.findIndex((line, i) => i > at && /^#{1,3} \S/.test(line));
+  return end === -1 ? lines.length : end;
+}
+
+// ---------- leaving a section out of a read (T-0161) ----------
+
+// Which of `names` this line is the "### " heading of, or null. A heading counts
+// only on a line of its own (lastHeadingLine's rule), and a decorated one -
+// "### Worker report - rework after review 1 (2026-08-14)" - counts too: what
+// follows the name is a label, not a different section. A name merely continued
+// by a letter or a digit is a different heading and is kept.
+function sectionHeadingName(line, names) {
+  const text = line.trim();
+  if (!/^### \S/.test(text)) return null;
+  const title = text.slice(4).trim();
+  return (
+    names.find(
+      (name) => title === name || (title.startsWith(name) && !/[\p{L}\p{N}]/u.test(title[name.length]))
+    ) || null
+  );
+}
+
+// The description without its worker-report sections, plus what was taken out.
+// Callers MUST surface that second half: a read that quietly returns less is the
+// failure this exists to avoid, not a smaller version of it.
+function stripWorkerReports(description) {
+  const source = String(description == null ? '' : description);
+  const lines = source.split('\n');
+  const kept = [];
+  const headings = [];
+  let sections = 0;
+  for (let i = 0; i < lines.length; ) {
+    const name = sectionHeadingName(lines[i], WORKER_REPORT_SECTIONS);
+    if (!name) {
+      kept.push(lines[i]);
+      i++;
+      continue;
+    }
+    sections++;
+    if (!headings.includes(name)) headings.push(name);
+    i = sectionEnd(lines, i);
+  }
+  const text = kept.join('\n').replace(/\s+$/, '');
+  return {
+    description: text,
+    sections,
+    headings,
+    bytes: Buffer.byteLength(source) - Buffer.byteLength(text),
+  };
+}
+
+// ---------- appending to a description (T-0098) ----------
+
+// Add `text` under the "### <heading>" section of a task description: the section
+// is created at the end when absent and reused when already there, so calling
+// twice does not leave two "### Worker report" sections. The exception is
+// CHRONOLOGICAL_SECTIONS, which always open a new section at the end.
+//
+// Append-only on purpose. A description carries refinement decisions, review
+// notes and worker reports written by different agents at different times; a
+// command that could overwrite them would eventually lose one to a typo.
+function appendDescriptionSection(description, heading, text) {
+  const name = String(heading == null ? '' : heading).trim();
+  const title = `### ${name}`;
+  const body = String(text == null ? '' : text).replace(/\r\n?/g, '\n').replace(/\s+$/, '');
+  const lines = String(description == null ? '' : description).split('\n');
+  // A chronological section is never reused: a reply merged into the section it
+  // replies to would leave no way to tell a closed round from an open one.
+  const at = CHRONOLOGICAL_SECTIONS.includes(name)
+    ? -1
+    : lines.findIndex((line) => line.trim() === title);
+
+  if (at === -1) {
+    const head = lines.join('\n').replace(/\s+$/, '');
+    return (head ? head + '\n\n' : '') + title + '\n' + body;
+  }
+  // Trailing blank lines belong to the gap before the next heading, not to the
+  // section, so the new text goes above them.
+  let end = sectionEnd(lines, at);
+  while (end > at + 1 && lines[end - 1].trim() === '') end--;
+  lines.splice(end, 0, '', body);
+  return lines.join('\n');
+}
+
+// ---------- dependencies (T-0087) ----------
+
+function taskIndex(tasks) {
+  return tasks instanceof Map ? tasks : new Map(tasks.map((t) => [t.id, t]));
+}
+
+// The single rule for "may this task be started": the ids of its prerequisites
+// that are not closed yet. An empty array means the way is clear. Every caller
+// (the CLI's ready -> in_progress guard, the board's blocked marker, and the
+// server-side drag of T-0084) goes through this one function - two copies of
+// the rule would drift apart.
+//
+// An id no task carries counts as blocking: an unresolvable prerequisite cannot
+// be shown to be finished. validateBacklog() reports it as a broken reference.
+function blockingDependencies(task, tasks) {
+  const byId = taskIndex(tasks);
+  return (task.depends || []).filter((id) => {
+    const dep = byId.get(id);
+    return !dep || !DEPENDS_SATISFIED.includes(dep.status);
+  });
+}
+
+// Dependency cycles found in `tasks`, each as the id path that closes back on
+// itself: ["T-0001", "T-0002", "T-0001"]. A self-dependency (T-0001 -> T-0001)
+// is skipped here and reported separately, so one mistake yields one message.
+//
+// Depth-first search that marks a node finished once explored, so a node shared
+// by several cycles is walked once and only one of those cycles is reported.
+// That is deliberate: a cycle has to be broken by hand anyway, and re-running
+// the check after the fix surfaces whatever is left.
+function dependencyCycles(tasks) {
+  const list = tasks instanceof Map ? [...tasks.values()] : tasks;
+  const byId = taskIndex(list);
+  const state = new Map(); // id -> 'visiting' | 'finished'
+  const path = [];
+  const cycles = [];
+  const seen = new Set();
+
+  const visit = (id) => {
+    const task = byId.get(id);
+    if (!task) return;
+    state.set(id, 'visiting');
+    path.push(id);
+    for (const dep of task.depends || []) {
+      if (dep === id) continue;
+      if (state.get(dep) === 'visiting') {
+        const cycle = path.slice(path.indexOf(dep)).concat(dep);
+        // Same cycle reached from a different entry point = same rotation of
+        // the same ids; key on the rotation starting at its smallest id.
+        const ring = cycle.slice(0, -1);
+        const start = ring.indexOf([...ring].sort()[0]);
+        const key = ring.slice(start).concat(ring.slice(0, start)).join(' ');
+        if (!seen.has(key)) {
+          seen.add(key);
+          cycles.push(cycle);
+        }
+      } else if (!state.has(dep)) {
+        visit(dep);
+      }
+    }
+    path.pop();
+    state.set(id, 'finished');
+  };
+
+  for (const task of list) if (!state.has(task.id)) visit(task.id);
+  return cycles;
+}
+
+// Escape the description lines that parseBacklog() would otherwise read back as
+// backlog structure rather than text:
+//   - any "## " line, which a bare-substring HEADER_RE match would turn into a
+//     phantom task, splitting this description in two (T-0040);
+//   - a "- key: value" line in the LEADING field zone, which would become one of
+//     the task's own fields and silently rewrite its status/type/dates (T-0080).
+// The field zone is exactly the one parseBacklog() honours: it runs to the first
+// non-blank line that is not field-shaped. Past it, "- note: ..." is an ordinary
+// markdown bullet and stays untouched - escaping every field-shaped line would
+// litter the backlog people read on GitHub with backslashes for no gain.
+// Known, accepted trade-off: text that literally starts with "\## " or with
+// "\- key: value" loses one leading backslash per round-trip.
+function escapeDescription(description) {
+  let inFieldZone = true;
+  return description
+    .split('\n')
+    .map((line) => {
+      if (inFieldZone) {
+        if (FIELD_RE.test(line)) return `\\${line}`;
+        if (line.trim() !== '') inFieldZone = false;
+      }
+      return line.startsWith('## ') ? `\\${line}` : line;
+    })
+    .join('\n');
+}
+
+const DEFAULT_PREAMBLE =
+  '# Backlog\n\n<!-- Managed by agents. Format: agents/PROTOCOL.md. Prefer writing via tools/task.mjs -->\n';
+
+// Everything above the first task header, in the shape serializeBacklog() takes
+// it: the lines themselves, ending in one newline, with the blank line that
+// separates them from the first task left to the serializer. Read back verbatim
+// - a preamble is what a human wrote by hand, so it is preserved, never
+// normalized and never added to (T-0167).
+//
+// Two different absences, and the difference is the whole point of returning
+// null: `''` is "this file has tasks and no preamble", which is preserved as
+// such, while null is "there is no file yet" and lets serializeBacklog() fall
+// back to the default head, so a brand-new backlog is still born with one.
+function parsePreamble(text) {
+  const source = String(text == null ? '' : text);
+  if (source.trim() === '') return null;
+  const lines = source.split(/\r?\n/);
+  const first = lines.findIndex((line) => HEADER_RE.test(line));
+  const head = first === -1 ? lines.slice() : lines.slice(0, first);
+  while (head.length && head[head.length - 1].trim() === '') head.pop();
+  return head.length ? head.join('\n') + '\n' : '';
+}
+
+// `preamble` is compared against null, not tested for truthiness: '' means "no
+// preamble", which is a thing a file can legitimately be, and only an omitted
+// argument asks for the default.
 function serializeBacklog(tasks, preamble) {
-  const head =
-    preamble ||
-    '# Backlog\n\n<!-- Managed by agents. Format: agents/PROTOCOL.md. Prefer writing via tools/task.mjs -->\n';
+  const head = preamble == null ? DEFAULT_PREAMBLE : preamble;
   const body = tasks
     .map((t) => {
       const lines = [
@@ -138,29 +496,24 @@ function serializeBacklog(tasks, preamble) {
         `- closed: ${t.closed || '—'}`,
         `- briefs: ${t.briefs.join(', ')}`,
       ];
+      // Written only when there is something to write: an unconditional line
+      // would add an empty "- depends:" to every task in a file people read by
+      // eye, and would rewrite every existing backlog on the first save.
+      if (t.depends && t.depends.length) lines.push(`- depends: ${t.depends.join(', ')}`);
+      // Optional for the same reason as `depends`: most tasks run with the
+      // default profile, and an empty line on every one of them would rewrite
+      // every existing backlog on the first save.
+      if (t.profile) lines.push(`- profile: ${t.profile}`);
+      for (const [key, value] of Object.entries(t.extra || {})) {
+        lines.push(value === '' ? `- ${key}:` : `- ${key}: ${value}`);
+      }
       if (t.description) {
-        // Escape any description line that looks like a markdown H2 header
-        // ("## ..."), so parseBacklog() can never mistake it for the start of
-        // a new task (a bare-substring HEADER_RE match would otherwise split
-        // the current task's description and leak its tail into a phantom
-        // task - see T-0040). Deliberately broad ("starts with '## '"), not
-        // limited to a full HEADER_RE match: cheaper to check and safer,
-        // since any "## " line is escaped consistently regardless of whether
-        // it happens to also match the full task-header pattern.
-        // Known, accepted trade-off: description text that already starts
-        // with a literal "\## " (backslash + "## ") will lose one leading
-        // backslash on round-trip (see the matching unescape in
-        // parseBacklog()). Considered rare enough to be acceptable.
-        const escapedDescription = t.description
-          .split('\n')
-          .map((line) => (line.startsWith('## ') ? `\\${line}` : line))
-          .join('\n');
-        lines.push('', escapedDescription);
+        lines.push('', escapeDescription(t.description));
       }
       return lines.join('\n');
     })
     .join('\n\n');
-  return head + '\n' + body + '\n';
+  return (head ? head + '\n' : '') + body + '\n';
 }
 
 // ---------- concurrency-safe writes ----------
@@ -175,10 +528,24 @@ function serializeBacklog(tasks, preamble) {
 // holding it). Hold time for a real op is a few ms, so 10s only ever trips on a
 // genuinely dead holder.
 const LOCK_STALE_MS = 10000;
-// Give up acquiring after this long and surface a clear error rather than hang.
-const LOCK_ACQUIRE_TIMEOUT_MS = 5000;
-// Sleep between acquisition attempts while another process holds the lock.
+const DEFAULT_LOCK_ACQUIRE_TIMEOUT_MS = 5000;
 const LOCK_BACKOFF_MS = 25;
+// Machine-readable mark of "gave up waiting for the lock", so callers can tell
+// contention from a real failure without matching on the message text.
+const LOCK_TIMEOUT_CODE = 'ELOCKTIMEOUT';
+
+// Anything unusable falls back to the default instead of throwing: a typo in an
+// env var must not stop the board or the CLI from writing at all.
+function resolveLockTimeout(raw) {
+  const ms = Number(raw);
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_LOCK_ACQUIRE_TIMEOUT_MS;
+}
+
+// Read once at load. The budget is configurable through the environment rather
+// than a function argument because the writers that need a different one are
+// separate OS processes (the tests spawn real `tools/task.mjs` and server.js
+// children), and the environment is the only channel that reaches them.
+const LOCK_ACQUIRE_TIMEOUT_MS = resolveLockTimeout(process.env.BRIEFBOARD_LOCK_TIMEOUT_MS);
 
 // Synchronous sleep with zero dependencies. Both writers run straight-line
 // synchronous code (readFileSync/writeFileSync), so a blocking wait is the
@@ -188,44 +555,70 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-// On Windows a rename over an existing target fails transiently while another
-// handle is open on it (the server's fs.watch, an antivirus scanner, or a reader
-// briefly holding backlog.md). The OS surfaces this as EPERM/EACCES/EBUSY.
-// withFileLock serializes our own writers, but nothing else, so we retry the
-// rename a few times, giving the foreign handle a moment to close. On POSIX these
-// codes essentially never occur here, so the retry is harmless there.
-const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+// Windows answers EPERM/EACCES/EBUSY where POSIX would succeed or say
+// EEXIST/ENOENT: renaming over a target another handle is open on (the server's
+// fs.watch, an antivirus scanner, a reader), and - measured in T-0089 - opening
+// the lock file while another process is deleting it, because NTFS keeps an
+// unlinked-but-still-open file visible in a "pending delete" state no open() can
+// enter. Both are ordinary contention and are waited out rather than thrown; on
+// POSIX these codes essentially never occur here, so the retry costs nothing.
+const TRANSIENT_FS_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const RENAME_MAX_RETRIES = 10;
 const RENAME_RETRY_MS = 40; // 10 * 40ms = up to ~0.4s total before giving up
+const LOCK_RELEASE_MAX_RETRIES = 5;
+const LOCK_RELEASE_RETRY_MS = 20;
 
-// Atomic file replace: write a sibling .tmp then rename over the target (atomic
-// on both POSIX and NTFS). Shared by server.js and tools/task.mjs.
+// Shared by server.js and tools/task.mjs. The rename is what makes the replace
+// atomic - on both POSIX and NTFS a reader sees either file, never a half-write.
 function atomicWrite(filePath, text) {
   const tmp = filePath + '.tmp';
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(tmp, text);
-  // Retry only the rename, and only on the transient Windows codes above; any
-  // other error (or exhausting the retries) rethrows the last error unchanged.
   for (let attempt = 0; ; attempt++) {
     try {
       fs.renameSync(tmp, filePath);
       return;
     } catch (e) {
-      if (!RENAME_RETRY_CODES.has(e.code) || attempt >= RENAME_MAX_RETRIES) throw e;
+      if (!TRANSIENT_FS_CODES.has(e.code) || attempt >= RENAME_MAX_RETRIES) throw e;
       sleepSync(RENAME_RETRY_MS);
     }
   }
 }
 
-// Cross-process mutex around fn(): exclusively create `<targetPath>.lock`
-// (O_EXCL), run fn while holding it, always release it in finally. If the lock
-// is already held, steal it when it looks abandoned (older than LOCK_STALE_MS),
-// otherwise back off and retry until LOCK_ACQUIRE_TIMEOUT_MS elapses.
+// Age of the lock file, or null when it cannot be told right now (it vanished,
+// or the platform is being transient about it).
+function lockAgeMs(lockPath) {
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+// True once the lock file is gone. Never throws: one caller is a finally, where
+// an exception would replace fn()'s real result or its real error, and the other
+// must keep waiting rather than fail. A lock that resists deletion is left for a
+// later acquirer to steal by age.
+function releaseLock(lockPath) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.unlinkSync(lockPath);
+      return true;
+    } catch (e) {
+      // ENOENT: our lock had already been stolen as stale.
+      if (e.code === 'ENOENT') return true;
+      if (!TRANSIENT_FS_CODES.has(e.code) || attempt >= LOCK_RELEASE_MAX_RETRIES) return false;
+      sleepSync(LOCK_RELEASE_RETRY_MS);
+    }
+  }
+}
+
+// Cross-process mutex around fn(), held as an O_EXCL `<targetPath>.lock` file.
 function withFileLock(targetPath, fn) {
   const lockPath = targetPath + '.lock';
   // The lock lives next to the target, whose directory may not exist yet (e.g. a
-  // brand-new project's doc/). Create it first so openSync fails only on EEXIST
-  // (lock already held), never on a missing parent dir.
+  // brand-new project's doc/), and a missing parent dir would surface as an
+  // acquire failure rather than as itself.
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
   let fd = null;
@@ -234,25 +627,25 @@ function withFileLock(targetPath, fn) {
       fd = fs.openSync(lockPath, 'wx'); // O_CREAT | O_EXCL | O_WRONLY
       break;
     } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      let ageMs;
-      try {
-        ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
-      } catch (statErr) {
-        if (statErr.code === 'ENOENT') continue; // released between open and stat
-        throw statErr;
-      }
-      if (ageMs > LOCK_STALE_MS) {
-        // Steal an abandoned lock, then retry immediately.
-        try {
-          fs.unlinkSync(lockPath);
-        } catch (unlinkErr) {
-          if (unlinkErr.code !== 'ENOENT') throw unlinkErr;
-        }
-        continue;
-      }
+      if (e.code !== 'EEXIST' && !TRANSIENT_FS_CODES.has(e.code)) throw e;
+      // A steal that fails falls through to the wait: retrying it in a tight
+      // loop would spin forever on a stale lock we are not allowed to delete.
+      const ageMs = lockAgeMs(lockPath);
+      if (ageMs !== null && ageMs > LOCK_STALE_MS && releaseLock(lockPath)) continue;
       if (Date.now() >= deadline) {
-        throw new Error(`could not acquire lock for ${targetPath} (held by another process)`);
+        // The budget is named because it is the one thing the reader of this
+        // message cannot see: it comes from BRIEFBOARD_LOCK_TIMEOUT_MS, which
+        // reaches a separate writer process through the environment and is
+        // invisible everywhere else. Saying it turns "we waited long enough"
+        // into a fact the message carries — for a user reading the failure, and
+        // for a test asserting the variable arrived instead of timing the child
+        // (T-0184).
+        const timeout = new Error(
+          `could not acquire lock for ${targetPath} after ${LOCK_ACQUIRE_TIMEOUT_MS}ms ` +
+            '(held by another process)'
+        );
+        timeout.code = LOCK_TIMEOUT_CODE;
+        throw timeout;
       }
       sleepSync(LOCK_BACKOFF_MS);
     }
@@ -267,20 +660,15 @@ function withFileLock(targetPath, fn) {
     } catch {
       /* already closed */
     }
-    try {
-      fs.unlinkSync(lockPath);
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw e; // ENOENT: our lock had been stolen as stale
-    }
+    releaseLock(lockPath);
   }
 }
 
-// Locked read-modify-write of backlog.md. Reads the file *inside* the lock so
-// the mutation always applies to the freshest snapshot, then atomically writes
-// the serialized result. mutate(tasks) edits the array in place; its return
-// value is passed back to the caller. If mutate throws, the file is left
-// untouched (used to abort a write when a precondition fails) and the lock is
-// still released.
+// Locked read-modify-write of backlog.md: mutate(tasks) edits the array in
+// place and its return value is passed back. The file is read *inside* the lock
+// so the mutation always applies to the freshest snapshot. A throw from mutate
+// leaves the file untouched - that is how a caller aborts a write when a
+// precondition fails.
 function updateBacklog(backlogPath, mutate) {
   return withFileLock(backlogPath, () => {
     let text = '';
@@ -291,23 +679,192 @@ function updateBacklog(backlogPath, mutate) {
     }
     const tasks = parseBacklog(text);
     const result = mutate(tasks);
-    atomicWrite(backlogPath, serializeBacklog(tasks));
+    atomicWrite(backlogPath, serializeBacklog(tasks, parsePreamble(text)));
     return result;
+  });
+}
+
+// ---------- the closed-task archive (T-0156) ----------
+
+// This backlog reached 660 KB, 88% of it tasks that are done or cancelled, and
+// an agent reading the file pays ~165k tokens for it. `tools/task.mjs archive`
+// moves the closed ones into a sibling file in the very same format, which
+// parseBacklog() reads unchanged.
+//
+// The archive is read-only by construction: done and cancelled are terminal
+// (TRANSITIONS), so an archived task never changes again and no endpoint ever
+// writes there. Only the archive command itself does.
+function archivePathFor(backlogPath) {
+  const dir = path.dirname(backlogPath);
+  const base = path.basename(backlogPath).replace(/\.md$/i, '');
+  return path.join(dir, `${base}-archive.md`);
+}
+
+const ARCHIVE_PREAMBLE =
+  '# Backlog archive\n\n<!-- Closed tasks moved out of backlog.md by `tools/task.mjs archive`.\n     Same format (agents/PROTOCOL.md), and never written to by anything else:\n     done and cancelled are terminal statuses. -->\n';
+
+const CLOSED_STATUSES = ['done', 'cancelled'];
+
+// The archive file's text, or '' when the project has no archive. Only a
+// missing file is silent: an archive that exists and cannot be read must never
+// be mistaken for an empty one, because the next id is allocated from it.
+function readArchiveText(backlogPath) {
+  try {
+    return fs.readFileSync(archivePathFor(backlogPath), 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return '';
+    throw e;
+  }
+}
+
+// The archived tasks, or [] when the project has no archive.
+function readArchivedTasks(backlogPath) {
+  return parseBacklog(readArchiveText(backlogPath));
+}
+
+// Move every closed task out of the backlog. `dryRun` reports what would move
+// and writes nothing.
+//
+// Under the backlog's own lock, which is also what serializes two archive runs
+// against each other: every writer of either file passes through it.
+function archiveClosedTasks(backlogPath, { dryRun = false } = {}) {
+  return withFileLock(backlogPath, () => {
+    let text = '';
+    try {
+      text = fs.readFileSync(backlogPath, 'utf8');
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+    const tasks = parseBacklog(text);
+    const moved = tasks.filter((t) => CLOSED_STATUSES.includes(t.status));
+    const kept = tasks.filter((t) => !CLOSED_STATUSES.includes(t.status));
+    const archiveText = readArchiveText(backlogPath);
+    const archived = parseBacklog(archiveText);
+    const keptText = serializeBacklog(kept, parsePreamble(text));
+    const result = {
+      file: archivePathFor(backlogPath),
+      moved: moved.map((t) => t.id),
+      kept: kept.length,
+      archived: archived.length + moved.length,
+      bytesBefore: Buffer.byteLength(text),
+      bytesAfter: Buffer.byteLength(keptText),
+      dryRun,
+    };
+    if (dryRun || moved.length === 0) return result;
+    // An id already in the archive is not appended twice: that is the state a
+    // crash between the two writes below leaves behind, and re-running the
+    // command is how it gets repaired.
+    const archivedIds = new Set(archived.map((t) => t.id));
+    const append = moved.filter((t) => !archivedIds.has(t.id));
+    // The archive is written FIRST, deliberately. A crash between the two
+    // writes then leaves a task in both files - which `validate` reports as a
+    // duplicate id and this command repairs - rather than in neither, which
+    // nothing could recover.
+    // An existing archive keeps its own head; only the first run writes ours.
+    const archivePreamble = parsePreamble(archiveText);
+    atomicWrite(
+      result.file,
+      serializeBacklog(archived.concat(append), archivePreamble === null ? ARCHIVE_PREAMBLE : archivePreamble)
+    );
+    atomicWrite(backlogPath, keptText);
+    return result;
+  });
+}
+
+// Create a new task in backlog.md and return its id (e.g. "T-0042"). This is the
+// single implementation of "allocate the next id and append a task": both
+// tools/task.mjs (`add`) and server.js (POST /api/task) call it, so the CLI and
+// the board can never drift apart when the format in agents/PROTOCOL.md changes.
+// Normalization is what the CLI has always done; a blank title throws (a task
+// with no title would serialize into a header the parser cannot read).
+//
+// The id is computed inside updateBacklog()'s cross-process lock, on the freshest
+// snapshot of the file, so two concurrent creators can never hand out the same id.
+function addTask(backlogPath, { title, type, priority, description } = {}) {
+  const cleanTitle = String(title == null ? '' : title).trim();
+  if (!cleanTitle) throw new Error('title is required');
+  const cleanType = TASK_TYPES.includes(type) ? type : DEFAULT_TASK_TYPE;
+  const cleanPriority = PRIORITIES.includes(priority) ? priority : 'Medium';
+  const cleanDescription = String(description == null ? '' : description).trim();
+  return updateBacklog(backlogPath, (tasks) => {
+    // Both files, or archiving would hand out T-0001 a second time: the ids of
+    // the closed tasks are exactly the ones that left the backlog, and a
+    // repeated id is silent and unfixable afterwards - `depends: T-0042` and
+    // doc/brief/T-0042-*.md would each belong to two different tasks.
+    //
+    // Read inside updateBacklog's lock, on the same snapshot the new task is
+    // appended to, so two concurrent creators still cannot collide. The archive
+    // is only ever written under that same lock (archiveClosedTasks).
+    const maxId = tasks
+      .concat(readArchivedTasks(backlogPath))
+      .reduce((m, t) => Math.max(m, Number(t.id.slice(2))), 0);
+    const newId = 'T-' + String(maxId + 1).padStart(4, '0');
+    tasks.push({
+      id: newId,
+      priority: cleanPriority,
+      title: cleanTitle,
+      type: cleanType,
+      status: 'backlog',
+      created: nowStamp(),
+      closed: '',
+      briefs: [],
+      depends: [],
+      profile: '',
+      extra: {},
+      description: cleanDescription,
+    });
+    return newId;
   });
 }
 
 module.exports = {
   parseBacklog,
+  parsePreamble,
   serializeBacklog,
+  DEFAULT_PREAMBLE,
+  ARCHIVE_PREAMBLE,
   nowStamp,
+  localStamp,
   STATUSES,
   PRIORITIES,
+  TASK_TYPES,
+  DEFAULT_TASK_TYPE,
+  KNOWN_FIELDS,
   TRANSITIONS,
   HEADER_RE,
   FIELD_RE,
   BRIEF_ID_RE,
+  TASK_ID_RE,
+  DEPENDS_SATISFIED,
+  SESSION_QUESTIONS_SECTION,
+  SESSION_QUESTIONS_HEADING,
+  ANSWERS_SECTION,
+  ANSWERS_HEADING,
+  REVIEW_VERDICT_SECTION,
+  REVIEW_VERDICT_HEADING,
+  CHRONOLOGICAL_SECTIONS,
+  WORKER_REPORT_SECTION,
+  LEGACY_WORKER_REPORT_SECTION,
+  WORKER_REPORT_SECTIONS,
+  stripWorkerReports,
+  ANSWER_STATUSES,
+  awaitsAnswer,
+  hasSessionQuestions,
+  countReviewVerdicts,
+  appendDescriptionSection,
+  blockingDependencies,
+  dependencyCycles,
   findBriefFile,
   atomicWrite,
   withFileLock,
+  TRANSIENT_FS_CODES,
   updateBacklog,
+  addTask,
+  CLOSED_STATUSES,
+  archivePathFor,
+  readArchivedTasks,
+  archiveClosedTasks,
+  LOCK_TIMEOUT_CODE,
+  DEFAULT_LOCK_ACQUIRE_TIMEOUT_MS,
+  resolveLockTimeout,
 };

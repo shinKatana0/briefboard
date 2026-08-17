@@ -298,6 +298,7 @@ function createSandbox(overrides) {
     clearTimeout,
     // Instrumentation buffers the tests read after driving the UI.
     capturedBlobParts: [],
+    eventSources: [],
     fetchCalls: [],
     confirmCalls: [],
     alertCalls: [],
@@ -338,6 +339,12 @@ function createSandbox(overrides) {
       this.onmessage = null;
       this.onopen = null;
       this.onerror = null;
+      this.closed = false;
+      sandbox.eventSources.push(this);
+      this.close = () => {
+        this.closed = true;
+        this.readyState = 2;
+      };
     };
 
   sandbox.URL =

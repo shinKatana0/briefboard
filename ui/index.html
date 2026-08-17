@@ -68,12 +68,21 @@
   }
 
   /* ---- header ---- */
+  /* Wrapping, not clipping (T-0178): `main` scrolls sideways when .board is
+     wider than the window, the header sits outside it and cannot, so a fixed
+     row hid the search box, the export, the language, the theme and the exit
+     button below ~1000px — measured with tools/screenshot.mjs at 800px, and at
+     900px in Japanese, where the labels are wider. Wrapping keeps every control
+     reachable without a second scroll axis to discover. */
   header {
-    display: flex; align-items: baseline; gap: 12px;
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px;
     padding: 14px 20px 10px; border-bottom: 1px solid var(--border);
   }
   header h1 { font: 600 15px/1 var(--mono); letter-spacing: .02em; }
   header h1 .path { color: var(--muted); font-weight: 400; }
+  /* The project name is what tells two boards apart, so it keeps the full
+     text colour while the rest of the subtitle stays muted. */
+  header h1 .project { color: var(--text); font-weight: 400; }
   #live { font: 12px var(--mono); color: var(--muted); display: flex; align-items: center; gap: 6px; }
   #live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--st-done); }
   #live.off .dot { background: var(--p0); }
@@ -108,6 +117,19 @@
   .prio-toggle.active[data-priority="Medium"] { background: var(--prio-medium); border-color: var(--prio-medium); }
   .prio-toggle.active[data-priority="Minor"] { background: var(--prio-minor); border-color: var(--prio-minor); }
 
+  /* "Blocked only" toggle (T-0092). Deliberately not a .tf-btn: the type
+     filter's click handler resets `active` on every .tf-btn it finds, so a
+     blocked toggle wearing that class would be switched off by an unrelated
+     click on Feature/Bug. Its active hue is the blocked marker's own, so the
+     filter and the cards it keeps read as the same thing. */
+  .blocked-toggle {
+    font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 9px 2px; cursor: pointer; transition: background .12s, border-color .12s, color .12s;
+  }
+  .blocked-toggle:hover { border-color: #2E3945; color: var(--text); }
+  .blocked-toggle.active { background: var(--prio-blocker); color: var(--chip-ink); border-color: var(--prio-blocker); }
+
   /* Search box (T-0042): shares the .tf-btn look (mono font, theme surface/
      border/colors) with the type filter so both read as one "filtering"
      cluster, but needs its own overrides since it holds free-form typed text
@@ -124,6 +146,17 @@
 
   #lang-toggle { margin-left: auto; }
   #theme-toggle { font-size: 13px; line-height: 1; padding: 3px 8px 2px; }
+  /* Destructive, so it only turns red under the pointer: a permanently red
+     button in the header would read as an alarm on a healthy board. */
+  #exit-board { font-size: 13px; line-height: 1; padding: 3px 8px 2px; }
+  #exit-board:hover { color: var(--p0); border-color: color-mix(in srgb, var(--p0) 55%, transparent); }
+  /* The "+" glyph reads as the action, the word beside it says which action
+     (T-0137). Only the glyph is enlarged - sizing the word too would make the
+     button taller than the rest of the header row - and the explicit
+     line-height keeps that larger glyph inside the same box as a plain
+     .tf-btn label. */
+  #new-task { display: inline-flex; align-items: baseline; gap: 6px; line-height: 14px; }
+  #new-task-glyph { font-size: 15px; }
 
   /* #lang-toggle is a <select>, not a <button>: reset UA chrome and re-apply
      .tf-btn look explicitly so browser default select styling can't win. */
@@ -156,6 +189,34 @@
   .col-head .hash { color: var(--muted); font-weight: 400; }
   .col-head .count { color: var(--muted); font-weight: 400; margin-left: auto; }
   .col { display: flex; flex-direction: column; }
+  /* Board column as a drop target (T-0075, backlog -> open). Same two-stage
+     highlight as the strips below, but under its own `.col` selector and in the
+     Open column's own color, so the strip rules keep theirs untouched. */
+  /* `align-self: stretch` and not a height of its own (T-0112): it fills the
+     grid row the tallest column already sets, so it never changes that row's
+     height. A min-height would, and would push the Cancelled strip - the second
+     zone of the same drag - out from under the cursor heading for it. */
+  .col.drag-available {
+    align-self: stretch;
+    outline: 2px dashed color-mix(in srgb, var(--st-open) 70%, transparent);
+    border-radius: 6px;
+  }
+  .col.drop-target {
+    outline: 2px solid var(--st-open); outline-offset: 0; border-radius: 6px;
+    background: color-mix(in srgb, var(--st-open) 20%, transparent);
+  }
+  /* The head is opaque (it is sticky, cards scroll under it), so it repeats the
+     fill instead of cutting a hole across the top of it. */
+  .col.drop-target .col-head { background: color-mix(in srgb, var(--st-open) 20%, var(--bg)); }
+  /* The second drop column (T-0084, ready -> in_progress) reuses those two
+     stages and only repaints them in its own status color. */
+  .col.drop-start.drag-available { outline-color: color-mix(in srgb, var(--st-in_progress) 70%, transparent); }
+  .col.drop-start.drop-target { outline-color: var(--st-in_progress); background: color-mix(in srgb, var(--st-in_progress) 20%, transparent); }
+  .col.drop-start.drop-target .col-head { background: color-mix(in srgb, var(--st-in_progress) 20%, var(--bg)); }
+  /* And the third (T-0141, open -> backlog), the one that moves a card leftwards. */
+  .col.drop-back.drag-available { outline-color: color-mix(in srgb, var(--st-backlog) 70%, transparent); }
+  .col.drop-back.drop-target { outline-color: var(--st-backlog); background: color-mix(in srgb, var(--st-backlog) 20%, transparent); }
+  .col.drop-back.drop-target .col-head { background: color-mix(in srgb, var(--st-backlog) 20%, var(--bg)); }
   .cards { display: flex; flex-direction: column; gap: 8px; min-height: 20px; }
   /* Scoped to board columns (not `.strip .cards`, which keeps scrolling with
      the page as before). max-height (not height) is load-bearing: it caps
@@ -184,13 +245,20 @@
   .card[draggable="true"] { cursor: grab; }
   .card:hover, .card:focus-visible { background: var(--surface-2); outline: none; border-color: #2E3945; }
   .card:focus-visible { box-shadow: 0 0 0 2px var(--st-open); }
-  .card .top { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+  /* Wrapping is load-bearing since T-0092: the blocked marker now carries a
+     blocker title, so the row can hold more than fits one line of a 220px
+     column. It wraps instead of pushing the chips off the card. */
+  .card .top { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; margin-bottom: 5px; }
   .id { font: 500 11.5px var(--mono); color: var(--muted); background: var(--surface-inset); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
   .prio { font: 700 10px var(--mono); border-radius: 4px; padding: 2px 5px 1px; color: var(--chip-ink); }
   .prio.Blocker { background: var(--prio-blocker); } .prio.Critical { background: var(--prio-critical); }
   .prio.Major { background: var(--prio-major); } .prio.Medium { background: var(--prio-medium); }
   .prio.Minor { background: var(--prio-minor); color: #DCE3EB; }
   .tag-bug { font: 600 10px var(--mono); color: var(--p0); border: 1px solid color-mix(in srgb, var(--p0) 50%, transparent); border-radius: 4px; padding: 1px 5px; }
+  /* Type tag for `external` (T-0092), same chip shape as .tag-bug in its own
+     hue - a card must never leave "we are waiting on someone else" looking like
+     a bug we could go and fix. */
+  .tag-external { font: 600 10px var(--mono); color: var(--st-review); border: 1px solid color-mix(in srgb, var(--st-review) 50%, transparent); border-radius: 4px; padding: 1px 5px; }
   .card .title { font-size: 13.5px; font-weight: 500; }
   .card.closed-task .title { color: var(--muted); }
   .card .foot { display: flex; gap: 10px; margin-top: 7px; font: 11px var(--mono); color: var(--muted); }
@@ -198,8 +266,17 @@
   /* done / cancelled strips */
   .strip { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 10px; min-width: 1140px; }
   /* "available target" - shown for the whole drag, weaker than the hover state below */
-  .strip.drag-available { outline: 1px dashed color-mix(in srgb, var(--st-cancelled) 45%, transparent); border-radius: 6px; }
-  .strip.drop-target { outline: 2px dashed var(--st-cancelled); outline-offset: 4px; border-radius: 6px; }
+  .strip.drag-available {
+    min-height: 120px;
+    outline: 2px dashed color-mix(in srgb, var(--st-cancelled) 70%, transparent);
+    border-radius: 6px;
+  }
+  /* Grey --st-cancelled needs a bigger share than the columns' blue and amber to
+     read as a fill at all against either theme's background. */
+  .strip.drop-target {
+    outline: 2px solid var(--st-cancelled); outline-offset: 0; border-radius: 6px;
+    background: color-mix(in srgb, var(--st-cancelled) 35%, transparent);
+  }
   .strip summary {
     cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 7px;
     font: 600 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; padding: 4px 2px 10px;
@@ -234,6 +311,165 @@
     cursor: pointer; margin: 0 6px 4px 0; display: inline-block;
   }
   .brief-link:hover { border-color: var(--st-open); }
+  /* Dependency chip in the task dialog (T-0087): the brief-link shape, plus the
+     prerequisite's current status so "is it done yet?" needs no second click.
+     A cancelled prerequisite unblocks but its premise is gone, so it is struck
+     through - visibly not the same thing as a finished one. */
+  .dep-link { display: inline-flex; align-items: baseline; gap: 6px; }
+  .dep-link.dep-cancelled .dep-id { text-decoration: line-through; }
+  .dep-link .dep-status { font-size: 11px; }
+  /* Card marker for a task whose prerequisites are not closed yet. The text is
+     already cut to a character budget before it gets here; the ellipsis rules
+     are the second line of defence for a narrow column, where even the budgeted
+     text would not fit. */
+  .blocked-flag {
+    font: 600 10px var(--mono); color: var(--prio-blocker);
+    border: 1px solid color-mix(in srgb, var(--prio-blocker) 50%, transparent);
+    border-radius: 4px; padding: 1px 5px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* Card marker for a task whose agent session left questions in the description
+     (T-0083). Its own hue on purpose: "waiting for a human answer" is neither
+     the blocked marker's red nor the live-session indicator T-0077 adds, and all
+     three can land on one card at once. */
+  .awaiting-flag {
+    font: 600 10px var(--mono); color: var(--prio-major);
+    border: 1px solid color-mix(in srgb, var(--prio-major) 50%, transparent);
+    border-radius: 4px; padding: 1px 5px;
+  }
+  /* Card marker for the agent session running on this task (T-0077). At 10px a
+     fourth hue would not reliably separate it from the two markers above, so
+     what marks the whole family is the leading dot: only this marker has one,
+     and only a live session's dot pulses. The card's .top row wraps, so all
+     three markers on one card push the title down instead of overflowing. */
+  .session-flag {
+    font: 600 10px var(--mono); border-radius: 4px; padding: 1px 5px;
+    border: 1px solid; display: inline-flex; align-items: center; gap: 4px;
+  }
+  .session-flag .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+  .session-flag.running { color: var(--st-open); border-color: color-mix(in srgb, var(--st-open) 50%, transparent); }
+  .session-flag.running .dot { animation: session-pulse 1.4s ease-in-out infinite; }
+  .session-flag.ended { color: var(--muted); border-color: var(--border); }
+  /* --p0, not the blocked marker's --prio-blocker: two red markers can share a
+     card, and they must not read as one. */
+  .session-flag.failed { color: var(--p0); border-color: color-mix(in srgb, var(--p0) 50%, transparent); }
+  /* Amber, between "ended" and "failed": the session was cut short with the
+     board, which is neither a clean finish nor the agent's own error (T-0102). */
+  .session-flag.interrupted { color: var(--p1); border-color: color-mix(in srgb, var(--p1) 50%, transparent); }
+  @keyframes session-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+  /* The watchdog's mark (T-0159): the board's own observation that the status
+     and what git shows do not agree. Filled where the other three markers are
+     outlined — at 10px a fifth outline hue would just be a fourth shade of the
+     same thing, while a solid chip reads as a different voice: not a property of
+     the task, but the board speaking about it. Amber, not red: this is something
+     to look at, not something that is broken. It appears on at most a handful of
+     cards, so it can afford to be the loudest thing on one. */
+  .watch-flag {
+    font: 600 10px var(--mono); background: var(--p1); color: var(--chip-ink);
+    border-radius: 4px; padding: 1px 5px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* The same finding written out in the dialog, where there is room for the
+     whole sentence and where the person who has to act on it is looking. A
+     tooltip alone would be unreachable on a touch screen and easy to miss. */
+  .watch-note {
+    border: 1px solid color-mix(in srgb, var(--p1) 50%, transparent);
+    border-left: 3px solid var(--p1);
+    border-radius: 6px; padding: 8px 12px; margin: 14px 0;
+    background: color-mix(in srgb, var(--p1) 7%, transparent);
+  }
+  .watch-note h3 { font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--p1); }
+  .watch-note p { font-size: 13px; color: var(--text); margin-top: 4px; }
+
+  /* ---- session log modal (T-0077) ---- */
+  /* The log is foreign output: it is put here with textContent and is never
+     parsed as markup, so this box only has to keep its line breaks readable. */
+  .log-view {
+    font: 12px/1.5 var(--mono); color: var(--text); background: var(--surface-inset);
+    border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+    max-height: 52vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  /* The board's own words in the log pane, not the agent's: set apart so the
+     two are never read as one text (T-0115). */
+  .log-view.log-note { font: 12px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--muted); }
+  .log-meta { font: 11px var(--mono); color: var(--muted); margin-bottom: 8px; }
+  .log-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .log-actions button { padding: 4px 12px 3px; }
+  .log-actions .danger { color: var(--p0); border-color: color-mix(in srgb, var(--p0) 50%, transparent); }
+  .session-row { margin-bottom: 14px; }
+
+  /* ---- the session a card can start (T-0122, T-0141, T-0144) ----
+     A caption, what the session does, and the action on a line of its own —
+     the same inset panel the closing and cost blocks use, so the card keeps one
+     idiom for "a block about this task". It is found by its label and its place
+     and never by colour: on this board colour means status, and an accent spent
+     on a control would compete with the card's own status hue (T-0145). The
+     button drops the .tf-btn uppercase chip size for sentence case, which is
+     what separates it from the small reference chips above it. */
+  .card-action {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 14px; background: var(--surface-inset);
+  }
+  .card-action h3 { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+  .card-action-what { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-bottom: 10px; }
+  .card-action-row button { font-size: 12px; text-transform: none; letter-spacing: normal; padding: 5px 14px 4px; }
+  /* Said where the action would have been, not in place of the whole block: the
+     board knows the session is impossible here and says which variable turns it
+     on (T-0144). */
+  .card-action-why { font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+
+  /* ---- closing the loop (T-0117, T-0148) ---- */
+  /* Reference AND controls: the board checks git, accepts the task and removes
+     the worktree. The one thing it still never does is merge — that line is
+     drawn in the block's own text, not by leaving it without buttons. */
+  .closing {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 14px; background: var(--surface-inset);
+  }
+  .closing h3 { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+  .closing dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0 0 8px; }
+  .closing dt { font: 11px var(--mono); color: var(--muted); }
+  /* user-select so the path is easy to grab; anywhere-wrap so a long Windows
+     path does not push the dialog sideways. */
+  .closing dd { margin: 0; font: 12px var(--mono); color: var(--text); user-select: text; overflow-wrap: anywhere; }
+  .closing-note { font-size: 12px; color: var(--muted); line-height: 1.6; }
+  /* What git says, in the three colours the board already uses for the states
+     they mean: accepted work, work still waiting, nothing known. */
+  .closing-state { font: 12px var(--mono); margin-bottom: 8px; }
+  .closing-state.merged { color: var(--st-done); }
+  .closing-state.unmerged { color: var(--st-review); }
+  .closing-state.unknown { color: var(--muted); }
+  .closing-hint { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-bottom: 6px; }
+  .closing-cmd { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .closing-cmd code {
+    font: 12px var(--mono); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 5px; padding: 3px 7px; user-select: text; overflow-wrap: anywhere;
+  }
+  .closing-cmd button { padding: 2px 10px 1px; font-size: 11px; }
+  .closing-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .closing-actions button { padding: 4px 12px 3px; }
+  /* A disabled action still says why, next to itself (T-0121, T-0144). */
+  .closing-actions button[disabled] { opacity: .5; cursor: not-allowed; }
+  .closing-why { font-size: 12px; color: var(--muted); }
+
+  /* ---- what the task cost (T-0116) ---- */
+  /* Same inset panel as the closing block, and next to it: both are what the
+     card can tell about the work already done. */
+  .cost {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 14px; background: var(--surface-inset);
+  }
+  .cost h3 { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+  .cost-total { font: 12.5px var(--mono); color: var(--text); margin-bottom: 6px; }
+  .cost-runs { list-style: none; margin: 0; padding: 0; }
+  .cost-runs li { display: flex; flex-wrap: wrap; gap: 4px 10px; font: 12px var(--mono); color: var(--muted); padding: 2px 0; }
+  .cost-runs .cost-kind { color: var(--text); min-width: 70px; }
+  .cost-runs .cost-time { color: var(--text); }
+  .cost-tokens { font: 12.5px var(--mono); color: var(--text); margin-top: 8px; }
+  /* The sum is only part of one: said plainly, in the place the number is read. */
+  .cost-partial { font-size: 12px; color: var(--p1); line-height: 1.6; margin-top: 8px; }
+
   .desc { border-top: 1px solid var(--border); padding-top: 12px; font-size: 13.5px; }
   .desc h1, .desc h2, .desc h3 { font-size: 13px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 14px 0 6px; }
   .desc p { margin: 6px 0; } .desc ul { margin: 6px 0 6px 20px; }
@@ -243,16 +479,68 @@
   .hint { margin-top: 16px; font: 11px var(--mono); color: var(--muted); }
   .empty { color: var(--muted); font-style: italic; }
 
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  /* ---- board stopped screen (T-0082) ---- */
+  /* Above the modal stack: once the board is stopped nothing underneath is live
+     any more, and the screen is deliberately not dismissable. */
+  .stopped-screen {
+    position: fixed; inset: 0; background: var(--overlay);
+    display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20;
+  }
+  .stopped-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 22px 26px; width: min(460px, 100%); text-align: center;
+    box-shadow: 0 18px 50px rgba(0,0,0,.5);
+  }
+  .stopped-title { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+  .stopped-hint { font: 12px/1.7 var(--mono); color: var(--muted); }
+
+  /* ---- new-task form (inside a modal panel) ---- */
+  .task-form { display: flex; flex-direction: column; gap: 4px; }
+  .task-form label { font: 12px var(--mono); color: var(--muted); margin-top: 10px; }
+  .task-form input, .task-form select, .task-form textarea {
+    font: 13.5px system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text); background: var(--surface-inset);
+    border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; width: 100%;
+  }
+  .task-form textarea { font: 12.5px var(--mono); resize: vertical; min-height: 90px; }
+  .task-form input:focus, .task-form select:focus, .task-form textarea:focus {
+    outline: none; border-color: var(--st-open);
+  }
+  .task-form .invalid { border-color: var(--p0); }
+  .form-error { min-height: 18px; margin-top: 10px; font: 12px var(--mono); color: var(--p0); }
+  .form-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .form-actions button { padding: 5px 14px 4px; }
+  .form-actions .primary { background: var(--st-open); border-color: var(--st-open); color: var(--chip-ink); }
+
+  /* ---- run profile (inside the task dialog, T-0108) ---- */
+  .profile-select {
+    font: 12px var(--mono); color: var(--text); background: var(--surface-inset);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px;
+  }
+  .profile-select:focus { outline: none; border-color: var(--st-open); }
+  /* The honest note under the selector (T-0121): the choice is stored either
+     way, so the note explains, it does not disable. */
+  .profile-note { font: 11px var(--mono); color: var(--muted); margin-top: 4px; max-width: 46em; }
+
+  /* ---- answer form (inside the task dialog, T-0085) ---- */
+  .answer-form { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 12px; }
+  .answer-form h3 { font: 12px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0; }
+  .answer-form .answer-note { font: 11px var(--mono); color: var(--muted); margin-top: 6px; }
+  .answer-form .answer-restart { display: flex; align-items: center; gap: 6px; font: 12px var(--mono); color: var(--muted); margin-top: 10px; }
+  .answer-form .answer-restart input { width: auto; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>briefboard <span class="path">· doc/backlog.md</span></h1>
+  <h1>briefboard <span class="project" id="project-name"></span><span class="path">· doc/backlog.md</span></h1>
+  <button id="new-task" class="tf-btn" type="button"><span id="new-task-glyph" aria-hidden="true">+</span><span id="new-task-label"></span></button>
   <div class="type-filter" id="type-filter">
     <button class="tf-btn active" data-type="all">All</button>
     <button class="tf-btn" data-type="feature">Feature</button>
     <button class="tf-btn" data-type="bug">Bug</button>
+    <button class="tf-btn" data-type="external">External</button>
   </div>
   <div class="priority-filter" id="priority-filter">
     <button class="prio-toggle" data-priority="Blocker" title="Blocker">⛔</button>
@@ -261,6 +549,7 @@
     <button class="prio-toggle" data-priority="Medium" title="Medium">●</button>
     <button class="prio-toggle" data-priority="Minor" title="Minor">▽</button>
   </div>
+  <button id="blocked-filter" class="blocked-toggle" type="button" aria-pressed="false"></button>
   <input type="search" id="search-filter" class="tf-btn search-input" placeholder="">
   <button id="export-excel" class="tf-btn" type="button">Export Excel</button>
   <select id="lang-toggle" class="tf-btn">
@@ -269,6 +558,7 @@
     <option value="ja">日本語</option>
   </select>
   <button id="theme-toggle" class="tf-btn" type="button"><span id="theme-icon" aria-hidden="true"></span></button>
+  <button id="exit-board" class="tf-btn" type="button"><span aria-hidden="true">⏻</span></button>
   <div id="live"><span class="dot"></span><span id="live-text">live</span></div>
 </header>
 <main>
@@ -294,13 +584,134 @@ const I18N = {
     hint_close: 'esc — close', brief_loading: 'Loading brief…', brief_error: 'error',
     brief_unavailable: 'Server unavailable', meta_type: 'type', meta_status: 'status',
     meta_created: 'created', meta_closed: 'closed', meta_briefs: 'briefs',
+    meta_depends: 'depends on', empty_depends: 'none', dep_unknown: 'unknown task',
+    dep_cancelled_hint: 'prerequisite cancelled',
+    awaiting_label: 'needs answer',
+    awaiting_hint: 'The agent session left questions in the task description',
     lang_switch_title: 'Switch language', reconnecting: 'reconnecting…',
     export_button: 'Export Excel', xlsx_col_id: 'ID', xlsx_col_priority: 'Priority', xlsx_col_title: 'Title',
     xlsx_col_description: 'Description', xlsx_col_brief: 'Brief', xlsx_col_status: 'Status',
     xlsx_col_created: 'Created', xlsx_col_closed: 'Closed',
     confirm_cancel: 'Cancel task {id} "{title}"?', cancel_failed: 'Failed to cancel the task',
+    open_failed: 'Failed to move the task to Open',
+    return_failed: 'Failed to put the task back into the backlog',
+    confirm_return_session: 'Put {id} "{title}" back into the backlog?\n\nA briefing session is running on it and will be stopped. Everything already written stays — the brief, the questions and the answers — so opening the task again later costs no second briefing.',
+    confirm_start: 'Start task {id} "{title}"?\n\nAn agent session will be started: it works in its own git branch and writes and commits code there.',
+    confirm_start_no_session: 'Start task {id} "{title}"?\n\nNo worker command is configured (BRIEFBOARD_WORKER_CMD), so no session will be started — the task is only marked as taken into work.',
+    start_failed: 'Failed to start the task',
     search_placeholder: 'Search title/description…',
     theme_toggle_to_light: 'Switch to light theme', theme_toggle_to_dark: 'Switch to dark theme',
+    new_task_button: 'New task', new_task_title: 'New task',
+    field_title: 'Title', field_type: 'Type', field_priority: 'Priority',
+    field_description: 'Description', create_button: 'Create', cancel_button: 'Cancel',
+    title_required: 'A title is required', create_failed: 'Failed to create the task',
+    busy_retry: 'The backlog is busy right now — try again',
+    filter_external: 'External', tag_external: 'external',
+    blocked_one: 'waiting: {title}', blocked_many: 'waiting: {count} tasks',
+    filter_blocked: 'Blocked', filter_blocked_title: 'Show only blocked tasks',
+    session_running: 'session live', session_running_hint: 'An agent session is running on this task',
+    session_ended: 'session done', session_ended_hint: 'The agent session finished normally',
+    session_stopped: 'session stopped', session_stopped_hint: 'The agent session was stopped from the board',
+    session_failed: 'session failed', session_failed_hint: 'The agent session exited with an error',
+    session_log_button: 'Session log', session_log_title: 'Session log',
+    session_log_empty: '(the log is empty)',
+    session_log_missing: 'The session log is no longer available',
+    session_log_failed: 'Failed to load the session log',
+    session_log_size: '{total} bytes', session_log_tail: 'last {shown} of {total} bytes',
+    session_log_refresh: 'Refresh',
+    session_stop_button: 'Stop the session',
+    session_stop_confirm: 'Stop the agent session for {id}?\n\nThe agent is interrupted where it stands; whatever it has already written to disk stays.',
+    session_stop_failed: 'Failed to stop the session',
+    session_stop_title: 'Running session',
+    session_stop_what: 'An agent session is running on this task right now. Stopping it interrupts the agent where it stands; whatever it has already written to disk stays.',
+    session_start_running: 'A session is already running on this task, and a task carries one at a time. To start this one, stop the running session above.',
+    answer_title: 'Answer the session',
+    answer_label: 'Your answer',
+    answer_hint: 'The text is appended to the end of the description under "### Answers". Nothing already written is changed.',
+    answer_restart: 'Restart the briefing session',
+    answer_send: 'Send the answer',
+    answer_required: 'Write an answer first',
+    answer_failed: 'Failed to save the answer',
+    exit_button: 'Stop the board',
+    exit_confirm: 'Stop the board?\n\nThe briefboard process exits and this page stops updating. Everything already written to doc/ stays; running agent sessions are stopped with it.',
+    exit_failed: 'Failed to stop the board',
+    live_stopped: 'stopped',
+    stopped_title: 'The board is stopped',
+    stopped_hint: 'The briefboard process has exited. Start it again from the terminal: node server/server.js',
+    answer_restart_worker: 'Restart the worker session',
+    session_interrupted: 'session cut short',
+    session_interrupted_hint: 'The session went down with the board and was not restarted. Its log is still there; the task kept the status it had.',
+    meta_profile: 'run profile', profile_default: 'default',
+    profile_unknown: 'This profile is not in BRIEFBOARD_PROFILES — a session for this task will not start',
+    profile_failed: 'Failed to change the run profile',
+    closing_title: 'Closing the task',
+    closing_branch: 'branch',
+    closing_worktree: 'worktree',
+    closing_step_diff: 'Read the diff of the branch and run your own tests on it.',
+    closing_note: 'The board does not merge: that is a judgement, and it stays yours.',
+    closing_guide: 'The rest of the commands are in the guide, section "After review: merging and cleaning up".',
+    closing_checking: 'asking git…',
+    closing_state_merged: '✓ the branch is merged into {head}',
+    closing_state_unmerged: '⟳ the branch is not merged into {head}',
+    closing_state_no_branch: 'no branch for this task — there is nothing to merge',
+    closing_state_ambiguous: '{count} branches match this task; the board will not guess which one is it',
+    closing_state_no_git: 'git is not available here',
+    closing_state_not_repo: 'the project is not a git working tree',
+    closing_state_failed: 'the board could not ask git',
+    closing_merge_hint: 'Then merge it yourself, from your own checkout:',
+    closing_copy: 'copy', closing_copied: 'copied',
+    closing_recheck: 'Check again',
+    closing_accept: 'Accept',
+    closing_accept_confirm: 'Accept {id} "{title}"?\n\nThe task goes to done. That status is final: the board has no way back from it.',
+    closing_accept_failed: 'Failed to accept the task',
+    closing_remove: 'Remove the worktree',
+    closing_remove_confirm: 'Remove the worktree of {id}?\n\nOnly the directory goes; the branch and every commit on it stay.',
+    closing_remove_failed: 'Failed to remove the worktree',
+    closing_remove_refused: 'The worktree was not removed: {reason}',
+    closing_why_not_merged: 'the branch is not merged',
+    closing_why_dirty: 'the worktree has uncommitted changes',
+    closing_why_ambiguous: 'the board cannot tell which branch belongs to this task',
+    closing_why_session: 'an agent session is running in it',
+    closing_why_git: 'the board cannot read git here',
+    profile_unused: 'No session command uses {profile}, so this choice changes nothing yet — add {profile} to BRIEFBOARD_SESSION_CMD, BRIEFBOARD_WORKER_CMD or BRIEFBOARD_ORCHESTRATOR_CMD',
+    profile_some_only: '{profile} reaches only these sessions: {kinds} — the others ignore this choice',
+    session_log_waiting: 'The session is running and has not written anything yet. Some agents print their whole output only when they finish, so an empty log here does not mean something is broken.',
+    cost_title: 'What this task took',
+    cost_sessions: 'sessions: {count}',
+    cost_total: 'total time: {duration}',
+    cost_so_far: 'so far — a session is still running',
+    cost_kind_briefing: 'briefing', cost_kind_worker: 'worker', cost_kind_orchestrator: 'review',
+    cost_exit: 'exit {code}',
+    cost_dur_h: '{h}h {m}m', cost_dur_m: '{m}m {s}s', cost_dur_s: '{s}s',
+    cost_tokens: 'tokens: {tokens}',
+    cost_tokens_some: 'from {count} of {total} sessions',
+    cost_partial: 'Incomplete: {count} earlier session(s) for this task are no longer in the registry, so the numbers above cover only the rest.',
+    answer_restart_orchestrator: 'Restart the review session',
+    briefing_session_title: 'Briefing session',
+    briefing_session_what: 'An agent works the task through and writes a brief for it. A brief that is already there is kept, never replaced.',
+    briefing_session_unconfigured: 'Not configured on this board: set BRIEFBOARD_SESSION_CMD to start it from here.',
+    briefing_session_button: 'Start the briefing session',
+    briefing_session_confirm: 'Start the briefing session for {id} "{title}"?\n\nAn agent works the task through and writes a brief for it. Nothing already written is replaced — a task that comes back up out of the backlog keeps the brief it already has, so start this one only when that brief needs revisiting.',
+    briefing_session_failed: 'Failed to start the briefing session',
+    briefing_session_refused: 'The briefing session did not start: {reason}',
+    review_session_title: 'Review session',
+    review_session_what: 'An agent reads the branch diff and the briefs, runs the tests and appends a verdict to this description. It sets no status and merges nothing, so a task still sitting in review when the session ends is what a finished review looks like — the decision is yours.',
+    review_session_unconfigured: 'Not configured on this board: set BRIEFBOARD_ORCHESTRATOR_CMD to start it from here.',
+    review_session_button: 'Start the review session',
+    review_session_confirm: 'Start the review session for {id} "{title}"?\n\nAn agent reads the diff of the branch and the briefs, runs the tests and appends its verdict to the task description. It sets no status, done least of all, and it merges nothing — the decision stays yours.',
+    review_session_failed: 'Failed to start the review session',
+    review_session_refused: 'The review session did not start: {reason}',
+    watch_title: 'The board noticed',
+    watch_unrecorded_label: 'work not recorded',
+    watch_unrecorded_note: 'The session the board started on this task has ended, {branch} carries commits, and the task is still in progress. The commits are there; the status was not changed.',
+    watch_nothing_label: 'nothing committed',
+    watch_nothing_note: 'The session the board started on this task has ended without leaving any commits, and the task is still in progress. Its log is where what happened is written down.',
+    watch_no_branch_label: 'no branch',
+    watch_no_branch_note: 'The task is in review and git has no task/ branch for it, so there is no diff here for a reviewer to read.',
+    watch_no_commits_label: 'empty branch',
+    watch_no_commits_note: '{branch} exists but carries no commits of its own, and the task is in review — there is nothing in it to read.',
+    watch_unmerged_label: 'not merged',
+    watch_unmerged_note: 'The task is done and {branch} is not merged into {head}. A branch that was squashed or rebased into {head} reads the same way here.',
   },
   ru: {
     filter_all: 'Все', filter_feature: 'Фича', filter_bug: 'Баг', tag_bug: 'баг',
@@ -312,13 +723,134 @@ const I18N = {
     hint_close: 'esc — закрыть', brief_loading: 'Загрузка брифа…', brief_error: 'ошибка',
     brief_unavailable: 'Сервер недоступен', meta_type: 'тип', meta_status: 'статус',
     meta_created: 'создана', meta_closed: 'закрыта', meta_briefs: 'брифы',
+    meta_depends: 'зависит от', empty_depends: 'нет', dep_unknown: 'нет такой задачи',
+    dep_cancelled_hint: 'предпосылка отменена',
+    awaiting_label: 'ждёт ответа',
+    awaiting_hint: 'Агентская сессия оставила вопросы в описании задачи',
     lang_switch_title: 'Сменить язык', reconnecting: 'переподключение…',
     export_button: 'Экспорт Excel', xlsx_col_id: 'ID', xlsx_col_priority: 'Приоритет', xlsx_col_title: 'Заголовок',
     xlsx_col_description: 'Описание', xlsx_col_brief: 'Бриф', xlsx_col_status: 'Статус',
     xlsx_col_created: 'Дата создания', xlsx_col_closed: 'Дата завершения',
     confirm_cancel: 'Отменить задачу {id} «{title}»?', cancel_failed: 'Не удалось отменить задачу',
+    open_failed: 'Не удалось перевести задачу в Open',
+    return_failed: 'Не удалось вернуть задачу в бэклог',
+    confirm_return_session: 'Вернуть {id} «{title}» в бэклог?\n\nПо ней идёт брифинг-сессия, она будет остановлена. Всё уже написанное остаётся — бриф, вопросы и ответы, — поэтому повторное открытие задачи не потребует второго брифинга.',
+    confirm_start: 'Взять задачу {id} «{title}» в работу?\n\nБудет запущена агентская сессия: она работает в отдельной git-ветке, пишет код и коммитит его туда.',
+    confirm_start_no_session: 'Взять задачу {id} «{title}» в работу?\n\nКоманда воркера не настроена (BRIEFBOARD_WORKER_CMD), сессия не запустится — задача просто пометится взятой в работу.',
+    start_failed: 'Не удалось взять задачу в работу',
     search_placeholder: 'Поиск по названию/описанию…',
     theme_toggle_to_light: 'Переключить на светлую тему', theme_toggle_to_dark: 'Переключить на тёмную тему',
+    new_task_button: 'Новая задача', new_task_title: 'Новая задача',
+    field_title: 'Название', field_type: 'Тип', field_priority: 'Приоритет',
+    field_description: 'Описание', create_button: 'Создать', cancel_button: 'Отмена',
+    title_required: 'Нужно указать название', create_failed: 'Не удалось создать задачу',
+    busy_retry: 'Бэклог сейчас занят — повторите попытку',
+    filter_external: 'Внешние', tag_external: 'внешняя',
+    blocked_one: 'ждёт: {title}', blocked_many: 'ждёт задач: {count}',
+    filter_blocked: 'Заблокированные', filter_blocked_title: 'Показать только заблокированные задачи',
+    session_running: 'сессия идёт', session_running_hint: 'По задаче работает агентская сессия',
+    session_ended: 'сессия завершена', session_ended_hint: 'Агентская сессия завершилась штатно',
+    session_stopped: 'сессия остановлена', session_stopped_hint: 'Агентская сессия остановлена с доски',
+    session_failed: 'сессия упала', session_failed_hint: 'Агентская сессия завершилась с ошибкой',
+    session_log_button: 'Лог сессии', session_log_title: 'Лог сессии',
+    session_log_empty: '(лог пуст)',
+    session_log_missing: 'Лог сессии больше недоступен',
+    session_log_failed: 'Не удалось загрузить лог сессии',
+    session_log_size: '{total} байт', session_log_tail: 'последние {shown} из {total} байт',
+    session_log_refresh: 'Обновить',
+    session_stop_button: 'Остановить сессию',
+    session_stop_confirm: 'Остановить агентскую сессию по задаче {id}?\n\nАгент прервётся на том месте, где он сейчас; всё, что он уже записал на диск, останется.',
+    session_stop_failed: 'Не удалось остановить сессию',
+    session_stop_title: 'Работающая сессия',
+    session_stop_what: 'По этой задаче прямо сейчас работает агентская сессия. Остановка прервёт агента на том месте, где он сейчас; всё, что он уже записал на диск, останется.',
+    session_start_running: 'По этой задаче уже идёт сессия, а задача ведёт одну за раз. Чтобы запустить эту, остановите работающую сессию выше.',
+    answer_title: 'Ответить сессии',
+    answer_label: 'Ваш ответ',
+    answer_hint: 'Текст дописывается в конец описания под «### Answers». Уже написанное не меняется.',
+    answer_restart: 'Перезапустить брифинг-сессию',
+    answer_send: 'Отправить ответ',
+    answer_required: 'Сначала напишите ответ',
+    answer_failed: 'Не удалось сохранить ответ',
+    exit_button: 'Остановить доску',
+    exit_confirm: 'Остановить доску?\n\nПроцесс briefboard завершится, страница перестанет обновляться. Всё, что уже записано в doc/, останется; работающие агентские сессии будут остановлены вместе с ним.',
+    exit_failed: 'Не удалось остановить доску',
+    live_stopped: 'остановлена',
+    stopped_title: 'Доска остановлена',
+    stopped_hint: 'Процесс briefboard завершён. Запустите его снова из терминала: node server/server.js',
+    answer_restart_worker: 'Перезапустить воркер-сессию',
+    session_interrupted: 'сессия оборвалась',
+    session_interrupted_hint: 'Сессия оборвалась вместе с доской и не перезапускалась. Лог на месте, задача осталась в своём статусе.',
+    meta_profile: 'профиль запуска', profile_default: 'по умолчанию',
+    profile_unknown: 'Этого профиля нет в BRIEFBOARD_PROFILES — сессия по задаче не запустится',
+    profile_failed: 'Не удалось сменить профиль запуска',
+    closing_title: 'Закрытие задачи',
+    closing_branch: 'ветка',
+    closing_worktree: 'worktree',
+    closing_step_diff: 'Посмотрите диф ветки и прогоните на ней свои тесты.',
+    closing_note: 'Доска не мержит: это решение, и оно остаётся за вами.',
+    closing_guide: 'Остальные команды — в руководстве, раздел «После ревью: мерж и уборка».',
+    closing_checking: 'спрашиваем git…',
+    closing_state_merged: '✓ ветка влита в {head}',
+    closing_state_unmerged: '⟳ ветка не влита в {head}',
+    closing_state_no_branch: 'ветки у этой задачи нет — мержить нечего',
+    closing_state_ambiguous: 'задаче соответствует веток: {count}; доска не будет гадать, какая из них та самая',
+    closing_state_no_git: 'git здесь недоступен',
+    closing_state_not_repo: 'проект не является рабочим деревом git',
+    closing_state_failed: 'доска не смогла спросить git',
+    closing_merge_hint: 'Потом смержите её сами, из своего checkout:',
+    closing_copy: 'копировать', closing_copied: 'скопировано',
+    closing_recheck: 'Проверить снова',
+    closing_accept: 'Принять',
+    closing_accept_confirm: 'Принять {id} «{title}»?\n\nЗадача перейдёт в done. Этот статус терминальный: обратного хода у доски нет.',
+    closing_accept_failed: 'Не удалось принять задачу',
+    closing_remove: 'Убрать worktree',
+    closing_remove_confirm: 'Убрать worktree задачи {id}?\n\nУдаляется только каталог; ветка и все коммиты на ней остаются.',
+    closing_remove_failed: 'Не удалось убрать worktree',
+    closing_remove_refused: 'Worktree не убран: {reason}',
+    closing_why_not_merged: 'ветка не влита',
+    closing_why_dirty: 'в worktree есть незакоммиченные изменения',
+    closing_why_ambiguous: 'доска не может определить, какая ветка принадлежит этой задаче',
+    closing_why_session: 'в нём работает агентская сессия',
+    closing_why_git: 'доска не может прочитать git',
+    profile_unused: 'Ни одна команда сессии не использует {profile}, поэтому пока этот выбор ничего не меняет — добавьте {profile} в BRIEFBOARD_SESSION_CMD, BRIEFBOARD_WORKER_CMD или BRIEFBOARD_ORCHESTRATOR_CMD',
+    profile_some_only: '{profile} доходит только до этих сессий: {kinds} — остальные этот выбор игнорируют',
+    session_log_waiting: 'Сессия идёт и пока ничего не написала. Некоторые агенты печатают весь вывод только по завершении, так что пустой лог здесь не значит, что что-то сломалось.',
+    cost_title: 'Во что обошлась задача',
+    cost_sessions: 'сессий: {count}',
+    cost_total: 'суммарно: {duration}',
+    cost_so_far: 'пока что — одна сессия ещё идёт',
+    cost_kind_briefing: 'брифинг', cost_kind_worker: 'воркер', cost_kind_orchestrator: 'ревью',
+    cost_exit: 'код {code}',
+    cost_dur_h: '{h} ч {m} мин', cost_dur_m: '{m} мин {s} с', cost_dur_s: '{s} с',
+    cost_tokens: 'токенов: {tokens}',
+    cost_tokens_some: 'по {count} сессиям из {total}',
+    cost_partial: 'Неполно: {count} более ранних сессий по этой задаче в реестре уже нет, поэтому числа выше — только по остальным.',
+    answer_restart_orchestrator: 'Перезапустить ревью-сессию',
+    briefing_session_title: 'Брифинг-сессия',
+    briefing_session_what: 'Агент прорабатывает задачу и пишет по ней бриф. Уже написанный бриф сохраняется, а не заменяется.',
+    briefing_session_unconfigured: 'На этой доске не настроена: чтобы запускать её отсюда, задайте BRIEFBOARD_SESSION_CMD.',
+    briefing_session_button: 'Запустить брифинг-сессию',
+    briefing_session_confirm: 'Запустить брифинг-сессию по задаче {id} «{title}»?\n\nАгент прорабатывает задачу и пишет по ней бриф. Ничего уже написанного не заменяется — вернувшаяся из бэклога задача сохраняет свой бриф, поэтому запускайте сессию только тогда, когда этот бриф нужно пересмотреть.',
+    briefing_session_failed: 'Не удалось запустить брифинг-сессию',
+    briefing_session_refused: 'Брифинг-сессия не запустилась: {reason}',
+    review_session_title: 'Ревью-сессия',
+    review_session_what: 'Агент читает диф ветки и брифы, прогоняет тесты и дописывает вердикт в это описание. Статуса он не ставит и ничего не мержит, поэтому задача, оставшаяся в review к концу сессии, — это и есть завершённое ревью; решение за вами.',
+    review_session_unconfigured: 'На этой доске не настроена: чтобы запускать её отсюда, задайте BRIEFBOARD_ORCHESTRATOR_CMD.',
+    review_session_button: 'Запустить ревью-сессию',
+    review_session_confirm: 'Запустить ревью-сессию по задаче {id} «{title}»?\n\nАгент прочитает диф ветки и брифы, прогонит тесты и допишет вердикт в описание задачи. Он не ставит никакой статус, тем более done, и ничего не мержит — решение остаётся за вами.',
+    review_session_failed: 'Не удалось запустить ревью-сессию',
+    review_session_refused: 'Ревью-сессия не запустилась: {reason}',
+    watch_title: 'Доска заметила',
+    watch_unrecorded_label: 'работа не записана',
+    watch_unrecorded_note: 'Сессия, запущенная доской по этой задаче, завершилась, в {branch} есть коммиты, а задача всё ещё в работе. Коммиты на месте, статус не менялся.',
+    watch_nothing_label: 'нет коммитов',
+    watch_nothing_note: 'Сессия, запущенная доской по этой задаче, завершилась и не оставила ни одного коммита, а задача всё ещё в работе. Что там произошло, записано в её логе.',
+    watch_no_branch_label: 'нет ветки',
+    watch_no_branch_note: 'Задача на ревью, но ветки task/ для неё у git нет — читать ревьюеру здесь нечего.',
+    watch_no_commits_label: 'пустая ветка',
+    watch_no_commits_note: 'Ветка {branch} есть, но своих коммитов в ней нет, а задача на ревью — смотреть в ней нечего.',
+    watch_unmerged_label: 'не влита',
+    watch_unmerged_note: 'Задача завершена, а {branch} не влита в {head}. Ветка, попавшая в {head} squash-ом или ребейзом, выглядит здесь так же.',
   },
   ja: {
     filter_all: 'すべて', filter_feature: '機能', filter_bug: 'バグ', tag_bug: 'バグ',
@@ -330,13 +862,134 @@ const I18N = {
     hint_close: 'esc — 閉じる', brief_loading: 'ブリーフを読み込み中…', brief_error: 'エラー',
     brief_unavailable: 'サーバーに接続できません', meta_type: '種類', meta_status: 'ステータス',
     meta_created: '作成日', meta_closed: '終了日', meta_briefs: 'ブリーフ',
+    meta_depends: '依存先', empty_depends: 'なし', dep_unknown: '存在しないタスク',
+    dep_cancelled_hint: '前提タスクはキャンセル済み',
+    awaiting_label: '回答待ち',
+    awaiting_hint: 'エージェントセッションがタスクの説明に質問を残しました',
     lang_switch_title: '言語を切り替え', reconnecting: '再接続中…',
     export_button: 'Excelエクスポート', xlsx_col_id: 'ID', xlsx_col_priority: '優先度', xlsx_col_title: 'タイトル',
     xlsx_col_description: '説明', xlsx_col_brief: 'ブリーフ', xlsx_col_status: 'ステータス',
     xlsx_col_created: '作成日時', xlsx_col_closed: '終了日時',
     confirm_cancel: 'タスク {id}「{title}」をキャンセルしますか?', cancel_failed: 'タスクのキャンセルに失敗しました',
+    open_failed: 'タスクを Open に移動できませんでした',
+    return_failed: 'タスクをバックログに戻せませんでした',
+    confirm_return_session: '{id}「{title}」をバックログに戻しますか?\n\nこのタスクではブリーフィングセッションが実行中で、停止されます。すでに書かれたもの — ブリーフ、質問と回答 — はすべて残るため、後でもう一度 Open にしてもブリーフィングをやり直す必要はありません。',
+    confirm_start: 'タスク {id}「{title}」に着手しますか?\n\nエージェントセッションが開始されます。専用の git ブランチでコードを書き、コミットします。',
+    confirm_start_no_session: 'タスク {id}「{title}」に着手しますか?\n\nワーカーのコマンド（BRIEFBOARD_WORKER_CMD）が未設定のため、セッションは開始されません。タスクは作業中として記録されるだけです。',
+    start_failed: 'タスクに着手できませんでした',
     search_placeholder: 'タイトル・説明を検索…',
     theme_toggle_to_light: 'ライトテーマに切り替え', theme_toggle_to_dark: 'ダークテーマに切り替え',
+    new_task_button: '新規タスク', new_task_title: '新規タスク',
+    field_title: 'タイトル', field_type: '種類', field_priority: '優先度',
+    field_description: '説明', create_button: '作成', cancel_button: 'キャンセル',
+    title_required: 'タイトルは必須です', create_failed: 'タスクの作成に失敗しました',
+    busy_retry: 'バックログが使用中です — もう一度お試しください',
+    filter_external: '外部', tag_external: '外部',
+    blocked_one: '待ち: {title}', blocked_many: '待ちタスク: {count} 件',
+    filter_blocked: 'ブロック中', filter_blocked_title: 'ブロックされたタスクのみ表示',
+    session_running: 'セッション実行中', session_running_hint: 'このタスクでエージェントセッションが実行中です',
+    session_ended: 'セッション終了', session_ended_hint: 'エージェントセッションは正常に終了しました',
+    session_stopped: 'セッション停止', session_stopped_hint: 'エージェントセッションはボードから停止されました',
+    session_failed: 'セッション失敗', session_failed_hint: 'エージェントセッションはエラーで終了しました',
+    session_log_button: 'セッションログ', session_log_title: 'セッションログ',
+    session_log_empty: '(ログは空です)',
+    session_log_missing: 'セッションログはもう利用できません',
+    session_log_failed: 'セッションログを読み込めませんでした',
+    session_log_size: '{total} バイト', session_log_tail: '末尾 {shown} / 全 {total} バイト',
+    session_log_refresh: '再読み込み',
+    session_stop_button: 'セッションを停止',
+    session_stop_confirm: 'タスク {id} のエージェントセッションを停止しますか?\n\nエージェントはその場で中断されます。すでにディスクに書き込まれた内容はそのまま残ります。',
+    session_stop_failed: 'セッションを停止できませんでした',
+    session_stop_title: '実行中のセッション',
+    session_stop_what: 'このタスクでは今エージェントセッションが実行中です。停止するとエージェントはその場で中断され、すでにディスクに書き込まれた内容はそのまま残ります。',
+    session_start_running: 'このタスクではすでにセッションが実行中で、1つのタスクが同時に持てるセッションは1つです。これを開始するには、上の実行中のセッションを停止してください。',
+    answer_title: 'セッションに回答する',
+    answer_label: 'あなたの回答',
+    answer_hint: '入力した内容は説明の末尾に「### Answers」として追記されます。既存の記述は変更されません。',
+    answer_restart: 'ブリーフィングセッションを再実行する',
+    answer_send: '回答を送信',
+    answer_required: '先に回答を入力してください',
+    answer_failed: '回答を保存できませんでした',
+    exit_button: 'ボードを停止',
+    exit_confirm: 'ボードを停止しますか?\n\nbriefboard のプロセスが終了し、このページは更新されなくなります。doc/ に書き込まれた内容はそのまま残りますが、実行中のエージェントセッションも一緒に停止します。',
+    exit_failed: 'ボードを停止できませんでした',
+    live_stopped: '停止',
+    stopped_title: 'ボードは停止しました',
+    stopped_hint: 'briefboard のプロセスは終了しました。ターミナルで node server/server.js を実行すると再開できます。',
+    answer_restart_worker: 'ワーカーセッションを再実行する',
+    session_interrupted: 'セッション中断',
+    session_interrupted_hint: 'セッションはボードとともに終了し、再開されていません。ログは残っており、タスクのステータスも変わっていません。',
+    meta_profile: '実行プロファイル', profile_default: '既定',
+    profile_unknown: 'このプロファイルは BRIEFBOARD_PROFILES にありません。このタスクのセッションは開始されません',
+    profile_failed: '実行プロファイルを変更できませんでした',
+    closing_title: 'タスクの締め',
+    closing_branch: 'ブランチ',
+    closing_worktree: 'ワークツリー',
+    closing_step_diff: 'ブランチの差分を読み、自分のテストを実行します。',
+    closing_note: 'ボードはマージしません。それは判断であり、判断はあなたのものです。',
+    closing_guide: '残りのコマンドはガイドの「レビューの後: マージと後片付け」の節にあります。',
+    closing_checking: 'git に問い合わせ中…',
+    closing_state_merged: '✓ ブランチは {head} にマージ済みです',
+    closing_state_unmerged: '⟳ ブランチは {head} にマージされていません',
+    closing_state_no_branch: 'このタスクのブランチはありません — マージするものがありません',
+    closing_state_ambiguous: 'このタスクに一致するブランチが {count} 本あります。どれが本命かをボードは推測しません',
+    closing_state_no_git: 'ここでは git を使えません',
+    closing_state_not_repo: 'このプロジェクトは git の作業ツリーではありません',
+    closing_state_failed: 'ボードは git に問い合わせできませんでした',
+    closing_merge_hint: 'そのうえで、自分の checkout から自分でマージします:',
+    closing_copy: 'コピー', closing_copied: 'コピーしました',
+    closing_recheck: 'もう一度確認',
+    closing_accept: '受け入れる',
+    closing_accept_confirm: '{id}「{title}」を受け入れますか?\n\nタスクは done になります。この状態は最終で、ボードから戻す方法はありません。',
+    closing_accept_failed: 'タスクを受け入れられませんでした',
+    closing_remove: 'ワークツリーを削除',
+    closing_remove_confirm: '{id} のワークツリーを削除しますか?\n\n削除されるのはディレクトリだけです。ブランチとそのコミットは残ります。',
+    closing_remove_failed: 'ワークツリーを削除できませんでした',
+    closing_remove_refused: 'ワークツリーは削除されませんでした: {reason}',
+    closing_why_not_merged: 'ブランチが未マージです',
+    closing_why_dirty: 'ワークツリーにコミットされていない変更があります',
+    closing_why_ambiguous: 'どのブランチがこのタスクのものかをボードは判別できません',
+    closing_why_session: 'その中でエージェントセッションが動いています',
+    closing_why_git: 'ボードはここで git を読めません',
+    profile_unused: 'どのセッションコマンドも {profile} を使っていないため、この選択はまだ何も変えません — BRIEFBOARD_SESSION_CMD、BRIEFBOARD_WORKER_CMD、BRIEFBOARD_ORCHESTRATOR_CMD のいずれかに {profile} を追加してください',
+    profile_some_only: '{profile} が届くのは次のセッションだけです: {kinds} — ほかのセッションはこの選択を無視します',
+    session_log_waiting: 'セッションは実行中で、まだ何も出力していません。エージェントによっては終了時にまとめて出力するため、ここでログが空でも壊れているとは限りません。',
+    cost_title: 'このタスクにかかったもの',
+    cost_sessions: 'セッション数: {count}',
+    cost_total: '合計時間: {duration}',
+    cost_so_far: '現時点まで — セッションがまだ実行中です',
+    cost_kind_briefing: 'ブリーフィング', cost_kind_worker: 'ワーカー', cost_kind_orchestrator: 'レビュー',
+    cost_exit: '終了コード {code}',
+    cost_dur_h: '{h}時間{m}分', cost_dur_m: '{m}分{s}秒', cost_dur_s: '{s}秒',
+    cost_tokens: 'トークン: {tokens}',
+    cost_tokens_some: '{total} 件中 {count} 件のセッションから',
+    cost_partial: '不完全: このタスクの古いセッション {count} 件はレジストリに残っていないため、上の数値は残りの分だけです。',
+    answer_restart_orchestrator: 'レビューセッションを再実行する',
+    briefing_session_title: 'ブリーフィングセッション',
+    briefing_session_what: 'エージェントがタスクを検討し、ブリーフを書きます。すでにあるブリーフはそのまま保持され、置き換えられません。',
+    briefing_session_unconfigured: 'このボードでは未設定です。ここから開始するには BRIEFBOARD_SESSION_CMD を設定してください。',
+    briefing_session_button: 'ブリーフィングセッションを開始',
+    briefing_session_confirm: 'タスク {id}「{title}」のブリーフィングセッションを開始しますか?\n\nエージェントがタスクを検討し、ブリーフを書きます。すでに書かれたものは置き換えられません — バックログから戻ってきたタスクは既存のブリーフをそのまま保持するため、そのブリーフを見直す必要があるときにだけ開始してください。',
+    briefing_session_failed: 'ブリーフィングセッションを開始できませんでした',
+    briefing_session_refused: 'ブリーフィングセッションは開始されませんでした: {reason}',
+    review_session_title: 'レビューセッション',
+    review_session_what: 'エージェントがブランチの差分とブリーフを読み、テストを実行し、この説明に判定を追記します。ステータスは変更せず、マージも行いません。そのためセッション終了後もタスクが review に残っているのが完了したレビューの姿であり、判断はあなたのものです。',
+    review_session_unconfigured: 'このボードでは未設定です。ここから開始するには BRIEFBOARD_ORCHESTRATOR_CMD を設定してください。',
+    review_session_button: 'レビューセッションを開始',
+    review_session_confirm: 'タスク {id}「{title}」のレビューセッションを開始しますか?\n\nエージェントがブランチの差分とブリーフを読み、テストを実行し、判定をタスクの説明に追記します。ステータスは変更せず、done にもせず、マージも行いません — 判断はあなたのものです。',
+    review_session_failed: 'レビューセッションを開始できませんでした',
+    review_session_refused: 'レビューセッションは開始されませんでした: {reason}',
+    watch_title: 'ボードが気づいたこと',
+    watch_unrecorded_label: '未記録の作業',
+    watch_unrecorded_note: 'ボードがこのタスクで開始したセッションは終了し、{branch} にはコミットがありますが、タスクはまだ進行中のままです。コミットは残っていて、ステータスは変更されていません。',
+    watch_nothing_label: 'コミットなし',
+    watch_nothing_note: 'ボードがこのタスクで開始したセッションは、コミットを一つも残さずに終了しました。タスクはまだ進行中のままです。何が起きたかはそのログに記録されています。',
+    watch_no_branch_label: 'ブランチなし',
+    watch_no_branch_note: 'タスクはレビュー中ですが、git にはこのタスクの task/ ブランチがありません。レビュアーが読む差分がここにはありません。',
+    watch_no_commits_label: '空のブランチ',
+    watch_no_commits_note: '{branch} はありますが、そのブランチ自身のコミットはありません。タスクはレビュー中ですが、中に見るものがありません。',
+    watch_unmerged_label: '未マージ',
+    watch_unmerged_note: 'タスクは完了ですが、{branch} は {head} にマージされていません。squash やリベースで {head} に取り込まれたブランチも、ここでは同じように見えます。',
   },
 };
 // Default is always 'en' when nothing is stored - unlike the theme, language
@@ -372,18 +1025,63 @@ const PRIO_ICON = { Blocker: '⛔', Critical: '▲', Major: '◆', Medium: '●'
 // Only tasks not yet "in active work" can be dragged onto the Cancelled strip
 // (see doc/brief/T-0017-01-drag-cancel.md) - literally backlog/open, nothing else.
 const DRAG_CANCELLABLE = ['backlog', 'open'];
+// Only a backlog card can be dragged into the Open column (T-0075): the single
+// transition backlog -> open, mirroring what the server endpoint accepts.
+const DRAG_OPENABLE = ['backlog'];
+// ...and only a ready card into the In Progress column (T-0084): ready ->
+// in_progress, again exactly what its endpoint accepts.
+const DRAG_STARTABLE = ['ready'];
+// ...and only an open card back into the Backlog column (T-0141): open ->
+// backlog, the one step of the graph that can be walked in both directions.
+const DRAG_RETURNABLE = ['open'];
+// Status of the card currently being dragged, captured on dragstart and cleared
+// on dragend. dragover cannot read the dataTransfer payload (browsers only
+// expose it on drop), so this is how a drop zone knows, while the pointer is
+// still moving, whether it may accept this particular drag at all.
+let draggedStatus = null;
+// Same idea for "this card has unfinished prerequisites": the In Progress zone
+// has to refuse it while the pointer is still moving.
+let draggedBlocked = false;
+// Which session commands the server has configured (/api/board), and the run
+// profiles the user declared. The drop confirmation reads it to say whether an
+// agent will really be started; the task dialog, to offer the profiles — and it
+// offers exactly the declared ones, never a list of its own (T-0108).
+// `profileUsedBy` is which of the templates actually contains {profile}
+// (T-0121). `orchestrator` is the review session (T-0122): unset, the card's
+// review action is absent, since starting that session is all the action does.
+let sessionsConfigured = {
+  enabled: false, worker: false, orchestrator: false, profiles: [], profileUsedBy: {},
+};
+// Live session state, task id -> registry record (T-0077). Kept apart from
+// `tasks` because it is apart at the source: a session starting or dying does
+// not touch doc/backlog.md, so it arrives from its own uncached endpoint
+// (/api/sessions) on its own SSE event, and never through the cached board.
+let sessionsById = new Map();
+// What each task took, summed over every session the registry still has
+// (T-0116). It arrives with the records, from the same response, because it is
+// made of them and goes stale on exactly the same events.
+let costsById = new Map();
+// What the watchdog found, task id -> { kind, branches } (T-0159), and what the
+// checkout's own branch is called, for the one finding that names it. Only
+// discrepancies are in here: a task the board and git agree about has no entry,
+// and on a healthy project the whole map is empty. It arrives with the session
+// records because it is made of them and of git — neither of which moves when
+// doc/backlog.md does.
+let watchdogById = new Map();
+let watchdogHead = null;
 
 let tasks = [];
-let typeFilter = 'all'; // 'all' | 'feature' | 'bug'
+let typeFilter = 'all'; // 'all' | 'feature' | 'bug' | 'external'
 let searchQuery = ''; // free-text filter (T-0042), combined with typeFilter by AND
 let priorityFilter = new Set(); // multi-select priority filter (T-0044); empty = inactive (all priorities shown)
+let blockedOnly = false; // "blocked only" toggle (T-0092), combined with the rest by AND
 const modals = []; // stack for Esc handling
+// Set once the board process is gone for good (T-0082). It is what tells a
+// deliberate stop from a lost connection, so nothing but the shutdown path sets it.
+let boardStopped = false;
+let stoppedScreen = null;
+let sse = null; // the live EventSource, kept so the stopped screen can close it
 
-// Applies typeFilter first (as before), then - if searchQuery is non-empty -
-// narrows further by a case-insensitive substring match against title,
-// description or id, then - if priorityFilter is non-empty - narrows to only
-// the selected priorities. All three filters combine by AND: each step only
-// narrows the current list, it never widens it back.
 function filteredTasks() {
   const byType = typeFilter === 'all' ? tasks : tasks.filter((task) => task.type === typeFilter);
   const q = searchQuery.toLowerCase();
@@ -392,8 +1090,15 @@ function filteredTasks() {
     String(task.description || '').toLowerCase().includes(q) ||
     String(task.id || '').toLowerCase().includes(q)
   );
-  if (priorityFilter.size === 0) return byText;
-  return byText.filter((task) => priorityFilter.has(task.priority));
+  const byPriority = priorityFilter.size === 0
+    ? byText
+    : byText.filter((task) => priorityFilter.has(task.priority));
+  if (!blockedOnly) return byPriority;
+  // The server's `blockedBy` verbatim, not blockingIdsFor(): this filter answers
+  // "which tasks have an unfinished prerequisite", and a finished task that was
+  // closed while one of its prerequisites was still open is one of them, even
+  // though its card carries no marker.
+  return byPriority.filter((task) => (task.blockedBy || []).length > 0);
 }
 
 // ---------- tiny markdown renderer (safe: escapes HTML first) ----------
@@ -438,17 +1143,155 @@ function sortTasks(list, byClosed) {
   );
 }
 
+// Unfinished prerequisites worth showing on a card. The list itself is computed
+// by the server and arrives in `blockedBy` (/api/board) - the board never walks
+// the dependency graph. A closed task is not waiting for anything, so its own
+// stale prerequisites are not advertised.
+function blockingIdsFor(task) {
+  if (!ACTIVE.includes(task.status)) return [];
+  return task.blockedBy || [];
+}
+
+// Substitutes {name} placeholders in a translated string. The replacement is a
+// function, not a string: a task title containing "$&" or "$'" would otherwise
+// be re-expanded by String.replace's dollar patterns.
+function tFill(key, vars) {
+  let out = t(key);
+  for (const name of Object.keys(vars)) {
+    out = out.replace('{' + name + '}', () => String(vars[name]));
+  }
+  return out;
+}
+
+// A blocker title has to share the card's top row with the id, the priority and
+// the type chips, so it is cut to this many characters; the tooltip carries it
+// whole. The budget is what a 220px column (the board's narrowest) still shows
+// without eliding: ~33 monospace characters at 10px, minus the marker's own
+// "waiting: " prefix.
+const BLOCKED_TITLE_MAX = 24;
+
+function truncate(text, max) {
+  const s = String(text == null ? '' : text);
+  return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
+}
+
+// What the blocked marker says, or null when the task is not blocked. One
+// prerequisite is named ("waiting: get the API keys from the client") - that is
+// the whole point of the marker, since a bare id answers "blocked by something"
+// rather than "waiting for what". Several would not fit, so they are counted and
+// the tooltip lists them in full as "id — title"; the ids stay reachable there
+// because an id is what a person types into the CLI next.
+function blockedBadge(task) {
+  const ids = blockingIdsFor(task);
+  if (!ids.length) return null;
+  const entries = ids.map((id) => {
+    const dep = tasks.find((x) => x.id === id);
+    return { id, title: dep ? String(dep.title || '') : t('dep_unknown') };
+  });
+  return {
+    label: entries.length === 1
+      ? tFill('blocked_one', { title: truncate(entries[0].title, BLOCKED_TITLE_MAX) })
+      : tFill('blocked_many', { count: entries.length }),
+    tooltip: entries.map((e) => `${e.id} — ${e.title}`).join('\n'),
+  };
+}
+
+// Which session state a registry record is in, or null when the task has no
+// session at all. A killed session reports no exit code but a signal, and
+// "stopped on purpose" is not the same news as "crashed"; `interrupted` is a
+// third kind of ending — the session went down with the board (T-0102).
+const SESSION_CLASS = {
+  running: 'running', ended: 'ended', stopped: 'ended',
+  failed: 'failed', interrupted: 'interrupted',
+};
+function sessionState(id) {
+  const record = sessionsById.get(id);
+  if (!record) return null;
+  if (record.status === 'running') return 'running';
+  if (record.status === 'interrupted') return 'interrupted';
+  if (record.signal) return 'stopped';
+  return record.exitCode === 0 ? 'ended' : 'failed';
+}
+
+function sessionFlagHtml(task) {
+  const state = sessionState(task.id);
+  if (!state) return '';
+  return `<span class="session-flag ${SESSION_CLASS[state]}" title="${esc(t('session_' + state + '_hint'))}">` +
+    `<span class="dot" aria-hidden="true"></span>${esc(t('session_' + state))}</span>`;
+}
+
+// The watchdog's five findings (T-0159), each with a label short enough for a
+// card and the whole observation for the tooltip and the dialog. The server
+// sends the kind, never the text: the wording is interface, and it is translated
+// like the rest of it.
+const WATCH_KEY = {
+  'work-not-recorded': 'watch_unrecorded',
+  'session-left-nothing': 'watch_nothing',
+  'review-without-branch': 'watch_no_branch',
+  'review-without-commits': 'watch_no_commits',
+  'done-not-merged': 'watch_unmerged',
+};
+
+// What the board says about this task, or null when it has nothing to say —
+// which is the normal case and stays silent everywhere.
+function watchdogFinding(id) {
+  const found = watchdogById.get(id);
+  if (!found || !WATCH_KEY[found.kind]) return null;
+  const branches = found.branches || [];
+  return {
+    kind: found.kind,
+    label: t(WATCH_KEY[found.kind] + '_label'),
+    text: tFill(WATCH_KEY[found.kind] + '_note', {
+      // Several branches match a task badly enough that the closing block
+      // refuses to guess between them; here they are simply all named.
+      branch: branches.length ? branches.join(', ') : 'task/' + id,
+      head: watchdogHead || 'HEAD',
+    }),
+  };
+}
+
+// What of the finding a card's DOM depends on, for cardSig().
+function watchdogSig(id) {
+  const found = watchdogFinding(id);
+  return found ? found.kind + ' ' + found.text : '';
+}
+
+function watchdogFlagHtml(task) {
+  const found = watchdogFinding(task.id);
+  if (!found) return '';
+  return `<span class="watch-flag" title="${esc(found.text)}">${esc(found.label)}</span>`;
+}
+
+function watchdogNoteHtml(task) {
+  const found = watchdogFinding(task.id);
+  if (!found) return '';
+  return `<div class="watch-note"><h3>${esc(t('watch_title'))}</h3><p>${esc(found.text)}</p></div>`;
+}
+
+// Type chips a card/dialog carries. `feature` is the ordinary case and stays
+// unmarked, so a tag on a card always means "this is not ordinary work".
+const TYPE_TAG_KEY = { bug: 'tag_bug', external: 'tag_external' };
+function typeTagHtml(task) {
+  const key = TYPE_TAG_KEY[task.type];
+  return key ? `<span class="tag-${task.type}">${esc(t(key))}</span>` : '';
+}
+
 function cardEl(task) {
   const div = document.createElement('div');
   div.className = 'card' + (task.status === 'done' || task.status === 'cancelled' ? ' closed-task' : '');
   div.style.borderLeftColor = STATUS_COLOR[task.status];
   div.tabIndex = 0;
   div.dataset.id = task.id; // stable key for focus restore across re-render (T-0048)
+  const badge = blockedBadge(task);
   div.innerHTML = `
     <div class="top">
       <span class="id">${task.id}</span>
       <span class="prio ${task.priority}" title="${task.priority}" aria-label="${task.priority}">${PRIO_ICON[task.priority] || task.priority}</span>
-      ${task.type === 'bug' ? `<span class="tag-bug">${t('tag_bug')}</span>` : ''}
+      ${typeTagHtml(task)}
+      ${badge ? `<span class="blocked-flag" title="${esc(badge.tooltip)}">${esc(badge.label)}</span>` : ''}
+      ${task.awaitingAnswer ? `<span class="awaiting-flag" title="${esc(t('awaiting_hint'))}"><span aria-hidden="true">?</span> ${t('awaiting_label')}</span>` : ''}
+      ${sessionFlagHtml(task)}
+      ${watchdogFlagHtml(task)}
     </div>
     <div class="title">${esc(task.title)}</div>
     <div class="foot">
@@ -459,20 +1302,47 @@ function cardEl(task) {
   const open = () => openTask(task.id);
   div.addEventListener('click', open);
   div.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
-  if (DRAG_CANCELLABLE.includes(task.status)) {
+  // A card is draggable when at least one drop zone would accept it: the
+  // Cancelled strip, the Open column, the In Progress column. Which of them
+  // lights up is decided per-zone in dragstart below.
+  //
+  // A ready card whose prerequisites are unfinished is accepted by none of them
+  // (the server refuses to start it, and `ready` cannot be cancelled from the
+  // board either), so it stays undraggable rather than offering a drag that
+  // could only end in an error.
+  const blocked = blockingIdsFor(task).length > 0;
+  const cancellable = DRAG_CANCELLABLE.includes(task.status);
+  const openable = DRAG_OPENABLE.includes(task.status);
+  const startable = DRAG_STARTABLE.includes(task.status) && !blocked;
+  const returnable = DRAG_RETURNABLE.includes(task.status);
+  if (cancellable || openable || startable || returnable) {
     div.draggable = true;
     div.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/plain', task.id);
       e.dataTransfer.effectAllowed = 'move';
-      cancelStrip.classList.add('drag-available');
+      draggedStatus = task.status;
+      draggedBlocked = blocked;
+      // Each zone lights up only for the statuses it actually accepts, so the
+      // board never advertises a drop that would be refused on release.
+      if (cancellable) cancelStrip.classList.add('drag-available');
+      if (openable && openColumn) openColumn.classList.add('drag-available');
+      if (startable && inProgressColumn) inProgressColumn.classList.add('drag-available');
+      if (returnable && backlogColumn) backlogColumn.classList.add('drag-available');
     });
     // dragend always fires (drop, Esc cancel, or release outside any target),
-    // so it's the reliable place to clear both highlight states - this is a
+    // so it's the reliable place to clear every highlight state - this is a
     // safety net in case dragleave didn't fire for some reason (e.g. the
     // drag was cancelled while the window lost focus).
     div.addEventListener('dragend', () => {
+      draggedStatus = null;
+      draggedBlocked = false;
       cancelStrip.classList.remove('drag-available');
       cancelStrip.classList.remove('drop-target');
+      for (const col of [openColumn, inProgressColumn, backlogColumn]) {
+        if (!col) continue;
+        col.classList.remove('drag-available');
+        col.classList.remove('drop-target');
+      }
     });
   }
   // Signature of the task fields this node was built from, so the incremental
@@ -493,10 +1363,12 @@ function cardEl(task) {
 let scrollContainers = {}; // status key -> live `.cards` container
 let columnHeads = {};      // status key -> active-column `.col-head` element
 let stripSummaries = {};   // status key -> done/cancelled strip <summary> element
+let openColumn = null;     // the Open column's `.col` element (drop zone, T-0075)
+let inProgressColumn = null; // the In Progress column's `.col` element (drop zone, T-0084)
+let backlogColumn = null;  // the Backlog column's `.col` element (drop zone, T-0141)
 let boardBuilt = false;
 
-// Builds the static board skeleton once: five active columns (head + cards) and
-// the done/cancelled strips (summary + cards). Each per-status `.cards` container
+// Builds the static board skeleton once. Each per-status `.cards` container
 // carries a stable data-status key and is cached, so later renders update its
 // contents in place without ever recreating the scrollable element.
 function buildBoardStructure() {
@@ -519,6 +1391,25 @@ function buildBoardStructure() {
     board.appendChild(col);
     columnHeads[st] = head;
     scrollContainers[st] = cards;
+    // Three columns double as drop zones: Open (for backlog cards), In Progress
+    // (for ready ones) and Backlog (for open ones on their way back). Their
+    // elements outlive every later render (that is the whole point of this
+    // skeleton), so the listeners are attached here, exactly once, and never in
+    // render().
+    if (st === 'open') {
+      openColumn = col;
+      attachOpenDropZone(col);
+    }
+    if (st === 'in_progress') {
+      inProgressColumn = col;
+      col.classList.add('drop-start'); // paints its highlight in the In Progress color
+      attachStartDropZone(col);
+    }
+    if (st === 'backlog') {
+      backlogColumn = col;
+      col.classList.add('drop-back'); // paints its highlight in the Backlog color
+      attachReturnDropZone(col);
+    }
   }
   for (const st of ['done', 'cancelled']) {
     const strip = document.getElementById('strip-' + st);
@@ -541,13 +1432,32 @@ function buildBoardStructure() {
 // equal signature can safely reuse the same card node; any difference forces a
 // fresh node so the card's content stays correct.
 function cardSig(task) {
+  const badge = blockedBadge(task);
   return [
     task.id, task.priority, task.type, task.status,
     task.created, task.closed, (task.briefs || []).length, task.title, lang,
+    // The rendered marker text, not just the blocker ids: without it the marker
+    // would outlive its own prerequisite being closed (T-0087), and renaming a
+    // blocker would leave the old title on the card until something else about
+    // the task changed - both would need a page reload to catch up (T-0092).
+    badge ? badge.label + '\u0002' + badge.tooltip : '',
+    // A session appends its questions long after the card was first drawn, and
+    // nothing else about the task changes when it does - left out of the
+    // signature, the marker would only appear after a page reload (T-0083).
+    task.awaitingAnswer ? '?' : '',
+    // Session state lives outside `task` entirely and changes while the card is
+    // on screen — a session dying is exactly the moment the card must be
+    // repainted, and nothing in the task itself moves when it does (T-0077).
+    sessionState(task.id) || '',
+    // Same reasoning again for the watchdog's mark (T-0159): it is decided
+    // outside `task` entirely, and the moment it appears or goes away — a
+    // session ending, a branch merged in a terminal — moves nothing in the task
+    // itself. The rendered text and not just the kind, so a finding that starts
+    // naming a second branch repaints the card too.
+    watchdogSig(task.id),
   ].join('\u0001');
 }
 
-// True when `container`'s current children are exactly `desired`, same order.
 function sameChildren(children, desired) {
   if (children.length !== desired.length) return false;
   for (let i = 0; i < desired.length; i++) {
@@ -556,13 +1466,10 @@ function sameChildren(children, desired) {
   return true;
 }
 
-// Reconciles the card nodes inside `container` to match `list` (already sorted):
-// reuses an existing node when a task with the same id is unchanged (same
-// signature), builds a fresh node otherwise, and drops nodes whose task is gone.
+// Reconciles the card nodes inside `container` to match `list` (already sorted).
 // Returns the node whose task id equals `focusId` when it lives in this
 // container (else null), so render() can restore keyboard focus to it.
 function reconcileCards(container, list, focusId) {
-  // Index reusable nodes from the previous render by their stable data-id key.
   const existing = new Map();
   for (const child of container.children) {
     if (child.dataset && child.dataset.id) existing.set(child.dataset.id, child);
@@ -630,8 +1537,6 @@ function render() {
 }
 
 // ---------- modals ----------
-// Elements matching this are considered keyboard-focusable inside a dialog; used
-// for the initial focus target and the Tab/Shift+Tab focus-trap.
 const FOCUSABLE_SEL =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
   'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -726,7 +1631,6 @@ function closeTop() {
   }
 }
 
-// Keep Tab focus cycling within the top dialog (focus-trap).
 function trapTab(e) {
   const overlay = modals[modals.length - 1];
   if (!overlay) return;
@@ -734,7 +1638,6 @@ function trapTab(e) {
   const f = focusablesIn(panel);
   const active = document.activeElement;
   if (!f.length) {
-    // Nothing focusable inside: hold focus on the panel itself.
     e.preventDefault();
     if (active !== panel) panel.focus();
     return;
@@ -755,16 +1658,392 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Tab') trapTab(e);
 });
 
+// One dependency chip: the prerequisite's id plus its current status, so the
+// answer to "is it done yet?" is on screen. A `cancelled` prerequisite gets its
+// own class (struck-through id) - it no longer blocks, but a task standing on a
+// cancelled premise must not read as quietly satisfied (T-0087).
+function depLinkHtml(depId) {
+  const dep = tasks.find((x) => x.id === depId);
+  const status = dep ? dep.status : null;
+  const label = dep ? statusLabel(status) : t('dep_unknown');
+  const color = status ? STATUS_COLOR[status] : 'var(--muted)';
+  const hint = status === 'cancelled' ? ` title="${esc(t('dep_cancelled_hint'))}"` : '';
+  return `<span class="brief-link dep-link${status === 'cancelled' ? ' dep-cancelled' : ''}" data-task="${esc(depId)}"${hint}>` +
+    `<span class="dep-id">${esc(depId)}</span>` +
+    `<span class="dep-status" style="color:${color}">${esc(label)}</span></span>`;
+}
+
+// Same mechanics as the brief links next to them: a click opens that task's own
+// dialog on top of this one.
+function wireDependencyLinks(overlay) {
+  overlay.querySelectorAll('[data-task]').forEach((el) =>
+    el.addEventListener('click', () => openTask(el.dataset.task))
+  );
+}
+
+// The run profile of the task's sessions (T-0108), offered only where the user
+// declared profiles at all — with none declared the field means nothing here,
+// so the row is absent rather than empty. The values come from the server's
+// declaration and are written back as they were read: the board has no idea what
+// any of them stands for.
+// Declaring the profiles is only half of the feature; the other half is
+// {profile} in the command template, and without it the chosen value has
+// nowhere to go. The selector still appears — it writes a real field, and a
+// control that vanishes has already been read once as a lost feature — but it
+// says what it will and will not reach (T-0121). The kinds are weighed
+// separately: only the ones that could actually run count, and a placeholder in
+// the worker template says nothing about the briefing one.
+//
+// The partial case names the kinds that do use it rather than having a string
+// per combination: with three kinds (T-0122) that would be six, and one more
+// with every kind added.
+function profileNoteText() {
+  const used = sessionsConfigured.profileUsedBy || {};
+  const kinds = [];
+  if (sessionsConfigured.enabled) kinds.push('briefing');
+  if (sessionsConfigured.worker) kinds.push('worker');
+  if (sessionsConfigured.orchestrator) kinds.push('orchestrator');
+  const using = kinds.filter((kind) => !!used[kind]);
+  if (!using.length) return t('profile_unused');
+  if (using.length === kinds.length) return '';
+  return tFill('profile_some_only', { kinds: using.map((kind) => t('cost_kind_' + kind)).join(', ') });
+}
+
+function profileSelectHtml(task) {
+  const profiles = sessionsConfigured.profiles || [];
+  const current = task.profile || '';
+  const options = [`<option value=""${current ? '' : ' selected'}>${esc(t('profile_default'))}</option>`];
+  for (const value of profiles) {
+    options.push(`<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(value)}</option>`);
+  }
+  // A value the declaration no longer carries is still what the file says, and
+  // is still what stops that task's session from starting; showing it as
+  // "default" would hide the very thing the reader has to fix.
+  if (current && !profiles.includes(current)) {
+    options.push(
+      `<option value="${esc(current)}" selected title="${esc(t('profile_unknown'))}">${esc(current)}</option>`
+    );
+  }
+  const noteText = profileNoteText();
+  const note = noteText ? `<div class="profile-note">${esc(noteText)}</div>` : '';
+  return `<select class="profile-select" data-profile-select="${esc(task.id)}">${options.join('')}</select>${note}`;
+}
+
+// ---------- what the task took (T-0116) ----------
+// The board measures this itself, for any agent: how many sessions a task
+// needed, of which kinds, how long they ran and how they ended. The token line
+// appears only when the user declared an extractor AND it found something —
+// with nothing declared the block says nothing about tokens, because a hint at
+// a number nobody can produce is worse than silence.
+
+// Rounded to whole seconds and read in the current language: h/m/s abbreviate
+// differently in each, so the unit is part of the string, not appended to it.
+function formatDuration(ms) {
+  const total = Math.max(0, Math.round(Number(ms) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return tFill('cost_dur_h', { h: h, m: m });
+  if (m) return tFill('cost_dur_m', { m: m, s: s });
+  return tFill('cost_dur_s', { s: s });
+}
+
+// Non-breaking spaces: a six-figure token count broken across two lines is
+// unreadable, and the group separator differs by locale anyway.
+function groupDigits(n) {
+  return String(Math.round(Number(n))).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+}
+
+// A run's own duration, live: a running session's total grows while the page
+// stands still, so it is measured from its start rather than taken from the
+// summary, which is only as fresh as the last /api/sessions answer.
+function runDuration(run, now) {
+  if (!run.running) return Number(run.durationMs) || 0;
+  const started = Date.parse(run.startedAt);
+  return Number.isFinite(started) ? Math.max(0, now - started) : Number(run.durationMs) || 0;
+}
+
+// The board's own kinds; anything else is shown as it is written rather than
+// dropped.
+const SESSION_KINDS = ['briefing', 'worker', 'orchestrator'];
+function costKindLabel(kind) {
+  return SESSION_KINDS.includes(kind) ? t('cost_kind_' + kind) : String(kind || '');
+}
+
+function costRunHtml(run, now) {
+  const outcome = t('session_' + run.outcome);
+  const exit =
+    run.outcome === 'failed' && run.exitCode !== null && run.exitCode !== undefined
+      ? ` <span>${esc(tFill('cost_exit', { code: run.exitCode }))}</span>`
+      : '';
+  return (
+    '<li>' +
+    `<span class="cost-kind">${esc(costKindLabel(run.kind))}</span>` +
+    `<span class="cost-time">${esc(formatDuration(runDuration(run, now)))}</span>` +
+    `<span>${esc(outcome)}</span>${exit}` +
+    '</li>'
+  );
+}
+
+function costBlockHtml(id) {
+  const cost = costsById.get(id);
+  if (!cost || !cost.sessions) return '';
+  const now = Date.now();
+  const runs = cost.entries || [];
+  const total = runs.reduce((sum, run) => sum + runDuration(run, now), 0);
+  const soFar = cost.running ? ` <span class="empty">(${esc(t('cost_so_far'))})</span>` : '';
+  // Only when a number was actually read out of a log. Null is not zero: it
+  // means nobody told us, and the board does not fill that in.
+  const tokens =
+    typeof cost.tokens === 'number'
+      ? `<div class="cost-tokens">${esc(tFill('cost_tokens', { tokens: groupDigits(cost.tokens) }))}` +
+        (cost.tokenSessions < cost.sessions
+          ? ` <span class="empty">(${esc(
+              tFill('cost_tokens_some', { count: cost.tokenSessions, total: cost.sessions })
+            )})</span>`
+          : '') +
+        '</div>'
+      : '';
+  const partial = cost.complete
+    ? ''
+    : `<div class="cost-partial">${esc(tFill('cost_partial', { count: cost.dropped }))}</div>`;
+  return `
+    <div class="cost">
+      <h3>${esc(t('cost_title'))}</h3>
+      <div class="cost-total">${esc(tFill('cost_sessions', { count: cost.sessions }))} · ${esc(
+        tFill('cost_total', { duration: formatDuration(total) })
+      )}${soFar}</div>
+      <ul class="cost-runs">${runs.map((run) => costRunHtml(run, now)).join('')}</ul>
+      ${tokens}
+      ${partial}
+    </div>`;
+}
+
+// ---------- closing the loop (T-0117, T-0148) ----------
+// The path used to break off here: the block named the branch and the worktree,
+// and everything else was prose pointing at the guide. It now carries what the
+// board can check and what it may do — whether git has the branch in HEAD, the
+// merge line ready to copy, and the two actions (accept, remove the worktree).
+//
+// It still does not merge (T-0117): a merge is a judgement, and a button that
+// merges will one day merge the wrong thing. The tests are not named either —
+// the board runs on Node and the project may be anything, so it says "your own
+// tests" rather than inventing a command it cannot keep the promise of.
+//
+// The state comes from git, asked for when the card is opened or rechecked. Not
+// on the board's own repaint: the backlog changes for a dozen reasons a minute
+// and git state changes for none of them, so a check per SSE frame would run git
+// for every open tab and learn nothing new.
+const CLOSING_STATUSES = ['review', 'done'];
+let gitStateById = new Map();
+
+// The container only: what goes inside depends on an answer that has not arrived
+// yet when the dialog is built.
+function closingBlockHtml(task) {
+  if (!CLOSING_STATUSES.includes(task.status)) return '';
+  return `<div class="closing" data-closing><div class="closing-hint">${esc(t('closing_checking'))}</div></div>`;
+}
+
+// Why an action is refused, in the board's words. The server sends the same
+// reasons back when it refuses one for real — the check here is UX, that one is
+// the rule (the same split as every other write on this board).
+const CLOSING_WHY = {
+  'not-merged': 'closing_why_not_merged',
+  dirty: 'closing_why_dirty',
+  'ambiguous-branch': 'closing_why_ambiguous',
+  'session-running': 'closing_why_session',
+  'no-git': 'closing_why_git',
+  'not-a-repo': 'closing_why_git',
+};
+
+function closingStateLine(state) {
+  if (state.git === 'no-git') return { key: 'closing_state_no_git', tone: 'unknown' };
+  if (state.git === 'not-a-repo') return { key: 'closing_state_not_repo', tone: 'unknown' };
+  if (state.git !== 'ok') return { key: 'closing_state_failed', tone: 'unknown' };
+  if ((state.branches || []).length > 1) {
+    return { key: 'closing_state_ambiguous', tone: 'unknown', vars: { count: state.branches.length } };
+  }
+  if (!state.branch) return { key: 'closing_state_no_branch', tone: 'unknown' };
+  const head = state.head || 'HEAD';
+  return state.merged
+    ? { key: 'closing_state_merged', tone: 'merged', vars: { head } }
+    : { key: 'closing_state_unmerged', tone: 'unmerged', vars: { head } };
+}
+
+// The one reason that blocks accepting: a branch this task certainly owns, and
+// HEAD does not have it. Ambiguity is not one — the board created that doubt,
+// and refusing a human's verdict over it would be worse than recording it.
+function acceptBlocker(state) {
+  if (state.git === 'ok' && state.branch && state.merged === false) return 'not-merged';
+  return null;
+}
+
+// Deleting is the other way round: every doubt blocks it, because there is no
+// undo. The rules are T-0099's, and the server applies them again for real.
+function removeBlocker(state, id) {
+  if (state.git !== 'ok') return 'no-git';
+  const session = sessionsById.get(id);
+  if (session && session.status === 'running') return 'session-running';
+  if (!state.branch) return (state.branches || []).length > 1 ? 'ambiguous-branch' : 'not-merged';
+  if (state.merged !== true) return 'not-merged';
+  if (state.worktreeClean !== true) return 'dirty';
+  return null;
+}
+
+function closingActionHtml(action, label, blocker) {
+  const why = blocker ? `<span class="closing-why">${esc(t(CLOSING_WHY[blocker] || 'closing_why_git'))}</span>` : '';
+  return `<button type="button" class="tf-btn" data-closing-${action}${blocker ? ' disabled' : ''}>${esc(label)}</button>${why}`;
+}
+
+const canCopy = () =>
+  typeof navigator !== 'undefined' && !!navigator.clipboard && !!navigator.clipboard.writeText;
+
+// A branch name and a filesystem path are data: they are left out of the markup
+// and put in with textContent below, so a path that happens to contain markup is
+// shown as written and never parsed — the same rule the session log follows.
+function closingContentHtml(task, state) {
+  const ok = state.git === 'ok';
+  const line = closingStateLine(state);
+  // A finished task with nothing left to clean up has nothing to say.
+  if (task.status !== 'review' && !(ok && state.worktree)) return '';
+  const rows =
+    (ok && state.branch ? `<dt>${esc(t('closing_branch'))}</dt><dd data-closing-branch></dd>` : '') +
+    (ok && state.worktree ? `<dt>${esc(t('closing_worktree'))}</dt><dd data-closing-worktree></dd>` : '');
+  const merge =
+    ok && state.branch && state.merged === false
+      ? `<div class="closing-hint">${esc(t('closing_step_diff'))}</div>` +
+        `<div class="closing-hint">${esc(t('closing_merge_hint'))}</div>` +
+        '<div class="closing-cmd"><code data-closing-command></code>' +
+        (canCopy()
+          ? `<button type="button" class="tf-btn" data-closing-copy>${esc(t('closing_copy'))}</button>`
+          : '') +
+        '</div>'
+      : '';
+  const actions =
+    (task.status === 'review'
+      ? closingActionHtml('accept', t('closing_accept'), acceptBlocker(state))
+      : '') +
+    (ok && state.worktree
+      ? closingActionHtml('remove', t('closing_remove'), removeBlocker(state, task.id))
+      : '') +
+    `<button type="button" class="tf-btn" data-closing-recheck>${esc(t('closing_recheck'))}</button>`;
+  return `
+    <h3>${esc(t('closing_title'))}</h3>
+    ${rows ? `<dl>${rows}</dl>` : ''}
+    <div class="closing-state ${line.tone}">${esc(tFill(line.key, line.vars || {}))}</div>
+    ${merge}
+    <div class="closing-actions">${actions}</div>
+    <div class="closing-note">${esc(t('closing_note'))} ${esc(t('closing_guide'))}</div>`;
+}
+
+function paintClosingBlock(overlay, task) {
+  const box = overlay.querySelector('[data-closing]');
+  if (!box) return;
+  const state = gitStateById.get(task.id) || { git: 'pending' };
+  box.innerHTML = closingContentHtml(task, state);
+  const fill = (selector, text) => {
+    const el = box.querySelector(selector);
+    if (el) el.textContent = text;
+  };
+  if (state.branch) {
+    fill('[data-closing-branch]', state.branch);
+    if (state.merged === false) fill('[data-closing-command]', 'git merge --no-ff ' + state.branch);
+  }
+  if (state.worktree) fill('[data-closing-worktree]', state.worktree);
+  wireClosingBlock(overlay, box, task);
+}
+
+function wireClosingBlock(overlay, box, task) {
+  const on = (selector, handler) => {
+    const el = box.querySelector(selector);
+    if (el) el.addEventListener('click', handler);
+  };
+  on('[data-closing-recheck]', () => loadClosingBlock(overlay, task));
+  on('[data-closing-accept]', (e) => {
+    if (!e.target.disabled) acceptTask(overlay, task);
+  });
+  on('[data-closing-remove]', (e) => {
+    if (!e.target.disabled) removeTaskWorktree(overlay, task);
+  });
+  on('[data-closing-copy]', (e) => copyClosingCommand(e.target, box));
+}
+
+async function loadClosingBlock(overlay, task) {
+  if (!CLOSING_STATUSES.includes(task.status)) return;
+  try {
+    const r = await fetch('/api/git/' + encodeURIComponent(task.id));
+    gitStateById.set(task.id, r.ok ? await r.json() : { git: 'failed' });
+  } catch {
+    gitStateById.set(task.id, { git: 'failed' });
+  }
+  paintClosingBlock(overlay, task);
+}
+
+function copyClosingCommand(button, box) {
+  const command = box.querySelector('[data-closing-command]');
+  if (!command || !canCopy()) return;
+  navigator.clipboard.writeText(command.textContent).then(() => {
+    button.textContent = t('closing_copied');
+  }, () => {});
+}
+
+// `done` is terminal, so this asks first — the board has no way back from it.
+// The card is repainted from the answer rather than from the board's next
+// refresh: the worktree is usually removed in the same breath, and the button
+// for that has to be there the moment the task is accepted.
+async function acceptTask(overlay, task) {
+  if (!confirm(tFill('closing_accept_confirm', { id: task.id, title: task.title }))) return;
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(task.id) + '/done', { method: 'POST' });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(
+        data && data.reason
+          ? tFill('closing_remove_refused', { reason: t(CLOSING_WHY[data.reason] || 'closing_accept_failed') })
+          : t(writeErrorKey(r.status, 'closing_accept_failed'))
+      );
+      await loadClosingBlock(overlay, task);
+      return;
+    }
+    task.status = 'done'; // the dialog's own copy; the board repaints from SSE
+    await loadClosingBlock(overlay, task);
+  } catch {
+    alert(t('closing_accept_failed'));
+  }
+}
+
+async function removeTaskWorktree(overlay, task) {
+  if (!confirm(tFill('closing_remove_confirm', { id: task.id }))) return;
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(task.id) + '/remove-worktree', {
+      method: 'POST',
+    });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(
+        data && data.reason
+          ? tFill('closing_remove_refused', { reason: t(CLOSING_WHY[data.reason] || 'closing_remove_failed') })
+          : t(writeErrorKey(r.status, 'closing_remove_failed'))
+      );
+    }
+    await loadClosingBlock(overlay, task);
+  } catch {
+    alert(t('closing_remove_failed'));
+  }
+}
+
 function openTask(id) {
   const task = tasks.find((x) => x.id === id);
   if (!task) return;
   const color = STATUS_COLOR[task.status];
   const label = statusLabel(task.status);
+  const depends = task.depends || [];
+  const hasProfiles = (sessionsConfigured.profiles || []).length > 0;
   const overlay = openModal(`
     <div class="head">
       <span class="id">${task.id}</span>
       <span class="prio ${task.priority}" title="${task.priority}" aria-label="${task.priority}">${PRIO_ICON[task.priority] || task.priority}</span>
-      ${task.type === 'bug' ? `<span class="tag-bug">${t('tag_bug')}</span>` : ''}
+      ${typeTagHtml(task)}
       <span class="status-chip" style="background:${color}">${label}</span>
     </div>
     <h2>${esc(task.title)}</h2>
@@ -778,12 +2057,414 @@ function openTask(id) {
           ? task.briefs.map((b) => `<span class="brief-link" data-brief="${b}">${b}</span>`).join('')
           : `<span class="empty">${t('empty_briefs')}</span>`
       }</dd>
+      <dt>${t('meta_depends')}</dt><dd>${
+        depends.length
+          ? depends.map(depLinkHtml).join('')
+          : `<span class="empty">${t('empty_depends')}</span>`
+      }</dd>
+      ${hasProfiles ? `<dt>${t('meta_profile')}</dt><dd>${profileSelectHtml(task)}</dd>` : ''}
     </dl>
+    ${watchdogNoteHtml(task)}
+    <div data-session-area>${sessionAreaHtml(task)}</div>
+    ${costBlockHtml(task.id)}
+    ${closingBlockHtml(task)}
     <div class="desc">${task.description ? md(task.description) : `<span class="empty">${t('empty_desc')}</span>`}</div>
+    ${task.awaitingAnswer ? answerFormHtml(task) : ''}
     <div class="hint">${t('hint_close')}</div>`);
+  // The dialog's own copy of the task, kept so the session area can be repainted
+  // in place while the dialog stays open (see refreshOpenTaskSessions).
+  overlay._task = task;
+  loadClosingBlock(overlay, task);
+  if (task.awaitingAnswer) wireAnswerForm(overlay, task.id);
   overlay.querySelectorAll('[data-brief]').forEach((el) =>
     el.addEventListener('click', () => openBrief(el.dataset.brief))
   );
+  wireSessionArea(overlay, task);
+  if (hasProfiles) wireProfileSelect(overlay);
+  wireDependencyLinks(overlay);
+}
+
+// ---------- the sessions started from the card's dialog ----------
+// The review session (T-0122) and the briefing one (T-0141). Buttons and not
+// drops: the task is ALREADY in the status the session belongs to, so there is no
+// column to move it into and no status to change. The only drop that could
+// express either would be one onto the column the card already sits in, a gesture
+// the board has nowhere else.
+//
+// Each belongs to exactly one status and appears on no other: someone who never
+// runs a review session must not read about one on every card. Inside that
+// status the block is always there, because an unconfigured board used to show
+// nothing at all — the action was searched for and not found (T-0144). With no
+// command it says which variable turns the session on, in the place the button
+// would have been.
+//
+// The block also says what the session does BEFORE it is started, which for the
+// review one is the whole point: it never sets a status (T-0122), while a
+// briefing or worker session that leaves the status untouched means trouble
+// (observed on T-0118). From outside, the two look the same, so the difference
+// has to be stated as a property of this session rather than explained after the
+// fact (T-0146).
+//
+// `visible` rather than a status, because the third action here — stopping
+// (T-0211) — belongs to a task whose session is running, which is a fact about
+// the registry and not about the column the card sits in.
+//
+// The button appears only where pressing it can work. Every reason it cannot is
+// said in its place instead, in the same line the button would have occupied
+// (T-0220): the block that explains what the session does is worth keeping
+// either way, and a board that offers an action it knows will be refused is the
+// exact opposite of the rule these blocks were built on — say beforehand what
+// will happen, do not explain it after the click.
+function sessionActionHtml(task, { visible, enabled, busy, attr, titleKey, whatKey, buttonKey, unconfiguredKey }) {
+  if (!visible) return '';
+  // Not configured comes first: it is the durable fact, and a session that is
+  // running right now says nothing about a command that was never set.
+  const whyNot = !enabled ? unconfiguredKey : busy ? 'session_start_running' : '';
+  const action = whyNot
+    ? `<div class="card-action-why">${esc(t(whyNot))}</div>`
+    : `<div class="card-action-row"><button type="button" class="tf-btn" ${attr}="${esc(task.id)}">` +
+      `${esc(t(buttonKey))}</button></div>`;
+  return `<div class="card-action"><h3>${esc(t(titleKey))}</h3>` +
+    `<div class="card-action-what">${esc(t(whatKey))}</div>${action}</div>`;
+}
+
+// One session per task is the registry's shape, not a rule about kinds: it keeps
+// one record per task id, and the server refuses a second start with
+// `already-running` whatever kind is asked for. So the card asks the same
+// question the server will (T-0221).
+const sessionBusy = (task) => sessionState(task.id) === 'running';
+
+function briefingActionHtml(task) {
+  return sessionActionHtml(task, {
+    visible: task.status === 'open',
+    enabled: sessionsConfigured.enabled,
+    busy: sessionBusy(task),
+    attr: 'data-briefing-session',
+    titleKey: 'briefing_session_title',
+    whatKey: 'briefing_session_what',
+    buttonKey: 'briefing_session_button',
+    unconfiguredKey: 'briefing_session_unconfigured',
+  });
+}
+
+function reviewActionHtml(task) {
+  return sessionActionHtml(task, {
+    visible: task.status === 'review',
+    enabled: sessionsConfigured.orchestrator,
+    busy: sessionBusy(task),
+    attr: 'data-review-session',
+    titleKey: 'review_session_title',
+    whatKey: 'review_session_what',
+    buttonKey: 'review_session_button',
+    unconfiguredKey: 'review_session_unconfigured',
+  });
+}
+
+// ---------- stopping the running session from the card (T-0211) ----------
+// The kill endpoint has existed since T-0077, and until now the only way to
+// reach it was to open the session log: to stop a session you had to guess that
+// the control lived behind its output. That cost more than the earlier
+// findability cases (T-0144, T-0145) — while the button is being looked for, the
+// session keeps spending the user's tokens.
+//
+// Shown for a session in any of the three kinds, and it needs no test for which:
+// the registry holds one record per TASK, so "a session is running here" is the
+// whole condition, whether it is a worker, a briefing or a review one. Which
+// kind it is the cost block below already names, run by run.
+//
+// It is never offered when nothing is running — like every other action on this
+// card, it is simply absent rather than present and dead. `enabled` is therefore
+// always true: unlike starting a session, stopping one depends on no
+// configuration, because the session it stops is proof the board can run it.
+//
+// The button in the log window stays. Both press the same endpoint and ask the
+// same confirmation, so the duplication cannot drift; and the person reading a
+// log is exactly the one who decides mid-read to stop, so taking it away there
+// would move the same bug one step further in.
+function stopActionHtml(task) {
+  return sessionActionHtml(task, {
+    visible: sessionState(task.id) === 'running',
+    enabled: true,
+    attr: 'data-stop-session',
+    titleKey: 'session_stop_title',
+    whatKey: 'session_stop_what',
+    buttonKey: 'session_stop_button',
+  });
+}
+
+// Everything the dialog says about sessions on this task: the log to read the
+// running one by, the action to stop it, and the ones that can be started. Kept
+// as one fragment because it is repainted as one — a session that starts or ends
+// while the card is open changes every part of it (see refreshOpenTaskSessions).
+// The start blocks were rendered straight into the dialog body until T-0220,
+// which is why they went on offering a start through a session they could see
+// running: a fragment that is never repainted cannot notice.
+function sessionAreaHtml(task) {
+  const log = sessionState(task.id)
+    ? `<div class="session-row"><button type="button" class="tf-btn" data-session-log="${esc(task.id)}">` +
+      `${esc(t('session_log_button'))}</button></div>`
+    : '';
+  return log + stopActionHtml(task) + briefingActionHtml(task) + reviewActionHtml(task);
+}
+
+function wireSessionArea(overlay, task) {
+  overlay.querySelectorAll('[data-session-log]').forEach((el) =>
+    el.addEventListener('click', () => openSessionLog(el.dataset.sessionLog))
+  );
+  const stopButton = overlay.querySelector('[data-stop-session]');
+  if (stopButton) stopButton.addEventListener('click', () => requestSessionStop(task.id));
+  const briefingButton = overlay.querySelector('[data-briefing-session]');
+  if (briefingButton) briefingButton.addEventListener('click', () => startBriefingSession(task));
+  const reviewButton = overlay.querySelector('[data-review-session]');
+  if (reviewButton) reviewButton.addEventListener('click', () => startReviewSession(task));
+}
+
+// An open card catches up with the session registry, the way an open log already
+// does. Without this the stop action would appear only on a card opened AFTER
+// the session started — and the card is also where a briefing or review session
+// is started from, so the commonest way to end up wanting the stop button is to
+// press the start button one dialog above it.
+function refreshOpenTaskSessions() {
+  for (const overlay of modals) {
+    if (!overlay._task) continue;
+    const area = overlay.querySelector('[data-session-area]');
+    if (!area) continue;
+    area.innerHTML = sessionAreaHtml(overlay._task);
+    wireSessionArea(overlay, overlay._task);
+  }
+}
+
+// Confirmed like the worker drop, and for the same reason: it starts a process
+// that reads the repository and writes into the backlog. Each text says what its
+// session will NOT do — the review one sets no status and merges nothing, the
+// briefing one replaces no brief that is already there — because that is the part
+// a reader might otherwise assume.
+//
+// One body for both: what they must share is the part that is easy to get subtly
+// wrong. Unlike the drops, the session IS the whole action here — no transition
+// stands behind the click — so a 200 that started nothing has to be said out loud
+// or the click reads as having worked.
+async function startCardSession(task, { action, confirmKey, failedKey, refusedKey }) {
+  if (!confirm(tFill(confirmKey, { id: task.id, title: task.title }))) return;
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(task.id) + '/' + action, { method: 'POST' });
+    if (!r.ok) {
+      alert(t(writeErrorKey(r.status, failedKey)));
+      return;
+    }
+    const data = await r.json().catch(() => ({}));
+    if (data && data.session && data.session !== 'started') {
+      alert(tFill(refusedKey, { reason: data.session }));
+    }
+    // A started session repaints the board through the SSE "sessions" event.
+  } catch {
+    alert(t(failedKey));
+  }
+}
+
+function startBriefingSession(task) {
+  return startCardSession(task, {
+    action: 'briefing',
+    confirmKey: 'briefing_session_confirm',
+    failedKey: 'briefing_session_failed',
+    refusedKey: 'briefing_session_refused',
+  });
+}
+
+function startReviewSession(task) {
+  return startCardSession(task, {
+    action: 'review',
+    confirmKey: 'review_session_confirm',
+    failedKey: 'review_session_failed',
+    refusedKey: 'review_session_refused',
+  });
+}
+
+function wireProfileSelect(overlay) {
+  overlay.querySelectorAll('[data-profile-select]').forEach((el) =>
+    el.addEventListener('change', () => setTaskProfile(el.dataset.profileSelect, String(el.value || '')))
+  );
+}
+
+// One field, one request: this endpoint changes no status and starts nothing.
+// The board is repainted by the SSE "changed" event the write fires, so nothing
+// is patched here by hand.
+async function setTaskProfile(id, profile) {
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(id) + '/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: profile }),
+    });
+    if (!r.ok) alert(t(writeErrorKey(r.status, 'profile_failed')));
+  } catch {
+    alert(t('profile_failed'));
+  }
+}
+
+// ---------- answering the session's questions (T-0085) ----------
+// Shown only inside the dialog of a task the server flagged `awaitingAnswer`.
+// The restart box is on by default: reading the questions and answering them is
+// what unblocks the session, and letting it run again with the answers is the
+// expected next move, not an extra. Its label names the kind that will actually
+// be restarted, which the status decides (T-0101, T-0122) exactly as it does on
+// the server.
+const RESTART_LABEL_KEY = {
+  in_progress: 'answer_restart_worker',
+  review: 'answer_restart_orchestrator',
+};
+function answerFormHtml(task) {
+  const restartLabel = t(RESTART_LABEL_KEY[task.status] || 'answer_restart');
+  return `
+    <form class="task-form answer-form" data-answer-form>
+      <h3>${esc(t('answer_title'))}</h3>
+      <div class="answer-note">${esc(t('answer_hint'))}</div>
+      <label for="answer-text">${esc(t('answer_label'))}</label>
+      <textarea id="answer-text" maxlength="4000" data-answer-text></textarea>
+      <label class="answer-restart"><input type="checkbox" checked data-answer-restart> ${esc(restartLabel)}</label>
+      <div class="form-error" role="alert" data-answer-error></div>
+      <div class="form-actions">
+        <button type="submit" class="tf-btn primary" data-answer-submit>${esc(t('answer_send'))}</button>
+      </div>
+    </form>`;
+}
+
+function wireAnswerForm(overlay, id) {
+  overlay.querySelector('.panel').querySelector('[data-answer-form]').addEventListener('submit', (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    submitAnswer(overlay, id);
+  });
+}
+
+async function submitAnswer(overlay, id) {
+  const panel = overlay.querySelector('.panel');
+  const textEl = panel.querySelector('[data-answer-text]');
+  const errorEl = panel.querySelector('[data-answer-error]');
+  const text = String(textEl.value || '');
+  if (!text.trim()) {
+    errorEl.textContent = t('answer_required');
+    textEl.classList.add('invalid');
+    textEl.focus();
+    return;
+  }
+  textEl.classList.remove('invalid');
+  errorEl.textContent = '';
+  const payload = { text: text, restart: !!panel.querySelector('[data-answer-restart]').checked };
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(id) + '/answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      // The dialog stays open with the typed answer intact - the same rule as
+      // the create-task form, and it matters more here: this text was written
+      // once and nothing else holds a copy of it.
+      errorEl.textContent = t(writeErrorKey(r.status, 'answer_failed'));
+      return;
+    }
+    // The server's write fires the SSE "changed" event and load() repaints the
+    // board, so nothing is patched here by hand.
+    closeTop();
+  } catch {
+    errorEl.textContent = t('answer_failed');
+  }
+}
+
+// ---------- session log (T-0077) ----------
+// Opens over the task dialog, on the existing modal stack. Everything below
+// writes the log through textContent: it is the output of a process briefboard
+// only started, so it is text and is never given to a markup parser.
+function openSessionLog(id) {
+  const overlay = openModal(`
+    <h2>${esc(t('session_log_title'))} ${esc(id)}</h2>
+    <div class="log-meta" data-log-meta></div>
+    <div class="log-view" data-log-text></div>
+    <div class="log-actions">
+      <button type="button" class="tf-btn" data-log-refresh>${esc(t('session_log_refresh'))}</button>
+      <button type="button" class="tf-btn danger" data-log-stop>${esc(t('session_stop_button'))}</button>
+    </div>
+    <div class="hint">${t('hint_close')}</div>`);
+  overlay._sessionLogId = id;
+  const panel = overlay.querySelector('.panel');
+  panel.querySelector('[data-log-refresh]').addEventListener('click', () => refreshSessionLog(overlay));
+  panel.querySelector('[data-log-stop]').addEventListener('click', () => requestSessionStop(id));
+  return refreshSessionLog(overlay);
+}
+
+// The stop button exists only while there is something to stop; a finished
+// session leaves the log open for reading.
+function paintStopButton(overlay) {
+  const record = sessionsById.get(overlay._sessionLogId);
+  const running = !!record && record.status === 'running';
+  const btn = overlay.querySelector('.panel').querySelector('[data-log-stop]');
+  btn.style.display = running ? '' : 'none';
+  btn.disabled = !running;
+}
+
+// An empty log is two different situations (T-0115). Under a live session it is
+// the log waiting on an agent that prints everything at exit — a blank pane
+// there was read as a broken board. Under a finished one it is the plain fact.
+// Told apart by the session's state, never by guessing at the agent's output.
+function setLogText(el, text, state) {
+  const note = text ? '' : t(state === 'running' ? 'session_log_waiting' : 'session_log_empty');
+  el.textContent = text || note;
+  el.classList[note ? 'add' : 'remove']('log-note');
+}
+
+async function refreshSessionLog(overlay) {
+  const id = overlay._sessionLogId;
+  const panel = overlay.querySelector('.panel');
+  const textEl = panel.querySelector('[data-log-text]');
+  const metaEl = panel.querySelector('[data-log-meta]');
+  const state = sessionState(id);
+  try {
+    const r = await fetch('/api/session/' + encodeURIComponent(id) + '/log');
+    if (!r.ok) {
+      textEl.textContent = '';
+      textEl.classList.remove('log-note');
+      metaEl.textContent = t(r.status === 404 ? 'session_log_missing' : 'session_log_failed');
+      paintStopButton(overlay);
+      return;
+    }
+    const text = await r.text();
+    setLogText(textEl, text, state);
+    const total = Number(r.headers.get('X-Log-Total-Bytes'));
+    const truncated = r.headers.get('X-Log-Truncated') === '1';
+    const size = truncated
+      ? tFill('session_log_tail', { shown: text.length, total: total })
+      : tFill('session_log_size', { total: total });
+    metaEl.textContent = (state ? t('session_' + state) + ' · ' : '') + size;
+  } catch {
+    textEl.textContent = '';
+    textEl.classList.remove('log-note');
+    metaEl.textContent = t('session_log_failed');
+  }
+  paintStopButton(overlay);
+}
+
+// Every open log view catches up when a session's state changes. Nothing polls:
+// the server pushes a 'sessions' SSE event on start and on exit, and a finished
+// session sends no further ones.
+function refreshOpenSessionLogs() {
+  for (const overlay of modals) {
+    if (overlay._sessionLogId) refreshSessionLog(overlay);
+  }
+}
+
+async function requestSessionStop(id) {
+  if (!confirm(tFill('session_stop_confirm', { id: id }))) return;
+  try {
+    const r = await fetch('/api/session/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
+    if (!r.ok) {
+      alert(t('session_stop_failed'));
+      return;
+    }
+    // Success: the kill makes the session exit, that fires the 'sessions' event,
+    // and loadSessions() repaints both the board and this dialog.
+  } catch {
+    alert(t('session_stop_failed'));
+  }
 }
 
 async function openBrief(briefId) {
@@ -801,18 +2482,110 @@ async function openBrief(briefId) {
   }
 }
 
+// ---------- create a task from the board (T-0074) ----------
+// The "+" button opens a dialog whose submit POSTs to /api/task; the server
+// re-validates every field and is the only place that assigns the id, so this
+// form is pure UX. Domain values (feature/bug/external, Blocker…Minor) are sent
+// verbatim and therefore never translated - only the visible labels go through t().
+const NEW_TASK_TYPES = ['feature', 'bug', 'external'];
+
+function newTaskFormHtml() {
+  const priorityOptions = Object.keys(PRIO_ORDER)
+    .map((p) => `<option value="${p}"${p === 'Medium' ? ' selected' : ''}>${p}</option>`)
+    .join('');
+  const typeOptions = NEW_TASK_TYPES.map((ty) => `<option value="${ty}">${ty}</option>`).join('');
+  return `
+    <h2>${t('new_task_title')}</h2>
+    <form class="task-form" id="new-task-form">
+      <label for="nt-title">${t('field_title')}</label>
+      <input id="nt-title" type="text" maxlength="200" autocomplete="off">
+      <label for="nt-type">${t('field_type')}</label>
+      <select id="nt-type">${typeOptions}</select>
+      <label for="nt-priority">${t('field_priority')}</label>
+      <select id="nt-priority">${priorityOptions}</select>
+      <label for="nt-description">${t('field_description')}</label>
+      <textarea id="nt-description" maxlength="4000"></textarea>
+      <div class="form-error" id="nt-error" role="alert"></div>
+      <div class="form-actions">
+        <button type="submit" class="tf-btn primary" id="nt-submit">${t('create_button')}</button>
+        <button type="button" class="tf-btn" id="nt-cancel">${t('cancel_button')}</button>
+      </div>
+    </form>
+    <div class="hint">${t('hint_close')}</div>`;
+}
+
+// Which message a failed write earns. 503 is the server saying another writer
+// holds the backlog lock (T-0081) — a retry is likely to succeed, so it must not
+// read like the general failure. The retry stays the user's: a silent automatic
+// one could create the same task twice if the response was merely lost.
+function writeErrorKey(status, failedKey) {
+  return status === 503 ? 'busy_retry' : failedKey;
+}
+
+async function submitNewTask(overlay) {
+  const titleEl = overlay.querySelector('#nt-title');
+  const errorEl = overlay.querySelector('#nt-error');
+  const title = String(titleEl.value || '').trim();
+  if (!title) {
+    // Nothing is sent for an empty title: report it in place and put the caret
+    // back where the fix belongs, keeping everything else the user typed.
+    errorEl.textContent = t('title_required');
+    titleEl.classList.add('invalid');
+    titleEl.focus();
+    return;
+  }
+  titleEl.classList.remove('invalid');
+  errorEl.textContent = '';
+  // The `||` fallbacks matter only if a <select> somehow has no value; the
+  // server rejects an unknown type/priority rather than guessing.
+  const payload = {
+    title: title,
+    type: overlay.querySelector('#nt-type').value || 'feature',
+    priority: overlay.querySelector('#nt-priority').value || 'Medium',
+    description: String(overlay.querySelector('#nt-description').value || ''),
+  };
+  try {
+    const r = await fetch('/api/task', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      // Keep the dialog (and everything typed into it) open on failure.
+      errorEl.textContent = t(writeErrorKey(r.status, 'create_failed'));
+      return;
+    }
+    // Success: close and re-render nothing by hand - the server's write to
+    // doc/backlog.md fires the SSE "changed" event and load() refreshes the
+    // board, exactly as the drag&drop cancel flow does.
+    closeTop();
+  } catch {
+    errorEl.textContent = t('create_failed');
+  }
+}
+
+function openNewTask() {
+  const overlay = openModal(newTaskFormHtml());
+  const form = overlay.querySelector('#new-task-form');
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitNewTask(overlay);
+  });
+  overlay.querySelector('#nt-cancel').addEventListener('click', () => closeTop());
+  return overlay;
+}
+document.getElementById('new-task').addEventListener('click', openNewTask);
+
 // ---------- theme toggle ----------
 // The icon/label shown is the theme the click would switch TO (the target),
 // so the button always advertises the action it performs.
-const THEME_TARGET_ICON = { dark: '☀', light: '☾' }; // dark -> sun (switch to light), light -> moon (switch to dark)
+const THEME_TARGET_ICON = { dark: '☀', light: '☾' };
 
 function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
 }
 function paintThemeButton() {
   const theme = currentTheme();
-  // Target = the theme the click would switch TO; the label is looked up live
-  // via t() so it follows the current UI language instead of being hardcoded.
   const target = theme === 'dark' ? 'light' : 'dark';
   const btn = document.getElementById('theme-toggle');
   const label = t('theme_toggle_to_' + target);
@@ -829,6 +2602,48 @@ function toggleTheme() {
 document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
 paintThemeButton();
 
+// ---------- exit button (T-0082) ----------
+// The final screen: the board is not coming back by itself, so the page says so
+// and stops reconnecting instead of sitting in "reconnecting…" forever. Called
+// both by the tab that pressed the button and by every other open tab, off the
+// SSE 'shutdown' event, so it has to be idempotent.
+function showStopped() {
+  boardStopped = true;
+  if (sse) {
+    sse.close();
+    sse = null;
+  }
+  document.getElementById('live').classList.add('off');
+  document.getElementById('live-text').textContent = t('live_stopped');
+  if (!stoppedScreen) {
+    stoppedScreen = document.createElement('div');
+    stoppedScreen.className = 'stopped-screen';
+    stoppedScreen.setAttribute('role', 'alert');
+    stoppedScreen.innerHTML =
+      '<div class="stopped-box"><div class="stopped-title"></div><div class="stopped-hint"></div></div>';
+    document.body.appendChild(stoppedScreen);
+  }
+  stoppedScreen.querySelector('.stopped-title').textContent = t('stopped_title');
+  stoppedScreen.querySelector('.stopped-hint').textContent = t('stopped_hint');
+}
+
+async function exitBoard() {
+  if (boardStopped) return;
+  if (!confirm(t('exit_confirm'))) return;
+  try {
+    const r = await fetch('/api/shutdown', { method: 'POST' });
+    if (!r.ok) {
+      alert(t('exit_failed'));
+      return;
+    }
+  } catch {
+    // The process leaves as it answers, so a torn-off response is the expected
+    // outcome here, not a failure. Only an explicit refusal (403) is one.
+  }
+  showStopped();
+}
+document.getElementById('exit-board').addEventListener('click', exitBoard);
+
 // ---------- language toggle ----------
 // Updates the static header labels that live outside render() - the type
 // filter chips, the language select, and (when currently offline)
@@ -838,15 +2653,36 @@ function applyStaticLabels() {
   document.querySelector('[data-type="all"]').textContent = t('filter_all');
   document.querySelector('[data-type="feature"]').textContent = t('filter_feature');
   document.querySelector('[data-type="bug"]').textContent = t('filter_bug');
+  document.querySelector('[data-type="external"]').textContent = t('filter_external');
+  const blockedBtn = document.getElementById('blocked-filter');
+  blockedBtn.textContent = t('filter_blocked');
+  blockedBtn.title = t('filter_blocked_title');
   document.getElementById('export-excel').textContent = t('export_button');
   document.getElementById('search-filter').placeholder = t('search_placeholder');
+  // The "+" glyph itself is language-neutral; the word beside it is not. It is
+  // its own element because assigning to the button's textContent would wipe
+  // out the glyph.
+  const newTaskBtn = document.getElementById('new-task');
+  const newTaskLabel = t('new_task_button');
+  document.getElementById('new-task-label').textContent = newTaskLabel;
+  newTaskBtn.title = newTaskLabel;
+  newTaskBtn.setAttribute('aria-label', newTaskLabel);
   const langSelect = document.getElementById('lang-toggle');
   langSelect.value = lang;
   const langTitle = t('lang_switch_title');
   langSelect.title = langTitle;
   langSelect.setAttribute('aria-label', langTitle);
+  // The glyph is language-neutral, the accessible name is not — as for the theme
+  // toggle. The new-task button is not one of these: since T-0137 it carries a
+  // visible word beside its glyph.
+  const exitBtn = document.getElementById('exit-board');
+  const exitLabel = t('exit_button');
+  exitBtn.title = exitLabel;
+  exitBtn.setAttribute('aria-label', exitLabel);
   const live = document.getElementById('live');
-  if (live.classList.contains('off')) {
+  if (boardStopped) {
+    showStopped(); // repaints the final screen in the newly chosen language
+  } else if (live.classList.contains('off')) {
     document.getElementById('live-text').textContent = t('reconnecting');
   }
   // Refresh the theme button title/aria-label so it follows the current language.
@@ -887,6 +2723,17 @@ document.getElementById('priority-filter').addEventListener('click', (e) => {
   if (priorityFilter.has(prio)) priorityFilter.delete(prio);
   else priorityFilter.add(prio);
   btn.classList.toggle('active', priorityFilter.has(prio));
+  render();
+});
+
+// ---------- "blocked only" filter (T-0092) ----------
+// A single toggle rather than a third filter group: "blocked" is one boolean
+// about a task, and it narrows whatever the other filters already selected.
+const blockedFilterBtn = document.getElementById('blocked-filter');
+blockedFilterBtn.addEventListener('click', () => {
+  blockedOnly = !blockedOnly;
+  blockedFilterBtn.classList.toggle('active', blockedOnly);
+  blockedFilterBtn.setAttribute('aria-pressed', blockedOnly ? 'true' : 'false');
   render();
 });
 
@@ -940,8 +2787,8 @@ function xmlEscape(value) {
     .replace(/'/g, '&apos;');
 }
 
-// Column letter for a zero-based index (0 -> A, 1 -> B, ...). Only single
-// letters A-Z are needed here (8 columns), so no need to handle indices > 25.
+// Only single letters A-Z are needed here (8 columns), so indices > 25 are not
+// handled.
 function colLetter(n) {
   return String.fromCharCode(65 + n);
 }
@@ -1000,11 +2847,9 @@ function buildSheetXml() {
   const cell = (colIdx, rowNum, value) =>
     `<c r="${colLetter(colIdx)}${rowNum}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
   const rowsXml = [];
-  // Header row (row 1).
   rowsXml.push(
     `<row r="1">${columns.map(([key], i) => cell(i, 1, t(key))).join('')}</row>`
   );
-  // Data rows (row 2..N).
   tasks.forEach((task, idx) => {
     const rowNum = idx + 2;
     const cells = columns.map(([, get], i) => cell(i, rowNum, get(task))).join('');
@@ -1104,7 +2949,6 @@ function buildZip(files) {
   ev.setUint32(16, centralOffset, true);   // central directory offset
   ev.setUint16(20, 0, true);               // comment length
 
-  // Concatenate everything: local chunks, central chunks, EOCD.
   const totalSize = offset + centralSize + eocd.length;
   const out = new Uint8Array(totalSize);
   let pos = 0;
@@ -1114,8 +2958,6 @@ function buildZip(files) {
   return out;
 }
 
-// Assembles all 6 XLSX parts (5 static + the dynamic worksheet) and packs them
-// into a ZIP. Returns a Uint8Array of the finished .xlsx.
 function buildXlsx() {
   const encoder = new TextEncoder();
   const parts = [
@@ -1151,6 +2993,10 @@ document.getElementById('export-excel').addEventListener('click', exportXlsx);
 // render()), so listeners are attached once here, not per-render.
 const cancelStrip = document.getElementById('strip-cancelled');
 cancelStrip.addEventListener('dragover', (e) => {
+  // Ready cards became draggable with T-0084 (into In Progress) but are still
+  // not cancellable from the board, so the strip has to refuse them here rather
+  // than light up and then drop them on the floor.
+  if (!DRAG_CANCELLABLE.includes(draggedStatus)) return;
   e.preventDefault(); // required to allow drop
   e.dataTransfer.dropEffect = 'move';
   cancelStrip.classList.add('drop-target');
@@ -1166,11 +3012,13 @@ cancelStrip.addEventListener('drop', async (e) => {
   // Client-side check is just a UX guard against a stale drag; the server
   // re-validates the status itself and is the actual source of truth.
   if (!task || !DRAG_CANCELLABLE.includes(task.status)) return;
-  const msg = t('confirm_cancel').replace('{id}', task.id).replace('{title}', task.title);
-  if (!confirm(msg)) return;
+  if (!confirm(tFill('confirm_cancel', { id: task.id, title: task.title }))) return;
   try {
     const r = await fetch('/api/task/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
-    if (!r.ok) throw new Error('cancel request failed');
+    if (!r.ok) {
+      alert(t(writeErrorKey(r.status, 'cancel_failed')));
+      return;
+    }
     // Success: don't touch the DOM here - the existing SSE "changed" event
     // will fire once the server finishes writing doc/backlog.md, and load()
     // re-renders the whole board from the fresh data.
@@ -1179,24 +3027,278 @@ cancelStrip.addEventListener('drop', async (e) => {
   }
 });
 
+// ---------- drag & drop into Open (backlog -> open, T-0075) ----------
+// Called once per Open column element, from buildBoardStructure(). Unlike the
+// Cancelled strip this element is created by the UI rather than sitting in the
+// static HTML, which is why the wiring is a function instead of top-level code.
+//
+// Only backlog cards are accepted: for anything else dragover never calls
+// preventDefault(), so the browser shows "no drop allowed" and no drop event is
+// produced at all. There is deliberately no confirm() here - unlike cancelling,
+// moving a card to Open is non-destructive and reversible from the CLI.
+function attachOpenDropZone(col) {
+  col.addEventListener('dragover', (e) => {
+    if (!DRAG_OPENABLE.includes(draggedStatus)) return; // not a backlog card: refuse the drop
+    e.preventDefault(); // required to allow drop
+    e.dataTransfer.dropEffect = 'move';
+    col.classList.add('drop-target');
+  });
+  col.addEventListener('dragleave', () => {
+    col.classList.remove('drop-target');
+  });
+  col.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    col.classList.remove('drop-target');
+    const id = e.dataTransfer.getData('text/plain');
+    const task = tasks.find((x) => x.id === id);
+    // Client-side check is just a UX guard against a stale drag; the server
+    // re-validates the status itself and is the actual source of truth.
+    if (!task || !DRAG_OPENABLE.includes(task.status)) return;
+    try {
+      const r = await fetch('/api/task/' + encodeURIComponent(id) + '/open', { method: 'POST' });
+      if (!r.ok) {
+        alert(t(writeErrorKey(r.status, 'open_failed')));
+        return;
+      }
+      // Success: don't touch the DOM here - the SSE "changed" event fires once
+      // the server has written doc/backlog.md, and load() re-renders the board.
+    } catch {
+      alert(t('open_failed'));
+    }
+  });
+}
+
+// ---------- drag & drop into In Progress (ready -> in_progress, T-0084) ----------
+// Wired exactly like the Open zone, with two differences.
+//
+// A blocked card (unfinished prerequisites) is refused here: the server rejects
+// it with a 409 anyway, and there is no `--force` on the endpoint - overriding a
+// dependency stays a CLI decision.
+//
+// And unlike the Open drop this one asks for confirmation: it starts an agent
+// that writes code and commits it. The two texts differ so the confirmation
+// never promises a session the server has no command for.
+function attachStartDropZone(col) {
+  col.addEventListener('dragover', (e) => {
+    if (!DRAG_STARTABLE.includes(draggedStatus) || draggedBlocked) return;
+    e.preventDefault(); // required to allow drop
+    e.dataTransfer.dropEffect = 'move';
+    col.classList.add('drop-target');
+  });
+  col.addEventListener('dragleave', () => {
+    col.classList.remove('drop-target');
+  });
+  col.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    col.classList.remove('drop-target');
+    const id = e.dataTransfer.getData('text/plain');
+    const task = tasks.find((x) => x.id === id);
+    // Client-side checks are just a UX guard against a stale drag; the server
+    // re-validates both the status and the dependencies and is the source of truth.
+    if (!task || !DRAG_STARTABLE.includes(task.status) || blockingIdsFor(task).length) return;
+    const key = sessionsConfigured.worker ? 'confirm_start' : 'confirm_start_no_session';
+    if (!confirm(tFill(key, { id: task.id, title: task.title }))) return;
+    try {
+      const r = await fetch('/api/task/' + encodeURIComponent(id) + '/start', { method: 'POST' });
+      if (!r.ok) {
+        alert(t(writeErrorKey(r.status, 'start_failed')));
+        return;
+      }
+      // Success: don't touch the DOM here - the SSE "changed" event fires once
+      // the server has written doc/backlog.md, and load() re-renders the board.
+    } catch {
+      alert(t('start_failed'));
+    }
+  });
+}
+
+// ---------- drag & drop back into Backlog (open -> backlog, T-0141) ----------
+// The way back down. Wired like the other two zones; what is decided here is the
+// confirmation.
+//
+// The move itself is not confirmed. It is reversible — and cheaply so since this
+// task: a card put back keeps its brief, so dragging it into Open again starts no
+// second briefing. Asking about a gesture that costs nothing to undo is friction
+// on exactly the correction this whole feature exists to make possible.
+//
+// What IS confirmed is the one part of the move that cannot be undone: a briefing
+// session running on the card is stopped, and the tokens it has spent do not come
+// back. So the board asks only when it can see such a session, and the question
+// names it — the same rule the In Progress drop follows when it picks its text
+// from whether a session will really be started.
+function attachReturnDropZone(col) {
+  col.addEventListener('dragover', (e) => {
+    if (!DRAG_RETURNABLE.includes(draggedStatus)) return; // not an open card: refuse the drop
+    e.preventDefault(); // required to allow drop
+    e.dataTransfer.dropEffect = 'move';
+    col.classList.add('drop-target');
+  });
+  col.addEventListener('dragleave', () => {
+    col.classList.remove('drop-target');
+  });
+  col.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    col.classList.remove('drop-target');
+    const id = e.dataTransfer.getData('text/plain');
+    const task = tasks.find((x) => x.id === id);
+    // Client-side check is just a UX guard against a stale drag; the server
+    // re-validates the status itself and is the actual source of truth.
+    if (!task || !DRAG_RETURNABLE.includes(task.status)) return;
+    if (sessionState(id) === 'running' &&
+        !confirm(tFill('confirm_return_session', { id: task.id, title: task.title }))) return;
+    try {
+      const r = await fetch('/api/task/' + encodeURIComponent(id) + '/backlog', { method: 'POST' });
+      if (!r.ok) {
+        alert(t(writeErrorKey(r.status, 'return_failed')));
+        return;
+      }
+      // Success: don't touch the DOM here - the SSE "changed" event fires once
+      // the server has written doc/backlog.md, and load() re-renders the board.
+    } catch {
+      alert(t('return_failed'));
+    }
+  });
+}
+
 // ---------- data + live reload ----------
+// The name comes from the server's folder name or BRIEFBOARD_NAME, i.e. from
+// whoever started the board — a project directory called `<img onerror=...>`
+// must show up as text. Hence textContent and document.title only, never
+// innerHTML. The name is user data and is not translated.
+const BASE_TITLE = 'briefboard · doc/backlog.md';
+function setProjectName(name) {
+  const text = typeof name === 'string' ? name.trim() : '';
+  document.getElementById('project-name').textContent = text ? '· ' + text + ' ' : '';
+  // Name first: a narrow tab truncates the tail, and the name is the part that
+  // says which project's backlog this is.
+  document.title = text ? text + ' · briefboard' : BASE_TITLE;
+}
+
+// Which version of the board `tasks` reflects (T-0160). -1 = nothing loaded, so
+// no delta can apply and the next event pulls the whole list.
+let boardVersion = -1;
+// The newest full load issued, and the highest version any event announced. The
+// first discards a response that a later load has already superseded; the second
+// catches events that arrived while a load was in flight and are therefore not
+// in it.
+let loadSeq = 0;
+let seenVersion = -1;
+// The announced version a re-read was already issued for. One retry per
+// announcement and no more: a server answering older than it announces would
+// otherwise be met with an endless stream of requests, and the next event
+// re-syncs the board anyway.
+let resyncedFor = -1;
+
 async function load() {
+  const seq = ++loadSeq;
   try {
     const r = await fetch('/api/board');
-    tasks = (await r.json()).tasks || [];
+    const data = await r.json();
+    if (seq !== loadSeq) return;
+    const version = typeof data.version === 'number' ? data.version : -1;
+    // A delta applied while this was in flight already carried the board past
+    // this snapshot; overwriting with it would be a step backwards.
+    if (version >= 0 && version < boardVersion) return;
+    tasks = data.tasks || [];
+    boardVersion = version;
+    sessionsConfigured =
+      data.sessions || { enabled: false, worker: false, orchestrator: false, profiles: [], profileUsedBy: {} };
+    setProjectName(data.project && data.project.name);
     render();
+    // An event announced a version this answer does not contain yet: ask again.
+    // Only against a real version — a board served without one (the backlog is
+    // unreadable) would otherwise be re-requested forever.
+    if (version >= 0 && seenVersion > version && resyncedFor !== seenVersion) {
+      resyncedFor = seenVersion;
+      load();
+    }
+  } catch { /* server restarting; SSE reconnect will retrigger */ }
+}
+
+// A board event carries the delta as JSON: "changed {...}". Applying it needs
+// the client to be at exactly the version the delta was built from; anything
+// else — a missed frame, a reconnect, a payload too large to send, an older
+// server sending the bare word — reloads everything. One reload too many costs
+// a request; one too few leaves the board silently showing yesterday's status.
+function onBoardEvent(data) {
+  const payload = data.slice('changed'.length).trim();
+  let msg = null;
+  if (payload) {
+    try { msg = JSON.parse(payload); } catch { /* unparseable: treat as unknown */ }
+  }
+  if (!msg) { load(); return; }
+  if (typeof msg.v === 'number' && msg.v > seenVersion) seenVersion = msg.v;
+  if (typeof msg.v === 'number' && msg.v === boardVersion) return; // already current
+  if (msg.full || msg.base !== boardVersion) { load(); return; }
+  const removed = new Set(msg.removed || []);
+  const updated = new Map((msg.tasks || []).map((task) => [task.id, task]));
+  const next = [];
+  for (const task of tasks) {
+    if (removed.has(task.id)) continue;
+    const fresh = updated.get(task.id);
+    if (fresh) updated.delete(task.id);
+    next.push(fresh || task);
+  }
+  // What is left is new, and goes to the end — where the backlog file grows too.
+  for (const task of updated.values()) next.push(task);
+  tasks = next;
+  boardVersion = msg.v;
+  render();
+}
+
+// Its own request, on its own event: /api/board is cached against the backlog's
+// mtime+size, and a session that starts or dies changes neither (T-0077).
+async function loadSessions() {
+  try {
+    const r = await fetch('/api/sessions');
+    const data = await r.json();
+    sessionsById = new Map((data.sessions || []).map((s) => [s.id, s]));
+    costsById = new Map(Object.entries(data.costs || {}));
+    const watch = data.watchdog || {};
+    watchdogById = new Map(Object.entries(watch.findings || {}));
+    watchdogHead = watch.head || null;
+    render();
+    refreshOpenSessionLogs();
+    refreshOpenTaskSessions();
   } catch { /* server restarting; SSE reconnect will retrigger */ }
 }
 
 function connect() {
+  if (boardStopped) return;
   const es = new EventSource('/events');
+  sse = es;
   const live = document.getElementById('live');
-  es.onmessage = (e) => { if (e.data === 'changed') load(); };
-  es.onopen = () => { live.classList.remove('off'); document.getElementById('live-text').textContent = 'live'; load(); };
-  es.onerror = () => { live.classList.add('off'); document.getElementById('live-text').textContent = t('reconnecting'); };
+  es.onmessage = (e) => {
+    const data = String(e.data == null ? '' : e.data);
+    if (data === 'sessions') loadSessions();
+    else if (data === 'shutdown') showStopped();
+    else if (data === 'changed' || data.startsWith('changed ')) onBoardEvent(data);
+  };
+  es.onopen = () => {
+    live.classList.remove('off');
+    document.getElementById('live-text').textContent = 'live';
+    // The full resync every reconnect owes the user: any number of events may
+    // have been missed while the stream was down. The versions are forgotten
+    // first because the stream may have come back on a restarted process, whose
+    // counter starts over — held on to, they would reject the fresh board as
+    // older than what is on screen.
+    boardVersion = -1;
+    seenVersion = -1;
+    resyncedFor = -1;
+    load();
+    loadSessions();
+  };
+  es.onerror = () => {
+    // A drop that is not the board's own exit stays "reconnecting…": the two
+    // must not look alike, or a deliberate stop reads as a failure (T-0082).
+    if (boardStopped) return;
+    live.classList.add('off');
+    document.getElementById('live-text').textContent = t('reconnecting');
+  };
 }
 
 load();
+loadSessions();
 connect();
 </script>
 </body>

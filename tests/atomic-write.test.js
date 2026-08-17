@@ -7,6 +7,7 @@
 // rethrow any non-retryable error (and the last error after exhausting retries).
 // Run with: npm test  (or: node --test tests/**/*.test.js)
 
+require('./helpers/env.js');
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'); // same singleton parser.js sees via require('fs')

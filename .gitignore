@@ -1,10 +1,18 @@
 # Dependencies
 node_modules
 
-# Agent worktrees (isolated task branches created by tooling)
-.claude/worktrees/
+# Claude Code's own directory: agent worktrees, session state, and the settings
+# files, which is where its personal permission rules live — absolute paths with
+# the user's name in them. Ignored as a whole and re-included per directory, so a
+# file Claude Code adds next needs no new rule to stay out of `git add -A`: it
+# would otherwise reach the public repo, which is exported from the tracked tree
+# (T-0241). `.claude/agents/` is ours and tracked — CLAUDE.md sends the worker there.
+.claude/*
+!.claude/agents/
 
 # Local artifacts
+# Agent session logs written by the server's session runner (T-0076)
+.briefboard/
 # tools/task.mjs writes doc/backlog.md.tmp during an atomic save
 *.tmp
 *.log
@@ -16,5 +24,6 @@ node_modules
 Thumbs.db
 # User task data - the tool tracks YOUR tasks; they are not part of the tool
 doc/backlog.md
+doc/backlog-archive.md
 doc/brief/*
 !doc/brief/.gitkeep

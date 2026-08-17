@@ -5,15 +5,20 @@
 // real project's doc/backlog.md / doc/brief/ are never touched.
 // Run with: npm test  (or: node --test tests/**/*.test.js)
 
+require('./helpers/env.js');
 const { describe, it, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const net = require('node:net');
-const { spawn } = require('node:child_process');
 
-const SERVER_PATH = path.join(__dirname, '..', 'server', 'server.js');
+// `fetch` shadows the global one on purpose: bounded, so no request here can
+// hang the run (T-0124).
+const { fetch } = require('./helpers/bounded.js');
+// A failing assertion here says what the board answered — code and body (T-0134).
+const { readJson, answerOf } = require('./helpers/response.js');
+const { startBoard } = require('./helpers/board.js');
+const { removeTree } = require('./helpers/rm.js');
 
 // ---------- fixture helpers ----------
 
@@ -81,7 +86,9 @@ async function openSse(baseUrl) {
   let buffer = '';
   async function readUntil(predicate, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
-    while (!predicate(buffer)) {
+    // Awaited: an async predicate hands back a promise, `!promise` is false,
+    // and this loop would end before reading a single frame (T-0189).
+    while (!(await predicate(buffer))) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         throw new Error(`timed out waiting for SSE event; buffer so far: ${JSON.stringify(buffer)}`);
@@ -91,7 +98,7 @@ async function openSse(baseUrl) {
         sleep(remaining).then(() => ({ done: true, value: undefined })),
       ]);
       if (done) {
-        if (predicate(buffer)) return;
+        if (await predicate(buffer)) return;
         throw new Error(`SSE stream ended before condition met; buffer so far: ${JSON.stringify(buffer)}`);
       }
       buffer += decoder.decode(value, { stream: true });
@@ -105,71 +112,18 @@ async function openSse(baseUrl) {
   };
 }
 
-// Finds a free TCP port by binding to port 0 and reading it back off, then
-// closing immediately so the spawned server process can bind it itself.
-function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
-async function waitUntilReady(baseUrl, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastErr;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(baseUrl + '/');
-      await res.arrayBuffer(); // drain the body
-      if (res.status === 200) return;
-    } catch (e) {
-      lastErr = e;
-    }
-    await sleep(50);
-  }
-  throw new Error(`server at ${baseUrl} did not become ready in time: ${lastErr && lastErr.message}`);
-}
-
-// Spawns a real `node server/server.js` child process against a throwaway
-// AGENTBOARD_ROOT and a random free port, and waits until it answers HTTP.
-async function startServer(root) {
-  const port = await getFreePort();
-  const proc = spawn(process.execPath, [SERVER_PATH], {
-    env: { ...process.env, AGENTBOARD_ROOT: root, PORT: String(port) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  let stderr = '';
-  proc.stderr.on('data', (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  const exitedEarly = new Promise((resolve) => {
-    proc.once('exit', (code) => resolve(code));
-  });
-
-  const baseUrl = `http://127.0.0.1:${port}`;
-
-  await Promise.race([
-    waitUntilReady(baseUrl),
-    exitedEarly.then((code) => {
-      throw new Error(`server process exited early with code ${code}, stderr: ${stderr}`);
-    }),
-  ]);
-
-  return {
-    port,
-    baseUrl,
-    async stop() {
-      if (proc.exitCode !== null || proc.signalCode !== null) return;
-      proc.kill();
-      await new Promise((resolve) => proc.once('exit', resolve));
-    },
-  };
+// Copies the install tree (server/ + ui/index.html) into a throwaway directory.
+// The served UI is read from the install root, not from AGENTBOARD_ROOT, so a
+// test that needs to edit it edits this copy: writing to the repository's own
+// ui/index.html leaves the working copy dirty whenever the run dies before the
+// restoring finally (T-0111).
+function makeInstallCopy() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-install-'));
+  fs.cpSync(path.join(__dirname, '..', 'server'), path.join(dir, 'server'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'ui'));
+  fs.copyFileSync(path.join(__dirname, '..', 'ui', 'index.html'), path.join(dir, 'ui', 'index.html'));
+  activeRoots.push(dir);
+  return dir;
 }
 
 // Tracks every server+root started in a test so leftovers get cleaned up even
@@ -177,10 +131,11 @@ async function startServer(root) {
 const activeServers = [];
 const activeRoots = [];
 
-async function setupServer(fixtureOpts) {
+// `serverPath` lets a test run the copy of the install tree it just edited.
+async function setupServer(fixtureOpts, { serverPath } = {}) {
   const root = makeFixtureRoot(fixtureOpts);
   activeRoots.push(root);
-  const server = await startServer(root);
+  const server = await startBoard(root, {}, { serverPath });
   activeServers.push(server);
   return { root, server };
 }
@@ -190,10 +145,7 @@ afterEach(async () => {
     const server = activeServers.pop();
     await server.stop();
   }
-  while (activeRoots.length) {
-    const root = activeRoots.pop();
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+  while (activeRoots.length) await removeTree(activeRoots.pop());
 });
 
 // ---------- GET / ----------
@@ -215,31 +167,28 @@ describe('GET / — in-memory UI cache with mtime invalidation (T-0050)', () => 
   // changes. We can't reach the server's private cache, so we verify the
   // observable invariant instead: the same bytes come back on repeat requests
   // while the file is unchanged, and fresh bytes come back after it changes.
-  // (ui/index.html is shared install state, not per-fixture, so this test
-  // restores the original content in a finally block.)
-  const UI_HTML = path.join(__dirname, '..', 'ui', 'index.html');
-
   it('serves identical bytes on repeat requests, and fresh content after the file changes (no stale)', async () => {
-    const original = fs.readFileSync(UI_HTML);
-    const { server } = await setupServer({ backlog: sampleBacklog() });
-    try {
-      const first = await (await fetch(server.baseUrl + '/')).text();
-      const second = await (await fetch(server.baseUrl + '/')).text();
-      assert.strictEqual(first, second, 'repeat GET / must return the same cached content');
+    const install = makeInstallCopy();
+    const uiHtml = path.join(install, 'ui', 'index.html');
+    const { server } = await setupServer(
+      { backlog: sampleBacklog() },
+      { serverPath: path.join(install, 'server', 'server.js') }
+    );
 
-      // Change the file with a guaranteed-newer mtime, then assert the next
-      // request reflects the change (cache invalidated by mtime, not stale).
-      const marker = '<!-- T-0050 cache-invalidation marker -->';
-      const changed = original.toString('utf8') + '\n' + marker + '\n';
-      const future = new Date(Date.now() + 2000);
-      fs.writeFileSync(UI_HTML, changed);
-      fs.utimesSync(UI_HTML, future, future);
+    const first = await (await fetch(server.baseUrl + '/')).text();
+    const second = await (await fetch(server.baseUrl + '/')).text();
+    assert.strictEqual(first, second, 'repeat GET / must return the same cached content');
 
-      const third = await (await fetch(server.baseUrl + '/')).text();
-      assert.ok(third.includes(marker), 'GET / after edit must return fresh (non-stale) content');
-    } finally {
-      fs.writeFileSync(UI_HTML, original);
-    }
+    // Change the file with a guaranteed-newer mtime, then assert the next
+    // request reflects the change (cache invalidated by mtime, not stale).
+    const marker = '<!-- T-0050 cache-invalidation marker -->';
+    const changed = fs.readFileSync(uiHtml, 'utf8') + '\n' + marker + '\n';
+    const future = new Date(Date.now() + 2000);
+    fs.writeFileSync(uiHtml, changed);
+    fs.utimesSync(uiHtml, future, future);
+
+    const third = await (await fetch(server.baseUrl + '/')).text();
+    assert.ok(third.includes(marker), 'GET / after edit must return fresh (non-stale) content');
   });
 
   it('revalidates with ETag: a matching If-None-Match gets a 304 with no body', async () => {
@@ -262,7 +211,7 @@ describe('GET /api/board', () => {
   it('returns 200 JSON with tasks parsed from the fixture backlog.md', async () => {
     const { server } = await setupServer({ backlog: sampleBacklog() });
     const res = await fetch(server.baseUrl + '/api/board');
-    const data = await res.json();
+    const data = await readJson(res);
 
     assert.strictEqual(res.status, 200);
     assert.match(res.headers.get('content-type'), /application\/json/);
@@ -271,9 +220,100 @@ describe('GET /api/board', () => {
       data.tasks.map((t) => t.id),
       ['T-0001', 'T-0002', 'T-0003']
     );
-    assert.strictEqual(data.tasks[0].status, 'backlog');
-    assert.strictEqual(data.tasks[1].status, 'open');
-    assert.strictEqual(data.tasks[2].status, 'in_progress');
+    assert.strictEqual(data.tasks[0].status, 'backlog', answerOf(data));
+    assert.strictEqual(data.tasks[1].status, 'open', answerOf(data));
+    assert.strictEqual(data.tasks[2].status, 'in_progress', answerOf(data));
+  });
+
+  it('reports depends and the resolved blockedBy list per task (T-0087)', async () => {
+    const backlog = [
+      '# Backlog\n',
+      '## T-0001 · Major · Finished prerequisite',
+      '- type: feature',
+      '- status: done',
+      '- closed: 2026-01-02 00:00:00',
+      '',
+      '## T-0002 · Major · Unfinished prerequisite',
+      '- type: feature',
+      '- status: in_progress',
+      '',
+      '## T-0003 · Major · Dependent task',
+      '- type: feature',
+      '- status: ready',
+      '- depends: T-0001, T-0002',
+      '',
+    ].join('\n');
+    const { server } = await setupServer({ backlog });
+    const data = await readJson(await fetch(server.baseUrl + '/api/board'));
+    const byId = Object.fromEntries(data.tasks.map((t) => [t.id, t]));
+
+    assert.deepStrictEqual(byId['T-0003'].depends, ['T-0001', 'T-0002']);
+    // Only the prerequisite that is not closed yet blocks.
+    assert.deepStrictEqual(byId['T-0003'].blockedBy, ['T-0002']);
+    assert.deepStrictEqual(byId['T-0001'].depends, []);
+    assert.deepStrictEqual(byId['T-0001'].blockedBy, []);
+  });
+
+  it('flags an open task whose session left questions in the description (T-0083)', async () => {
+    const backlog = [
+      '# Backlog\n',
+      '## T-0001 · Major · Session asked something',
+      '- type: feature',
+      '- status: open',
+      '',
+      'Refined so far.',
+      '',
+      '### Session questions',
+      '',
+      '- Does the export include cancelled tasks?',
+      '',
+      '## T-0002 · Major · Session had nothing to ask',
+      '- type: feature',
+      '- status: open',
+      '',
+      'Refined so far.',
+      '',
+      '## T-0003 · Major · Answered and briefed',
+      '- type: feature',
+      '- status: ready',
+      '',
+      'Refined so far.',
+      '',
+      '### Session questions',
+      '',
+      '- Does the export include cancelled tasks? Yes.',
+      '',
+      '## T-0004 · Major · Merely talks about the protocol',
+      '- type: feature',
+      '- status: open',
+      '',
+      'A session writes a `### Session questions` section when it has to ask.',
+      '',
+      '## T-0005 · Major · Worker session stopped to ask (T-0101)',
+      '- type: feature',
+      '- status: in_progress',
+      '',
+      'Implementing.',
+      '',
+      '### Session questions',
+      '',
+      '- Which of the two schemas is the real one?',
+      '',
+    ].join('\n');
+    const { server } = await setupServer({ backlog });
+    const data = await readJson(await fetch(server.baseUrl + '/api/board'));
+    const byId = Object.fromEntries(data.tasks.map((t) => [t.id, t]));
+
+    assert.strictEqual(byId['T-0001'].awaitingAnswer, true);
+    assert.strictEqual(byId['T-0002'].awaitingAnswer, false);
+    // Left `open` behind, so it is answered whatever the text still says.
+    assert.strictEqual(byId['T-0003'].awaitingAnswer, false);
+    // The heading only counts on a line of its own.
+    assert.strictEqual(byId['T-0004'].awaitingAnswer, false);
+    // A worker session asks from `in_progress` and stays there: the status
+    // still says which phase the task is in, the marker says the work stands.
+    assert.strictEqual(byId['T-0005'].awaitingAnswer, true);
+    assert.strictEqual(byId['T-0005'].status, 'in_progress');
   });
 
   // T-0050: conditional GET support for /api/board.
@@ -299,9 +339,9 @@ describe('GET /api/board', () => {
     const backlogPath = path.join(root, 'doc', 'backlog.md');
 
     const first = await fetch(server.baseUrl + '/api/board');
-    const firstData = await first.json();
+    const firstData = await readJson(first);
     const firstEtag = first.headers.get('etag');
-    assert.strictEqual(firstData.tasks.length, 3);
+    assert.strictEqual(firstData.tasks.length, 3, answerOf(firstData));
 
     // Append a new task with a guaranteed-newer mtime so the ETag must change.
     const added = [
@@ -322,7 +362,7 @@ describe('GET /api/board', () => {
     const revalidate = await fetch(server.baseUrl + '/api/board', {
       headers: { 'If-None-Match': firstEtag },
     });
-    const data = await revalidate.json();
+    const data = await readJson(revalidate);
     assert.strictEqual(revalidate.status, 200, 'stale ETag must not produce 304 after a change');
     assert.notStrictEqual(revalidate.headers.get('etag'), firstEtag, 'ETag must change after edit');
     assert.deepStrictEqual(
@@ -343,22 +383,22 @@ describe('GET /api/brief/:id', () => {
     });
 
     const res = await fetch(server.baseUrl + '/api/brief/T-0001-01');
-    const data = await res.json();
+    const data = await readJson(res);
 
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(data.id, 'T-0001-01');
-    assert.strictEqual(data.file, 'T-0001-01-cancellable.md');
-    assert.match(data.markdown, /Body text\./);
+    assert.strictEqual(data.id, 'T-0001-01', answerOf(data));
+    assert.strictEqual(data.file, 'T-0001-01-cancellable.md', answerOf(data));
+    assert.match(data.markdown, /Body text\./, answerOf(data));
   });
 
   it('returns 404 for a brief id that has no matching file', async () => {
     const { server } = await setupServer({ backlog: sampleBacklog() });
 
     const res = await fetch(server.baseUrl + '/api/brief/T-9999-01');
-    const data = await res.json();
+    const data = await readJson(res);
 
     assert.strictEqual(res.status, 404);
-    assert.ok(data.error);
+    assert.ok(data.error, answerOf(data));
   });
 
   // Regression tests for T-0039: decodeURIComponent throws a URIError on
@@ -373,13 +413,13 @@ describe('GET /api/brief/:id', () => {
       const res = await fetch(server.baseUrl + '/api/brief/' + badId);
 
       assert.strictEqual(res.status, 400);
-      const data = await res.json();
-      assert.ok(data.error);
+      const data = await readJson(res);
+      assert.ok(data.error, answerOf(data));
 
       // The server process must still be alive and answering other
       // requests afterwards, not just this one connection.
       const board = await fetch(server.baseUrl + '/api/board');
-      assert.strictEqual(board.status, 200);
+      assert.strictEqual(board.status, 200, answerOf(board));
     });
   }
 });
@@ -398,11 +438,11 @@ describe('malformed request URL', () => {
     const res = await fetch(server.baseUrl + '//');
 
     assert.strictEqual(res.status, 400);
-    const data = await res.json();
-    assert.ok(data.error);
+    const data = await readJson(res);
+    assert.ok(data.error, answerOf(data));
 
     const board = await fetch(server.baseUrl + '/api/board');
-    assert.strictEqual(board.status, 200);
+    assert.strictEqual(board.status, 200, answerOf(board));
   });
 });
 
@@ -413,13 +453,13 @@ describe('POST /api/task/:id/cancel', () => {
     const { root, server } = await setupServer({ backlog: sampleBacklog() });
 
     const res = await fetch(server.baseUrl + '/api/task/T-0001/cancel', { method: 'POST' });
-    const data = await res.json();
+    const data = await readJson(res);
 
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(data.ok, true);
-    assert.strictEqual(data.id, 'T-0001');
-    assert.strictEqual(data.status, 'cancelled');
-    assert.match(data.closed, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    assert.strictEqual(data.ok, true, answerOf(data));
+    assert.strictEqual(data.id, 'T-0001', answerOf(data));
+    assert.strictEqual(data.status, 'cancelled', answerOf(data));
+    assert.match(data.closed, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/, answerOf(data));
 
     const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
     assert.match(onDisk, /## T-0001[\s\S]*?- status: cancelled/);
@@ -430,10 +470,10 @@ describe('POST /api/task/:id/cancel', () => {
     const { root, server } = await setupServer({ backlog: sampleBacklog() });
 
     const res = await fetch(server.baseUrl + '/api/task/T-0002/cancel', { method: 'POST' });
-    const data = await res.json();
+    const data = await readJson(res);
 
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(data.status, 'cancelled');
+    assert.strictEqual(data.status, 'cancelled', answerOf(data));
 
     const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
     assert.match(onDisk, /## T-0002[\s\S]*?- status: cancelled/);
@@ -444,10 +484,10 @@ describe('POST /api/task/:id/cancel', () => {
     const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
 
     const res = await fetch(server.baseUrl + '/api/task/T-0003/cancel', { method: 'POST' });
-    const data = await res.json();
+    const data = await readJson(res);
 
     assert.strictEqual(res.status, 409);
-    assert.ok(data.error);
+    assert.ok(data.error, answerOf(data));
 
     const after_ = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
     assert.strictEqual(after_, before);
@@ -458,10 +498,10 @@ describe('POST /api/task/:id/cancel', () => {
     const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
 
     const res = await fetch(server.baseUrl + '/api/task/T-9999/cancel', { method: 'POST' });
-    const data = await res.json();
+    const data = await readJson(res);
 
     assert.strictEqual(res.status, 404);
-    assert.ok(data.error);
+    assert.ok(data.error, answerOf(data));
 
     const after_ = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
     assert.strictEqual(after_, before);
@@ -483,7 +523,380 @@ describe('POST /api/task/:id/cancel', () => {
     assert.notStrictEqual(res.status, 500);
     // The process must still be alive and answering other requests afterwards.
     const board = await fetch(server.baseUrl + '/api/board');
-    assert.strictEqual(board.status, 200);
+    assert.strictEqual(board.status, 200, answerOf(board));
+  });
+});
+
+// ---------- POST /api/task/:id/open ----------
+
+// One task per lifecycle status, so the "only backlog is accepted" rule can be
+// checked against every other status rather than a single representative one.
+// T-0011 is the only task in status `backlog`.
+const OPEN_FIXTURE_IDS = {
+  backlog: 'T-0011',
+  open: 'T-0012',
+  ready: 'T-0013',
+  in_progress: 'T-0014',
+  review: 'T-0015',
+  done: 'T-0016',
+  cancelled: 'T-0017',
+};
+
+function statusBacklog() {
+  const lines = ['# Backlog\n'];
+  for (const [status, id] of Object.entries(OPEN_FIXTURE_IDS)) {
+    const closed = status === 'done' || status === 'cancelled' ? '2026-01-02 00:00:00' : '—';
+    lines.push(
+      `## ${id} · Major · Task in ${status}`,
+      '- type: feature',
+      `- status: ${status}`,
+      '- created: 2026-01-01 00:00:00',
+      `- closed: ${closed}`,
+      '- briefs: ',
+      ''
+    );
+  }
+  return lines.join('\n');
+}
+
+describe('POST /api/task/:id/open', () => {
+  it('200: moves a task from "backlog" to "open" and persists the change to disk', async () => {
+    const { root, server } = await setupServer({ backlog: statusBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0011/open', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.ok, true, answerOf(data));
+    assert.strictEqual(data.id, 'T-0011', answerOf(data));
+    assert.strictEqual(data.status, 'open', answerOf(data));
+
+    const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.match(onDisk, /## T-0011[\s\S]*?- status: open/);
+  });
+
+  it('200: leaves `closed` empty — open is not a closing status', async () => {
+    const { root, server } = await setupServer({ backlog: statusBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0011/open', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.closed, undefined, answerOf(data));
+
+    // The file keeps the "not closed" placeholder, and /api/board reports it empty.
+    const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.match(onDisk, /## T-0011[\s\S]*?- closed: —/);
+    const board = await readJson(await fetch(server.baseUrl + '/api/board'));
+    const task = board.tasks.find((t) => t.id === 'T-0011');
+    assert.strictEqual(task.status, 'open');
+    assert.strictEqual(task.closed, '');
+    assert.strictEqual(task.created, '2026-01-01 00:00:00'); // `created` untouched too
+  });
+
+  for (const [status, id] of Object.entries(OPEN_FIXTURE_IDS)) {
+    if (status === 'backlog') continue;
+    it(`409: refuses a task in status "${status}" and leaves the file untouched`, async () => {
+      const { root, server } = await setupServer({ backlog: statusBacklog() });
+      const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+
+      const res = await fetch(server.baseUrl + `/api/task/${id}/open`, { method: 'POST' });
+      const data = await readJson(res);
+
+      assert.strictEqual(res.status, 409);
+      assert.ok(data.error, answerOf(data));
+
+      const after_ = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+      assert.strictEqual(after_, before);
+    });
+  }
+
+  it('404: unknown task id, file untouched', async () => {
+    const { root, server } = await setupServer({ backlog: statusBacklog() });
+    const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+
+    const res = await fetch(server.baseUrl + '/api/task/T-9999/open', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 404);
+    assert.ok(data.error, answerOf(data));
+
+    const after_ = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.strictEqual(after_, before);
+  });
+
+  it('405: non-POST methods (GET) are rejected', async () => {
+    const { server } = await setupServer({ backlog: statusBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0011/open', { method: 'GET' });
+
+    assert.strictEqual(res.status, 405);
+  });
+
+  it('malformed id (does not match T-dddd) does not 500 or crash the process', async () => {
+    const { server } = await setupServer({ backlog: statusBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/foo/open', { method: 'POST' });
+
+    assert.notStrictEqual(res.status, 500);
+    const board = await fetch(server.baseUrl + '/api/board');
+    assert.strictEqual(board.status, 200, answerOf(board));
+  });
+
+  it('is not a generic "set status" endpoint: no other transition has a route', async () => {
+    const { root, server } = await setupServer({ backlog: statusBacklog() });
+    const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+
+    // A status with no action of its own must be unroutable — the backlog file
+    // may not change through any of them.
+    for (const action of ['ready', 'in_progress', 'status']) {
+      const res = await fetch(server.baseUrl + `/api/task/T-0011/${action}`, { method: 'POST' });
+      await res.arrayBuffer(); // drain
+      assert.strictEqual(res.status, 404, `POST /api/task/T-0011/${action} must not be routed`);
+    }
+
+    // `/backlog` is routed (T-0141) and is narrow in the same way: it accepts a
+    // task that is ALREADY in `open` and nothing else, so on this one — which is
+    // in `backlog` — it refuses and writes nothing.
+    const backRes = await fetch(server.baseUrl + '/api/task/T-0011/backlog', { method: 'POST' });
+    await backRes.arrayBuffer();
+    assert.strictEqual(backRes.status, 409);
+
+    // `/briefing` (T-0141) sets no status at all: it starts the briefing session
+    // on a task already in `open`, so here it refuses too.
+    const briefingRes = await fetch(server.baseUrl + '/api/task/T-0011/briefing', { method: 'POST' });
+    await briefingRes.arrayBuffer();
+    assert.strictEqual(briefingRes.status, 409);
+
+    // `/review` is routed (T-0122) and is still not a way to set a status: it
+    // starts the review session on a task ALREADY in review and writes nothing
+    // at all, so on a task that is not there it refuses without touching the file.
+    const reviewRes = await fetch(server.baseUrl + '/api/task/T-0011/review', { method: 'POST' });
+    await reviewRes.arrayBuffer();
+    assert.strictEqual(reviewRes.status, 409);
+
+    // `/done` is routed too (T-0148) and is just as narrow: it accepts a task
+    // that is ALREADY in review and nothing else, so here it refuses and the
+    // file below is still byte-for-byte what it was.
+    const doneRes = await fetch(server.baseUrl + '/api/task/T-0011/done', { method: 'POST' });
+    await doneRes.arrayBuffer();
+    assert.strictEqual(doneRes.status, 409);
+
+    const after_ = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.strictEqual(after_, before);
+  });
+
+  it('a second open on the now-open task 409s (the transition is not idempotent-by-accident)', async () => {
+    const { server } = await setupServer({ backlog: statusBacklog() });
+
+    const first = await fetch(server.baseUrl + '/api/task/T-0011/open', { method: 'POST' });
+    await first.arrayBuffer();
+    assert.strictEqual(first.status, 200);
+
+    const second = await fetch(server.baseUrl + '/api/task/T-0011/open', { method: 'POST' });
+    await second.arrayBuffer();
+    assert.strictEqual(second.status, 409);
+  });
+
+  it('cancel still works alongside open (T-0017 regression)', async () => {
+    const { root, server } = await setupServer({ backlog: statusBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0012/cancel', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.status, 'cancelled', answerOf(data));
+    const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.match(onDisk, /## T-0012[\s\S]*?- status: cancelled/);
+  });
+});
+
+// ---------- POST /api/task/:id/start ----------
+
+// One task per lifecycle status again, plus the dependency cases: T-0023 waits
+// for an in_progress prerequisite and for a task that does not exist, T-0024
+// waits only for prerequisites that are already closed (done + cancelled, both
+// of which count as satisfied).
+const START_FIXTURE_IDS = {
+  backlog: 'T-0011',
+  open: 'T-0012',
+  ready: 'T-0013',
+  in_progress: 'T-0014',
+  review: 'T-0015',
+  done: 'T-0016',
+  cancelled: 'T-0017',
+};
+
+function startBacklog() {
+  const lines = ['# Backlog\n'];
+  for (const [status, id] of Object.entries(START_FIXTURE_IDS)) {
+    const closed = status === 'done' || status === 'cancelled' ? '2026-01-02 00:00:00' : '—';
+    lines.push(
+      `## ${id} · Major · Task in ${status}`,
+      '- type: feature',
+      `- status: ${status}`,
+      '- created: 2026-01-01 00:00:00',
+      `- closed: ${closed}`,
+      '- briefs: ',
+      ''
+    );
+  }
+  lines.push(
+    '## T-0023 · Major · Ready but blocked',
+    '- type: feature',
+    '- status: ready',
+    '- created: 2026-01-01 00:00:00',
+    '- closed: —',
+    '- briefs: ',
+    '- depends: T-0014, T-9998',
+    '',
+    '## T-0024 · Major · Ready with satisfied prerequisites',
+    '- type: feature',
+    '- status: ready',
+    '- created: 2026-01-01 00:00:00',
+    '- closed: —',
+    '- briefs: ',
+    '- depends: T-0016, T-0017',
+    ''
+  );
+  return lines.join('\n');
+}
+
+describe('POST /api/task/:id/start', () => {
+  it('200: moves a task from "ready" to "in_progress" and persists the change to disk', async () => {
+    const { root, server } = await setupServer({ backlog: startBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0013/start', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.ok, true, answerOf(data));
+    assert.strictEqual(data.id, 'T-0013', answerOf(data));
+    assert.strictEqual(data.status, 'in_progress', answerOf(data));
+    // No command is configured in this fixture, so the transition stands alone.
+    assert.strictEqual(data.session, 'disabled', answerOf(data));
+
+    const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.match(onDisk, /## T-0013[\s\S]*?- status: in_progress/);
+  });
+
+  it('200: leaves `closed` empty — in_progress is not a closing status', async () => {
+    const { root, server } = await setupServer({ backlog: startBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0013/start', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.closed, undefined, answerOf(data));
+    const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.match(onDisk, /## T-0013[\s\S]*?- closed: —/);
+  });
+
+  it('200: starts a ready task whose prerequisites are all closed (done/cancelled)', async () => {
+    const { server } = await setupServer({ backlog: startBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0024/start', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.status, 'in_progress', answerOf(data));
+  });
+
+  for (const [status, id] of Object.entries(START_FIXTURE_IDS)) {
+    if (status === 'ready') continue;
+    it(`409: refuses a task in status "${status}" and leaves the file untouched`, async () => {
+      const { root, server } = await setupServer({ backlog: startBacklog() });
+      const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+
+      const res = await fetch(server.baseUrl + `/api/task/${id}/start`, { method: 'POST' });
+      const data = await readJson(res);
+
+      assert.strictEqual(res.status, 409);
+      assert.ok(data.error, answerOf(data));
+
+      const after_ = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+      assert.strictEqual(after_, before);
+    });
+  }
+
+  it('409: a blocked task is not started, and the error names every blocker with its status', async () => {
+    const { root, server } = await setupServer({ backlog: startBacklog() });
+    const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0023/start', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 409);
+    assert.match(data.error, /T-0014 \(in_progress\)/, answerOf(data));
+    assert.match(data.error, /T-9998 \(not found\)/); // an id no task carries also blocks
+
+    const after_ = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.strictEqual(after_, before);
+  });
+
+  it('there is no --force counterpart: the request body cannot unblock a task', async () => {
+    const { root, server } = await setupServer({ backlog: startBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0023/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true }),
+    });
+    await res.arrayBuffer();
+
+    assert.strictEqual(res.status, 409);
+    const onDisk = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+    assert.match(onDisk, /## T-0023[\s\S]*?- status: ready/);
+  });
+
+  it('404: unknown task id, file untouched', async () => {
+    const { root, server } = await setupServer({ backlog: startBacklog() });
+    const before = fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8');
+
+    const res = await fetch(server.baseUrl + '/api/task/T-9999/start', { method: 'POST' });
+    const data = await readJson(res);
+
+    assert.strictEqual(res.status, 404);
+    assert.ok(data.error, answerOf(data));
+    assert.strictEqual(fs.readFileSync(path.join(root, 'doc', 'backlog.md'), 'utf8'), before);
+  });
+
+  it('405: non-POST methods (GET) are rejected', async () => {
+    const { server } = await setupServer({ backlog: startBacklog() });
+
+    const res = await fetch(server.baseUrl + '/api/task/T-0013/start', { method: 'GET' });
+
+    assert.strictEqual(res.status, 405);
+  });
+
+  it('a second start on the now in_progress task 409s', async () => {
+    const { server } = await setupServer({ backlog: startBacklog() });
+
+    const first = await fetch(server.baseUrl + '/api/task/T-0013/start', { method: 'POST' });
+    await first.arrayBuffer();
+    assert.strictEqual(first.status, 200);
+
+    const second = await fetch(server.baseUrl + '/api/task/T-0013/start', { method: 'POST' });
+    await second.arrayBuffer();
+    assert.strictEqual(second.status, 409);
+  });
+
+  it('the board reports the started task as in_progress and open/cancel still work', async () => {
+    const { server } = await setupServer({ backlog: startBacklog() });
+
+    await (await fetch(server.baseUrl + '/api/task/T-0013/start', { method: 'POST' })).arrayBuffer();
+    const opened = await fetch(server.baseUrl + '/api/task/T-0011/open', { method: 'POST' });
+    await opened.arrayBuffer();
+    const cancelled = await fetch(server.baseUrl + '/api/task/T-0012/cancel', { method: 'POST' });
+    await cancelled.arrayBuffer();
+
+    assert.strictEqual(opened.status, 200);
+    assert.strictEqual(cancelled.status, 200);
+    const board = await readJson(await fetch(server.baseUrl + '/api/board'));
+    const byId = Object.fromEntries(board.tasks.map((t) => [t.id, t]));
+    assert.strictEqual(byId['T-0013'].status, 'in_progress');
+    assert.strictEqual(byId['T-0011'].status, 'open');
+    assert.strictEqual(byId['T-0012'].status, 'cancelled');
   });
 });
 
@@ -505,7 +918,9 @@ describe('GET /events', () => {
     // timeout elapses.
     async function readUntil(predicate, timeoutMs) {
       const deadline = Date.now() + timeoutMs;
-      while (!predicate(buffer)) {
+      // Awaited: an async predicate hands back a promise, `!promise` is false,
+      // and this loop would end before reading a single frame (T-0189).
+      while (!(await predicate(buffer))) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           throw new Error(`timed out waiting for SSE event; buffer so far: ${JSON.stringify(buffer)}`);
@@ -515,7 +930,7 @@ describe('GET /events', () => {
           sleep(remaining).then(() => ({ done: true, value: undefined, timedOut: true })),
         ]);
         if (done) {
-          if (predicate(buffer)) return;
+          if (await predicate(buffer)) return;
           throw new Error(`SSE stream ended before condition met; buffer so far: ${JSON.stringify(buffer)}`);
         }
         buffer += decoder.decode(value, { stream: true });
@@ -599,6 +1014,6 @@ describe('GET /events — lazy doc/brief/ watch (T-0047)', () => {
 
     // Server must still be alive and serving after all the churn.
     const board = await fetch(server.baseUrl + '/api/board');
-    assert.strictEqual(board.status, 200);
+    assert.strictEqual(board.status, 200, answerOf(board));
   });
 });

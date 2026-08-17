@@ -4,6 +4,16 @@ Thanks for your interest in improving briefboard (agentboard). This project runs
 its own work through the same task workflow it ships, so contributions follow
 that process.
 
+## Repository layout
+
+`server/` (Node with no dependencies), `ui/index.html` (vanilla JS),
+`tools/task.mjs` (CLI).
+
+`AGENTS.md` and `CLAUDE.md` are shipped in the npm package and copied into a
+user's project by `briefboard init`; this file is not. So anything true only of
+this repository — the commands below, the dependency policy, the comment style —
+belongs here, not there.
+
 ## Task workflow
 
 The source of truth is `doc/backlog.md`, with per-task briefs in `doc/brief/`.
@@ -37,7 +47,7 @@ also `AGENTS.md` for the project rules.
 ## Working with tasks (CLI)
 
 ```bash
-node tools/task.mjs add --type feature|bug --priority Major --title "..." --desc "..."
+node tools/task.mjs add --type feature|bug|external --priority Major --title "..." --desc "..."
 node tools/task.mjs show T-0007
 node tools/task.mjs status T-0007 in_progress
 node tools/task.mjs list --status ready
@@ -49,12 +59,113 @@ node tools/task.mjs validate
 Tests use the built-in Node.js test runner — no test framework to install:
 
 ```bash
-node --test          # run the full suite
-npm test             # same, via the package script (needs Node >= 21, see below)
+npm test             # the full suite, compact output (needs Node >= 21, see below)
+npm run test:verbose # the same suite with a line per test (spec reporter)
 ```
+
+`npm test` reports progress as dots and prints the `tests/pass/fail` totals; a
+failure still gets its file, test path, message, diff, stack and the file's own
+stderr. On this suite that is 29 lines instead of 1061 — which matters because
+coding agents pay for every line they read. When something fails, re-run just
+the file it names:
+
+```bash
+node --test --test-reporter=spec tests/parser.test.js
+```
+
+Re-run only the file it names, never the whole suite verbosely. Measured: the
+verbose run costs ~18k tokens of context, the compact one ~300.
 
 Cover your changes with tests that match the brief's acceptance criteria, and
 make sure the whole suite is green before moving a task to `review`.
+
+Give the run a command of its own and keep its output in a file: chained with a
+status change, the status lands before the result can be read (twice in one day).
+
+### A test never writes into the repository
+
+Everything a test writes lives in a directory it created under `os.tmpdir()`:
+project fixtures, and — when a test has to change what the server serves — a
+throwaway copy of the install tree (`makeInstallCopy` in `tests/server.test.js`).
+Editing a repository file and restoring it in a `finally` is not good enough: a
+run that dies never reaches the `finally`, the change stays in the working copy,
+and the next run reads the polluted file as the "original" and restores *that* —
+so the pollution sticks and rides into an unrelated commit (T-0111).
+
+`npm test` enforces this: `tools/test-run.mjs` takes `git status --porcelain`
+before and after the run and fails if the run added an entry, naming it.
+
+### A test may fail, but it may never hang
+
+The suite hung forever three times in some thirty runs before this was written:
+a worker at 0% CPU, its spawned server alive, and no test ever failing — a run
+that in CI eats the whole job budget instead of reporting anything (T-0124). Two
+habits caused it, and three rules keep it impossible:
+
+- **Every test runs under a time limit.** Both scripts pass `--test-timeout`
+  (`tools/test-run.mjs` for `npm test`, the flag itself for `test:verbose`). The
+  limit is far above the slowest honest test — measure before lowering it — and
+  it is the backstop: whatever else is missed, a stuck test fails and the run
+  ends.
+- **A spawned server's stdout is read, or never piped.** An unread pipe fills,
+  and a server blocked on writing to it stops answering every request. Spawn
+  with `stdio: ['ignore', 'ignore', 'pipe']` when the output is not needed, or
+  attach a `proc.stdout.on('data', ...)`.
+- **No network call and no wait for a process is unbounded.** Take `fetch`,
+  `waitUntilReady`, `waitForExit` and `stopProcess` from
+  `tests/helpers/bounded.js` rather than the global `fetch` or a bare
+  `proc.once('exit')`. A readiness loop must bound the *whole* loop: checking a
+  deadline only between attempts means one stalled request disables the deadline
+  and the race against an early exit at once.
+
+- **A wait awaits the condition it was handed.** Take the wait itself from
+  `tests/helpers/wait.js`; if a helper of your own has to decide whether to keep
+  waiting by calling a function it was given, write `await` — `if (predicate())`
+  reads an async predicate's promise as truthy and ends the wait on its first
+  turn. Pouring the call into a variable first changes nothing and is checked
+  the same way: `const value = predicate(); if (value)` is the same mine, and is
+  how one copy stayed invisible to the guard for a day (T-0223). Nothing fails
+  when that happens: the assertion after the wait runs
+  against a condition that never arrived, and the request the predicate started
+  is left for the teardown to reset, which surfaces as `read ECONNRESET` blamed
+  on the board (T-0183 — three cards of investigation).
+
+`tests/suite-hygiene.test.js` asserts the last three by reading the test sources,
+and `tests/test-run.test.js` asserts the first by running a deliberately hanging
+test under the real entry point.
+
+A guard that needs a list of exemptions is a dead guard: assert the *shape* of
+the mistake, which needs no exemption and holds for next year's copy (T-0189).
+
+### A test brings its own environment
+
+The board spawns a worker session with the environment inherited, so a board
+configured with `BRIEFBOARD_SESSION_CMD` hands it to every session it starts.
+Ten tests that assert the shipped defaults — sessions are off until configured —
+failed inside such a session while the same tree was green outside it, and the
+worker reported the tree as broken (T-0119). Nothing about the tree was.
+
+So the suite defines its own environment. `tests/helpers/env.js` deletes every
+variable the product reads (`AGENTBOARD_ROOT`, `PORT`, `HOST` and the whole
+`BRIEFBOARD_*` set), and every test file requires it **first**:
+
+```js
+require('./helpers/env.js');
+const { describe, it } = require('node:test');
+```
+
+First, not merely near the top: `server/parser.js` reads
+`BRIEFBOARD_LOCK_TIMEOUT_MS` once at load, so a neutralisation that lands after
+that require neutralises nothing. A test needing a value sets it itself, below
+that line, and the children it spawns inherit the cleaned environment along with
+everything else.
+
+`tests/suite-hygiene.test.js` asserts the line is present and first in every test
+file. `tests/hermetic-env.test.js` runs throwaway fixture suites under a
+deliberately polluted environment and asserts both that they see none of it and
+that the very same fixture fails when the order is wrong. It also compares
+`PRODUCT_ENV_VARS` against what `server/`, `tools/` and `bin/` really read — a
+new variable in the product has to be added to that list.
 
 ## Pre-commit hook
 
@@ -75,8 +186,57 @@ add npm packages (runtime or dev) without a task that explicitly calls for it.
 Prefer the Node.js standard library. This keeps installs instant and the
 supply-chain surface minimal.
 
+## Briefs and dispatch prompts
+
+The rules themselves hold for any project, so they live in the shipped protocol,
+not here: `agents/ORCHESTRATOR.md` — what a dispatch prompt carries and what it
+must not restate (§4), anchors instead of line numbers and what a brief may never
+lose (§3), batching trivial findings into one task (§1).
+
+Two things about them are ours. The anchors those briefs point at are our code —
+the `.col.drag-available` rule, the `attachOpenDropZone` function, the
+`SESSION_QUESTIONS_HEADING` constant — and pointing at `ui/index.html:172`
+instead went stale several times in a single day here, which is where the rule
+comes from. And the test count a prompt quotes is read from `npm test` on `main`
+(the `# pass N` line of its summary) right before the dispatch: a worker given a
+stale number spends its run debugging a failure it did not cause.
+
+## Comments
+
+Few, and only where they carry what the code cannot show — a non-obvious
+decision and its reason, or a measured fact (benchmark, observed platform
+behaviour, the incident that shaped the code). Never restate in prose what the
+next line already says. Comments and GitHub-facing docs are English. This
+applies to existing code too: when a task takes you into a file, strip the
+narration already there. Keep that cleanup in its own commit, separate from the
+task's own change, so a reviewer can still read the real diff. Files the task
+does not touch are left alone — no repo-wide sweeps.
+
+## Documentation: English in the task, translations at release
+
+A task updates **only the English documents** — `README.md` and
+`doc/guide/guide.en.md`. `README.ru.md`, `README.ja.md`, `doc/guide/guide.ru.md`
+and `doc/guide/guide.ja.md` are not touched in tasks; they are brought in line
+with English in a single pass per release, as a mandatory step of the
+maintainer's release checklist (`RELEASING.md`, kept in the development repo).
+
+Writing the same meaning three times in every task is most of what separates a
+documentation task (150–274k tokens) from a purely code one (53–98k, measured
+2026-08-14), and it drifts the terminology: each worker retranslates the same
+concepts its own way. One pass over everything accumulated is cheaper and comes
+out consistent.
+
+**Interface strings (i18n) are not covered by this rule.** They are part of the
+product, not of the documentation, and are translated in the same task as the
+feature they belong to. Nobody should have to wait for a release to stop seeing
+an English button in a Russian interface.
+
+The cost accepted knowingly: between a task and a release the translated docs
+lag behind English. Each of them says so in its header, so a reader learns it
+from the document rather than from the discrepancy, and the release checklist is
+what guarantees the lag ends.
+
 ## Requirements
 
 - Node.js >= 21 (the `npm test` glob only expands correctly from Node 21.0.0; see
   task T-0041 in the backlog for the empirical detail).
-- Comments and GitHub-facing documentation are written in English.
