@@ -11,11 +11,11 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 const { fetch } = require('./helpers/bounded.js');
 const { startBoard } = require('./helpers/board.js');
 const { SPAWN_WAIT_BUDGET_MS } = require('./helpers/wait.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,7 +42,7 @@ const activeServers = [];
 const activeRoots = [];
 
 async function setup(text) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-delta-test-'));
+  const root = tempDir('briefboard-delta-test-');
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), text);
   activeRoots.push(root);

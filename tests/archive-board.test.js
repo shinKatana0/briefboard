@@ -13,11 +13,11 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 const { fetch } = require('./helpers/bounded.js');
 const { startBoard } = require('./helpers/board.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
@@ -43,7 +43,7 @@ const activeServers = [];
 const activeRoots = [];
 
 async function setup(tasks, archived) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-archive-board-'));
+  const root = tempDir('briefboard-archive-board-');
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog(tasks));
   if (archived) fs.writeFileSync(path.join(root, 'doc', 'backlog-archive.md'), backlog(archived));

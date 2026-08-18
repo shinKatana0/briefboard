@@ -12,7 +12,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'); // same singleton parser.js sees via require('fs')
 const path = require('node:path');
-const os = require('node:os');
 
 // Set BEFORE requiring parser.js: it reads the budget once at load. Big enough
 // that a retry test can never lose to a slow machine, small enough that the two
@@ -20,11 +19,12 @@ const os = require('node:os');
 process.env.BRIEFBOARD_LOCK_TIMEOUT_MS = '1000';
 
 const { withFileLock, LOCK_TIMEOUT_CODE } = require('../server/parser.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const TRANSIENT_CODES = ['EPERM', 'EACCES', 'EBUSY'];
 
 function makeTarget() {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-transient-test-')), 'backlog.md');
+  return path.join(tempDir('briefboard-transient-test-'), 'backlog.md');
 }
 
 function fsError(code) {

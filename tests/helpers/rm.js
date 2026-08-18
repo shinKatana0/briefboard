@@ -42,12 +42,46 @@ const fs = require('node:fs');
 // already counts "already gone" as success.
 const TRANSIENT_RM_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY', 'EMFILE', 'ENFILE']);
 
-// Ten times the worst case measured under four concurrent suites, and an order
-// of magnitude below the 120 s per-test backstop (tools/test-run.mjs): a
-// directory genuinely held by something still running fails the teardown with
-// the message below instead of eating the run's timeout and reporting a hang.
+// WHAT THIS BUDGET REALLY BOUNDS — remeasured 2026-08-17 (T-0238), and it is not
+// the lag above.
+//
+// The 10 s here was ten times the 1.0 s worst case of the cwd lag. Four
+// concurrent full suites of the grown suite then failed four teardowns a run on
+// it, so every removeTree call was instrumented — its elapsed time, its first
+// errno, and, at the moment of that first EPERM, whether a session process the
+// product had started INSIDE that very directory was still alive. Windows 11,
+// node v24.18.0, 24 cores, four concurrent full suites, 95 blocked removals:
+//
+//   a session process of that directory still ALIVE at the first EPERM
+//                            n=32 of 44 probed, p50 13.3 s, p95 20.7 s, max 21.1 s
+//   all of them already gone — the pure cwd lag measured above
+//                            n=12 of 44,        p50 1.5 s,  p95 2.4 s,  max 2.4 s
+//
+// So the case that dominates is not a directory waiting on the operating system
+// but a process tree still being killed, and against it 10 s was under the p50:
+// it never had a chance. The pure lag, meanwhile, has grown 1.0 s → 2.4 s on the
+// same machine, which alone would not have justified moving anything.
+//
+// WHY A PROCESS IS STILL ALIVE THERE, given that the teardowns await
+// `runner.shutdown()` first: because that promise is bounded at
+// SHUTDOWN_RELEASE_MS = 5 s on purpose (server/sessions.js) and stops waiting for
+// a tree that has not finished dying — under this load a `taskkill /t /f` and its
+// reaping do not fit in 5 s. The board is behaving as designed; the teardown is
+// simply removing while the kill is still in flight.
+//
+// WHY THE WAIT IS STILL FOR THE DIRECTORY and not for those processes, which is
+// the other fix T-0238 offered: the cwd outlives the process (the measurement at
+// the top of this file), so "the process is gone" would be a wait that ends too
+// early and would have to be followed by this one anyway. Waiting for what is
+// actually needed costs no more and cannot be short.
+//
+// 45 s is a little over twice the 21.1 s worst case, and still leaves 75 s of the
+// 120 s per-test backstop (tools/test-run.mjs) — a directory genuinely held by
+// something that will never let go still fails the teardown with the message
+// below rather than eating the run's timeout and reporting a hang. Nothing stops
+// being noticed that was noticed at 10 s: the same failure, later.
 // Raise it only against a fresh measurement.
-const RM_BUDGET_MS = 10000;
+const RM_BUDGET_MS = 45000;
 const RM_POLL_MS = 25;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

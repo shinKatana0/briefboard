@@ -8,10 +8,11 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 const { validateBacklog } = require('../server/validate.js');
-const { parseBacklog, archivePathFor } = require('../server/parser.js');
+const { parseBacklog, archivePathFor, MAX_LABEL_LEN, MAX_LABELS } = require('../server/parser.js');
+const { skipMaintainerData } = require('./helpers/public-tree.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const REAL_BACKLOG_PATH = path.join(__dirname, '..', 'doc', 'backlog.md');
 const REAL_ARCHIVE_PATH = archivePathFor(REAL_BACKLOG_PATH);
@@ -20,7 +21,7 @@ const REAL_BRIEF_DIR = path.join(__dirname, '..', 'doc', 'brief');
 // Create an isolated, throwaway doc/brief/-like directory so synthetic fixtures never
 // depend on (or risk colliding with) the real project's doc/brief/.
 function makeTmpBriefDir(fileNames) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-validate-test-'));
+  const dir = tempDir('briefboard-validate-test-');
   for (const name of fileNames) fs.writeFileSync(path.join(dir, name), '# fixture brief\n');
   return dir;
 }
@@ -180,6 +181,27 @@ describe('validateBacklog() — synthetic fixtures', () => {
     assert.ok(errors.some((e) => e.includes('T-0004') && e.includes('T-0004-01')));
   });
 
+  it('flags a brief reference that only a non-.md neighbour answers to (T-0283)', () => {
+    // Until findBriefFile required the extension this directory was SILENT: the
+    // id resolved (to the backup), so rule 4 was satisfied, and the .bak claims
+    // no brief id, so neither the orphan check (T-0268) nor the duplicate check
+    // (T-0275) had an opinion. Now it is rule 4's existing dangling message —
+    // one message, the one that names the file that is actually missing, and no
+    // new complaint about backup files living in the directory.
+    const briefDir = makeTmpBriefDir(['T-0004-01-old.md.bak']);
+    const text = '## T-0004 · Major · Only a backup\n- type: feature\n- status: open\n- briefs: T-0004-01\n';
+
+    const errors = validateBacklog(text, briefDir, '');
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /T-0004: brief T-0004-01 does not resolve to a file/);
+    assert.doesNotMatch(errors[0], /\.bak/);
+
+    // And the real brief beside it is what makes the reference resolve again —
+    // proof the fixture is not simply un-resolvable for some other reason.
+    fs.writeFileSync(path.join(briefDir, 'T-0004-01-real.md'), '# fixture brief\n');
+    assert.deepStrictEqual(validateBacklog(text, briefDir, ''), []);
+  });
+
   it('accepts a brief reference resolved via the "<id>-<slug>.md" pattern (not just "<id>.md")', () => {
     const briefDir = makeTmpBriefDir(['T-0005-01-some-descriptive-slug.md']);
     const text = '## T-0005 · Major · Has brief\n- type: feature\n- status: open\n- briefs: T-0005-01\n';
@@ -217,6 +239,188 @@ describe('validateBacklog() — synthetic fixtures', () => {
     ].join('\n');
 
     assert.deepStrictEqual(validateBacklog(text, briefDir, ''), []);
+  });
+
+  // ---- brief files nothing links (T-0268) ----
+  // The direction rule 4 does not check. A brief on disk that no task links is
+  // the state in which two finished briefs were overwritten: invisible to the
+  // numbering, and reported by nothing — not here, not by the board, not by the
+  // pre-commit hook (T-0264).
+  const taskFixture = (id, briefs) =>
+    [
+      `## ${id} · Major · Task ${id}`,
+      '- type: feature',
+      '- status: open',
+      '- created: 2026-01-01 00:00:00',
+      '- closed: —',
+      `- briefs: ${briefs}`,
+      '',
+    ].join('\n');
+
+  it('flags a brief file its own task does not link, and names the command that links it', () => {
+    const briefDir = makeTmpBriefDir(['T-0001-01-linked.md', 'T-0001-02-forgotten.md']);
+
+    const errors = validateBacklog(taskFixture('T-0001', 'T-0001-01'), briefDir, '');
+
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /^T-0001-02: T-0001-02-forgotten\.md/);
+    assert.match(errors[0], /T-0001 does not link it/);
+    assert.match(errors[0], /node tools\/task\.mjs link T-0001-02/, 'the fix is one command since T-0267');
+  });
+
+  it('recognises a brief file with no slug at all, the way findBriefFile does', () => {
+    const briefDir = makeTmpBriefDir(['T-0001-01.md']);
+
+    const errors = validateBacklog(taskFixture('T-0001', ''), briefDir, '');
+
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /^T-0001-01: T-0001-01\.md/);
+  });
+
+  it('tells the two orphans apart: a file whose task exists nowhere gets its own message', () => {
+    const briefDir = makeTmpBriefDir(['T-0404-01-ghost.md']);
+
+    const errors = validateBacklog(taskFixture('T-0001', ''), briefDir, '');
+
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /there is no task T-0404 in doc\/backlog\.md or doc\/backlog-archive\.md/);
+    assert.doesNotMatch(errors[0], /task\.mjs link/, 'there is no card to link it to, so none is advised');
+  });
+
+  it('does not call the brief of an archived task an orphan — though the same file is one without it', () => {
+    const briefDir = makeTmpBriefDir(['T-0140-01-closed-work.md']);
+    const archive = [
+      '## T-0140 · Major · Closed and moved out',
+      '- type: feature',
+      '- status: done',
+      '- created: 2026-01-01 00:00:00',
+      '- closed: 2026-01-02 00:00:00',
+      '- briefs: T-0140-01',
+      '',
+    ].join('\n');
+
+    assert.deepStrictEqual(validateBacklog('# Backlog\n', briefDir, archive), []);
+
+    // The premise, checked rather than assumed: the pass above is the archive
+    // being read, not the check being asleep. Tasks move to the archive and
+    // their briefs stay where they are, so a check that read doc/backlog.md
+    // alone would declare every brief of every closed task an orphan — 147 of
+    // them in this repository.
+    const withoutArchive = validateBacklog('# Backlog\n', briefDir, '');
+    assert.strictEqual(withoutArchive.length, 1, withoutArchive.join(' | '));
+    assert.match(withoutArchive[0], /no task T-0140/);
+  });
+
+  it('ignores everything in the directory that claims no brief id, .gitkeep included', () => {
+    // .gitkeep is not incidental: tools/release-export.mjs stands one up in the
+    // emptied brief directory and the suite recognises a public tree BY it
+    // (tests/helpers/public-tree.js), so a check that complained here would
+    // break the export.
+    const briefDir = makeTmpBriefDir([
+      '.gitkeep',
+      'README.md',
+      'draft.md',
+      'T-0001-notes.md',
+      'T-0001-01-old.md.bak',
+      'T-0001-01-real.md',
+    ]);
+    const text = taskFixture('T-0001', 'T-0001-01');
+
+    assert.deepStrictEqual(validateBacklog(text, briefDir, ''), []);
+
+    // And not because the check gave up on this directory: one real orphan
+    // among the same files is still found, and it is the only thing reported.
+    fs.writeFileSync(path.join(briefDir, 'T-0001-02-forgotten.md'), '# fixture brief\n');
+    const errors = validateBacklog(text, briefDir, '');
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /T-0001-02-forgotten\.md/);
+  });
+
+  it('has no opinion when there is no brief directory to read', () => {
+    const text = taskFixture('T-0001', '');
+    assert.deepStrictEqual(validateBacklog(text, null, ''), []);
+    assert.deepStrictEqual(validateBacklog(text, path.join(tempDir('briefboard-validate-test-'), 'nope'), ''), []);
+  });
+
+  // ---- two files answering to one brief id (T-0275) ----
+  // The shape neither rule 4 nor rule 5 sees: the id resolves to a file, and
+  // every one of the files carries an id some task links — so nothing is
+  // dangling and nothing is an orphan. findBriefFile() still serves exactly one
+  // of them, and the reader can be editing the other.
+
+  it('flags two files answering to one brief id, naming the id and BOTH files', () => {
+    const briefDir = makeTmpBriefDir(['T-0001-01-first.md', 'T-0001-01-second.md']);
+
+    const errors = validateBacklog(taskFixture('T-0001', 'T-0001-01'), briefDir, '');
+
+    // Exactly one message: this is one ambiguity, not one problem per file — and
+    // the file the tools ignore is not an orphan, so rule 5 must stay quiet.
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /^T-0001-01: /);
+    assert.match(errors[0], /T-0001-01-first\.md/);
+    assert.match(errors[0], /T-0001-01-second\.md/);
+    assert.doesNotMatch(errors[0], /orphan|does not link it/);
+  });
+
+  it('reports three files answering to one id once, naming all three — not as two pairs', () => {
+    // Created back to front, so the message's order is the check's doing and not
+    // the order the files happened to appear in.
+    const briefDir = makeTmpBriefDir(['T-0001-01-third.md', 'T-0001-01-second.md', 'T-0001-01-first.md']);
+
+    const errors = validateBacklog(taskFixture('T-0001', 'T-0001-01'), briefDir, '');
+
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(
+      errors[0],
+      /T-0001-01-first\.md, T-0001-01-second\.md, T-0001-01-third\.md/,
+      'all three, sorted, in one message'
+    );
+    assert.match(errors[0], /\b3 files\b/);
+  });
+
+  it('says nothing about ids that have exactly one file each', () => {
+    // Two ids, two files, one apiece — including the no-slug spelling, which is
+    // a different name for the same id and must not be mistaken for a duplicate.
+    const briefDir = makeTmpBriefDir(['T-0001-01.md', 'T-0001-02-other.md']);
+
+    assert.deepStrictEqual(validateBacklog(taskFixture('T-0001', 'T-0001-01, T-0001-02'), briefDir, ''), []);
+  });
+
+  it('counts only files that claim a brief id: a .gitkeep or a .bak beside a brief is not a duplicate', () => {
+    // T-0001-01-old.md.bak starts with the id and is not a brief file, so it is
+    // none of this check's business — the same rule that keeps the release
+    // export's .gitkeep out of it (T-0268).
+    const briefDir = makeTmpBriefDir(['.gitkeep', 'README.md', 'T-0001-01-old.md.bak', 'T-0001-01-real.md']);
+    const text = taskFixture('T-0001', 'T-0001-01');
+
+    assert.deepStrictEqual(validateBacklog(text, briefDir, ''), []);
+
+    // And not because the check gave up on this directory: a real second file
+    // for the same id, among the same neighbours, is still the one thing found.
+    fs.writeFileSync(path.join(briefDir, 'T-0001-01-copy.md'), '# fixture brief\n');
+    const errors = validateBacklog(text, briefDir, '');
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /T-0001-01-copy\.md, T-0001-01-real\.md/);
+    assert.doesNotMatch(errors[0], /\.bak|README|gitkeep/);
+  });
+
+  it('reports a duplicated brief id of an ARCHIVED task too — the files stay where they are', () => {
+    const briefDir = makeTmpBriefDir(['T-0140-01-a.md', 'T-0140-01-b.md']);
+    const archive = [
+      '## T-0140 · Major · Closed and moved out',
+      '- type: feature',
+      '- status: done',
+      '- created: 2026-01-01 00:00:00',
+      '- closed: 2026-01-02 00:00:00',
+      '- briefs: T-0140-01',
+      '',
+    ].join('\n');
+
+    const errors = validateBacklog('# Backlog\n', briefDir, archive);
+
+    assert.strictEqual(errors.length, 1, errors.join(' | '));
+    assert.match(errors[0], /^T-0140-01: 2 files/);
+    assert.match(errors[0], /T-0140-01-a\.md, T-0140-01-b\.md/);
   });
 
   // ---- dates (T-0170) ----
@@ -339,6 +543,80 @@ describe('validateBacklog() — synthetic fixtures', () => {
     for (const id of ['T-0001', 'T-0002', 'T-0003', 'T-0004']) assert.ok(cycle.includes(id));
   });
 
+  // T-0279. parseBacklog drops a label breaking the rules, so a hand-edited file
+  // loses it on the next save without a word; this is what says so first. And
+  // deliberately nothing else about labels — the set is implicit, so there is no
+  // unknown label to report, and a similarity warning would fire on every
+  // genuinely new one.
+  describe('labels (T-0279)', () => {
+    const withLabels = (value) =>
+      [
+        '## T-0001 · Major · Labelled task',
+        '- type: feature',
+        '- status: open',
+        '- created: 2026-01-01 00:00:00',
+        '- closed: —',
+        '- briefs: ',
+        `- labels: ${value}`,
+        '',
+        'Body.',
+        '',
+      ].join('\n');
+
+    const errorsFor = (value) => validateBacklog(withLabels(value), makeTmpBriefDir([]), '');
+
+    it('says nothing about an ordinary label line', () => {
+      assert.deepStrictEqual(errorsFor('ui, docs, release-0.3'), []);
+    });
+
+    it('and nothing about a line with no labels on it at all', () => {
+      assert.deepStrictEqual(errorsFor(''), []);
+    });
+
+    it('no similarity warning: a label close to another is still just a label', () => {
+      assert.deepStrictEqual(errorsFor('ui, UI, u i'), []);
+    });
+
+    it('reports a stray comma, naming the task and the line', () => {
+      const errors = errorsFor('ui,,docs');
+      assert.strictEqual(errors.length, 1, errors.join(' | '));
+      assert.match(errors[0], /^T-0001: empty label/);
+    });
+
+    it('reports a name over the length cap, naming the cap', () => {
+      const long = 'y'.repeat(MAX_LABEL_LEN + 1);
+      const errors = errorsFor(`ui, ${long}`);
+      assert.strictEqual(errors.length, 1, errors.join(' | '));
+      assert.match(errors[0], new RegExp(String(MAX_LABEL_LEN)));
+      assert.match(errors[0], new RegExp(long));
+    });
+
+    it('reports more labels than a task may carry', () => {
+      const many = Array.from({ length: MAX_LABELS + 1 }, (_, i) => 'l' + i);
+      const errors = errorsFor(many.join(', '));
+      assert.strictEqual(errors.length, 1, errors.join(' | '));
+      assert.match(errors[0], new RegExp(String(MAX_LABELS)));
+    });
+
+    it('a repeat is not an error — it is collapsed, not lost', () => {
+      assert.deepStrictEqual(errorsFor('ui, docs, ui'), []);
+      // ...and it does not count towards the cap either.
+      const atCap = Array.from({ length: MAX_LABELS }, (_, i) => 'l' + i);
+      assert.deepStrictEqual(errorsFor(atCap.concat(atCap).join(', ')), []);
+    });
+
+    it('the archive is checked by the same rule, and named as the other file', () => {
+      // Closed, so the archive's own "only done/cancelled belong here" rule is
+      // not what answers — the label line is.
+      const archived = withLabels('ui,,docs')
+        .replace('- status: open', '- status: done')
+        .replace('- closed: —', '- closed: 2026-01-02 00:00:00');
+      const errors = validateBacklog('# Backlog\n', makeTmpBriefDir([]), archived);
+      assert.strictEqual(errors.length, 1, errors.join(' | '));
+      assert.match(errors[0], /^backlog-archive\.md: T-0001: empty label/);
+    });
+  });
+
   it('reports multiple independent problems at once', () => {
     const briefDir = makeTmpBriefDir([]);
     const text = [
@@ -360,27 +638,36 @@ describe('validateBacklog() — synthetic fixtures', () => {
 });
 
 describe('validateBacklog() — real project files', () => {
-  it('returns [] for the current doc/backlog.md + doc/brief/ (regression guard)', (t) => {
-    // This is a regression guard for the real dev backlog. In a clean public
-    // snapshot (release-export), doc/backlog.md is replaced by an empty starter
-    // and doc/brief/ is empty, so there is nothing to guard. Skip the test when
-    // the backlog is absent or parses to no tasks; otherwise run it as before.
-    if (!fs.existsSync(REAL_BACKLOG_PATH)) {
-      t.skip('doc/backlog.md is absent (clean public snapshot)');
-      return;
+  // Skipped in the public tree, and skipped BECAUSE the tree is public (T-0253).
+  // The old condition — "doc/backlog.md is absent", "it has no tasks" — was keyed
+  // on absence, so an accidental deletion here would have retired this guard
+  // quietly instead of failing it. See tests/helpers/public-tree.js for the
+  // marker and why it is a positive one.
+  it(
+    'returns [] for the current doc/backlog.md + doc/brief/ (regression guard)',
+    { skip: skipMaintainerData('doc/backlog.md') },
+    () => {
+      assert.ok(
+        fs.existsSync(REAL_BACKLOG_PATH),
+        'doc/backlog.md is gone from this checkout, so the guard over it cannot run — restore it, ' +
+          'or, if this is a public tree, the marker in tests/helpers/public-tree.js should have skipped this'
+      );
+      const text = fs.readFileSync(REAL_BACKLOG_PATH, 'utf8');
+      assert.ok(parseBacklog(text).length > 0, 'doc/backlog.md parses to no tasks, so this guard would assert nothing');
+      // Same shape as `node tools/task.mjs validate`: dependencies are resolved
+      // across both files, so a live task may depend on an archived one. This
+      // project HAS an archive and it is tracked, so its absence is the same
+      // accident as the backlog's and is failed the same way rather than read as
+      // an empty string — which would leave every cross-file dependency
+      // unresolved and this guard asserting a weaker thing without saying so.
+      assert.ok(
+        fs.existsSync(REAL_ARCHIVE_PATH),
+        `${path.basename(REAL_ARCHIVE_PATH)} is gone: dependencies on archived tasks resolve across ` +
+          'both files, so validating without it would silently check less'
+      );
+      const archiveText = fs.readFileSync(REAL_ARCHIVE_PATH, 'utf8');
+      const errors = validateBacklog(text, REAL_BRIEF_DIR, archiveText);
+      assert.deepStrictEqual(errors, []);
     }
-    const text = fs.readFileSync(REAL_BACKLOG_PATH, 'utf8');
-    if (parseBacklog(text).length === 0) {
-      t.skip('doc/backlog.md has no tasks (clean public snapshot)');
-      return;
-    }
-    // Same shape as `node tools/task.mjs validate`: dependencies are resolved across
-    // both files, so a live task may depend on an archived one. No archive is the
-    // normal state of a project that has never archived, and of a clean snapshot.
-    const archiveText = fs.existsSync(REAL_ARCHIVE_PATH)
-      ? fs.readFileSync(REAL_ARCHIVE_PATH, 'utf8')
-      : '';
-    const errors = validateBacklog(text, REAL_BRIEF_DIR, archiveText);
-    assert.deepStrictEqual(errors, []);
-  });
+  );
 });

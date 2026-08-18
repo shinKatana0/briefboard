@@ -756,11 +756,17 @@ function summarizeSessions(id, entries, { dropped = 0, now = Date.now() } = {}) 
 // a reader of the file can tell a live session from a leftover one, and that
 // question is already answered by `status` for anyone reading it from here.
 // `descendants` is process bookkeeping for the next board run (T-0193) and
-// answers nothing anyone reading a card is asking; `treeUnknown` and
-// `treeReason` are the same bookkeeping saying it is incomplete (T-0236), and
-// are read by the next board's start-up message rather than by a card.
+// answers nothing anyone reading a card is asking.
+//
+// `treeUnknown` and `treeReason` were stripped with it (T-0236) on the same
+// reasoning, and that was the wrong half of the pair: the pids are bookkeeping,
+// but the fact that there are none to write down is news — while it lasts, a
+// board that dies leaves this session's agents running with nothing recorded to
+// end them by. It was said only in the log, which is not where the person whose
+// board just fell over is looking (T-0242). What the card does with it is the
+// card's business; here the record simply stops hiding it.
 function publicRecord(record) {
-  const { logPath, board, descendants, treeUnknown, treeReason, ...rest } = record;
+  const { logPath, board, descendants, ...rest } = record;
   return rest;
 }
 

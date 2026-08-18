@@ -16,14 +16,13 @@
 // Run with: npm test
 
 require('./helpers/env.js');
-const { describe, it, after } = require('node:test');
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
-const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const REAL_GITIGNORE = path.join(__dirname, '..', '.gitignore');
 const PREVIOUS_RULE = '# Agent worktrees (isolated task branches created by tooling)\n.claude/worktrees/\n';
@@ -41,12 +40,6 @@ const LOCAL_FILES = [
 ];
 const OURS = '.claude/agents/worker.md';
 
-const dirs = [];
-
-after(async () => {
-  for (const dir of dirs) await removeTree(dir);
-});
-
 // Two fixtures answer three questions, and building one costs a `git init`.
 const asked = new Map();
 
@@ -57,8 +50,7 @@ function untracked(gitignore) {
 }
 
 function build(gitignore) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-gitignore-')));
-  dirs.push(root);
+  const root = fs.realpathSync(tempDir('briefboard-gitignore-'));
 
   fs.writeFileSync(path.join(root, '.gitignore'), gitignore);
   for (const rel of [...LOCAL_FILES, OURS]) {

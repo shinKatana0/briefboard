@@ -24,6 +24,7 @@ const {
   PRIORITIES,
   TASK_TYPES,
   BRIEF_ID_RE,
+  BRIEF_FILE_RE,
   TASK_ID_RE,
   blockingDependencies,
   awaitsAnswer,
@@ -47,7 +48,13 @@ const {
   updateBacklog,
   KNOWN_FIELDS,
   FIELD_RE,
+  MAX_LABEL_LEN,
+  MAX_LABELS,
+  normalizeLabels,
+  checkLabels,
 } = require('../server/parser.js');
+const { skipMaintainerData } = require('./helpers/public-tree.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const BACKLOG_PATH = path.join(__dirname, '..', 'doc', 'backlog.md');
 
@@ -535,7 +542,7 @@ describe('parsePreamble() (T-0167)', () => {
 
 describe('a write preserves the preamble (T-0167)', () => {
   const withBacklog = (text, fn) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-preamble-'));
+    const dir = tempDir('briefboard-preamble-');
     const file = path.join(dir, 'backlog.md');
     if (text !== null) fs.writeFileSync(file, text);
     try {
@@ -706,6 +713,7 @@ describe('escaping field-lookalike lines at the start of a description (T-0080)'
     created: '2026-01-01 00:00:00',
     closed: '',
     briefs: [],
+    labels: [],
     depends: [],
     profile: '',
     extra: {},
@@ -812,13 +820,14 @@ const file = (fieldLines, description = 'Description.') =>
   '\n';
 
 describe('unknown fields survive a read-write cycle (T-0095)', () => {
-  it('KNOWN_FIELDS names exactly the seven fields the format defines', () => {
+  it('KNOWN_FIELDS names exactly the eight fields the format defines', () => {
     assert.deepStrictEqual(KNOWN_FIELDS, [
       'type',
       'status',
       'created',
       'closed',
       'briefs',
+      'labels',
       'depends',
       'profile',
     ]);
@@ -963,7 +972,7 @@ describe('unknown fields survive a read-write cycle (T-0095)', () => {
   });
 
   it('an unrelated write (a status change) leaves the unknown line untouched', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-extra-test-'));
+    const dir = tempDir('briefboard-extra-test-');
     const backlog = path.join(dir, 'backlog.md');
     fs.writeFileSync(backlog, file(['- owner: alice']));
 
@@ -988,6 +997,7 @@ describe('field names with digits, "_" and "-" (T-0097)', () => {
     created: '2026-01-01 00:00:00',
     closed: '',
     briefs: ['T-0007-01'],
+    labels: [],
     depends: [],
     profile: '',
     extra: {},
@@ -1050,11 +1060,164 @@ describe('field names with digits, "_" and "-" (T-0097)', () => {
   });
 });
 
+// T-0279. The reader is lenient (a name breaking the rules is dropped, the way
+// an unknown status is defaulted) and the writers are strict — checkLabels is
+// what the CLI and POST /api/task/:id/labels both call, so the two cannot come
+// to disagree about "UI ".
+describe('labels (T-0279)', () => {
+  const PREAMBLE = 'PREAMBLE\n';
+  const withFields = (fieldLines) =>
+    PREAMBLE +
+    '\n' +
+    [
+      '## T-0007 · Major · Host task',
+      '- type: feature',
+      '- status: ready',
+      '- created: 2026-01-01 00:00:00',
+      '- closed: —',
+      '- briefs: T-0007-01',
+      ...fieldLines,
+      '',
+      'Description.',
+    ].join('\n') +
+    '\n';
+
+  describe('parseBacklog()', () => {
+    it('reads "- labels: ui, docs" as a list, trimmed and in the order written', () => {
+      const [t] = parseBacklog(withFields(['- labels: ui,  docs ,api']));
+      assert.deepStrictEqual(t.labels, ['ui', 'docs', 'api']);
+    });
+
+    it('a task with no labels line reads back as an empty list', () => {
+      const [t] = parseBacklog(withFields([]));
+      assert.deepStrictEqual(t.labels, []);
+    });
+
+    it('drops what the rules refuse rather than failing on it', () => {
+      const long = 'y'.repeat(MAX_LABEL_LEN + 1);
+      const [t] = parseBacklog(withFields([`- labels: ui, , ${long}, docs`]));
+      assert.deepStrictEqual(t.labels, ['ui', 'docs']);
+    });
+
+    it('collapses a repeat, keeping the first occurrence, and stops at the cap', () => {
+      const many = Array.from({ length: MAX_LABELS + 3 }, (_, i) => 'l' + i);
+      const [t] = parseBacklog(withFields([`- labels: ui, docs, ui`]));
+      assert.deepStrictEqual(t.labels, ['ui', 'docs']);
+      const [over] = parseBacklog(withFields([`- labels: ${many.join(', ')}`]));
+      assert.deepStrictEqual(over.labels, many.slice(0, MAX_LABELS));
+    });
+
+    it('is case-sensitive: ui and UI are two labels', () => {
+      const [t] = parseBacklog(withFields(['- labels: ui, UI']));
+      assert.deepStrictEqual(t.labels, ['ui', 'UI']);
+    });
+
+    it('labels is a known field now, so it never lands in extra', () => {
+      const [t] = parseBacklog(withFields(['- labels: ui']));
+      assert.deepStrictEqual(t.extra, {});
+    });
+  });
+
+  describe('serializeBacklog()', () => {
+    it('writes the line after briefs and before depends', () => {
+      const [t] = parseBacklog(withFields(['- labels: ui, docs', '- depends: T-0001']));
+      const out = serializeBacklog([t], PREAMBLE);
+      const lines = out.split('\n');
+      assert.ok(lines.indexOf('- labels: ui, docs') > lines.indexOf('- briefs: T-0007-01'));
+      assert.ok(lines.indexOf('- labels: ui, docs') < lines.indexOf('- depends: T-0001'));
+    });
+
+    // The reason the line is optional at all: an unconditional one would rewrite
+    // every existing backlog on the first save.
+    it('writes NO labels line for a task that has none, byte for byte', () => {
+      const text = withFields([]);
+      assert.strictEqual(serializeBacklog(parseBacklog(text), PREAMBLE), text);
+      assert.ok(!serializeBacklog(parseBacklog(text), PREAMBLE).includes('- labels:'));
+    });
+
+    it('round-trips a labelled task byte for byte', () => {
+      const text = withFields(['- labels: ui, docs']);
+      assert.strictEqual(serializeBacklog(parseBacklog(text), PREAMBLE), text);
+    });
+
+    it('serializes a task object built without a labels key at all', () => {
+      const out = serializeBacklog([
+        {
+          id: 'T-0007',
+          priority: 'Major',
+          title: 'Host task',
+          type: 'feature',
+          status: 'ready',
+          created: '2026-01-01 00:00:00',
+          closed: '',
+          briefs: [],
+          description: '',
+        },
+      ]);
+      assert.ok(!out.includes('- labels:'));
+    });
+  });
+
+  // What the CLI and the endpoint both call. A second copy of these rules in
+  // either of them is the thing this shared helper exists to prevent.
+  describe('checkLabels()', () => {
+    it('takes the comma-separated form and the array form to the same list', () => {
+      assert.deepStrictEqual(checkLabels('ui, docs'), ['ui', 'docs']);
+      assert.deepStrictEqual(checkLabels(['ui', ' docs ']), ['ui', 'docs']);
+    });
+
+    it('drops a whitespace-only item — that is what a trailing comma produces', () => {
+      assert.deepStrictEqual(checkLabels('ui, ,docs,'), ['ui', 'docs']);
+    });
+
+    it('collapses a repeat, keeping the first occurrence', () => {
+      assert.deepStrictEqual(checkLabels(['ui', 'docs', 'ui']), ['ui', 'docs']);
+    });
+
+    it('nothing at all is the empty list', () => {
+      assert.deepStrictEqual(checkLabels(undefined), []);
+      assert.deepStrictEqual(checkLabels(null), []);
+      assert.deepStrictEqual(checkLabels([]), []);
+    });
+
+    const REFUSED = {
+      'the list separator inside a name': [['ui,docs'], /comma/],
+      'a line break inside a name': [['ui\ndocs'], /line break/],
+      'a carriage return inside a name': [['ui\rdocs'], /line break/],
+      'a name over the length cap': [['y'.repeat(MAX_LABEL_LEN + 1)], new RegExp(String(MAX_LABEL_LEN))],
+      'more names than a task may carry': [
+        Array.from({ length: MAX_LABELS + 1 }, (_, i) => 'l' + i),
+        new RegExp(String(MAX_LABELS)),
+      ],
+      'something that is not a string at all': [[7], /array of strings/],
+      'a value that is neither a string nor an array': [42, /array of strings/],
+    };
+
+    for (const [name, [value, message]] of Object.entries(REFUSED)) {
+      it(`refuses ${name}, naming it`, () => {
+        assert.throws(() => checkLabels(value), message);
+      });
+    }
+
+    it('the cap counts what survives deduping, not what was sent', () => {
+      const atCap = Array.from({ length: MAX_LABELS }, (_, i) => 'l' + i);
+      assert.deepStrictEqual(checkLabels(atCap.concat(atCap)), atCap);
+    });
+  });
+
+  describe('normalizeLabels()', () => {
+    it('is what the parser uses: it drops instead of throwing', () => {
+      assert.deepStrictEqual(normalizeLabels(['ui', 'a,b', '', 'docs']), ['ui', 'docs']);
+      assert.deepStrictEqual(normalizeLabels([7, 'ui']), ['ui']);
+    });
+  });
+});
+
 describe('findBriefFile() — shared brief lookup (used by server.js + validate.js)', () => {
   // Build a throwaway brief directory so the lookup rules can be asserted in
   // isolation, independent of the real doc/brief/ contents.
   function makeBriefDir(files) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-brief-'));
+    const dir = tempDir('briefboard-brief-');
     for (const f of files) fs.writeFileSync(path.join(dir, f), '# brief\n');
     return dir;
   }
@@ -1088,6 +1251,80 @@ describe('findBriefFile() — shared brief lookup (used by server.js + validate.
     assert.strictEqual(findBriefFile(dir, 'not-a-brief'), null);
   });
 
+  it('picks the same file every time when two files answer to one id (T-0275)', () => {
+    // The fixture is chosen so that raw directory order and the answer differ:
+    // NTFS collates case-insensitively and hands back "apple" first, while the
+    // pick is by code unit, where 'Z' (0x5A) precedes 'a' (0x61). Measured on
+    // this machine 2026-08-18 — so this assertion fails on an unsorted readdir
+    // here, and on a filesystem that returns entries in hash order it fails
+    // there instead. Either way the sorted answer is the same one.
+    const dir = makeBriefDir(['T-0007-01-Zebra.md', 'T-0007-01-apple.md']);
+
+    assert.strictEqual(findBriefFile(dir, 'T-0007-01'), path.join(dir, 'T-0007-01-Zebra.md'));
+    assert.strictEqual(
+      findBriefFile(dir, 'T-0007-01'),
+      findBriefFile(dir, 'T-0007-01'),
+      'and the same answer on a repeat call'
+    );
+
+    // The same two names written in the opposite order, in a directory of their
+    // own: creation order does not enter into it either. Sorting only PICKS —
+    // the ambiguity itself is reported by validate (rule 5b).
+    const reversed = makeBriefDir(['T-0007-01-apple.md', 'T-0007-01-Zebra.md']);
+    assert.strictEqual(findBriefFile(reversed, 'T-0007-01'), path.join(reversed, 'T-0007-01-Zebra.md'));
+  });
+
+  it('is unchanged for an id with a single file, whatever else is in the directory', () => {
+    const dir = makeBriefDir(['T-0006-01-earlier.md', 'T-0007-01-only.md', 'T-0008-01-later.md']);
+    assert.strictEqual(findBriefFile(dir, 'T-0007-01'), path.join(dir, 'T-0007-01-only.md'));
+  });
+
+  it('does not serve a non-.md neighbour: a .bak beside the brief never shadows it (T-0283)', () => {
+    // The exact directory measured on the card: an editor backup whose name
+    // starts with the id, and the brief it was made from. Sorted, ".bak" comes
+    // first, so before the extension was required this returned the backup —
+    // consistently, since T-0275 made the pick deterministic.
+    const dir = makeBriefDir(['T-0001-01-real.md', 'T-0001-01-old.md.bak']);
+    assert.strictEqual(findBriefFile(dir, 'T-0001-01'), path.join(dir, 'T-0001-01-real.md'));
+
+    // The premise, checked and not assumed: the .bak really does sort first, so
+    // the assertion above is the extension test doing the work rather than the
+    // order happening to be kind.
+    assert.deepStrictEqual(fs.readdirSync(dir).sort()[0], 'T-0001-01-old.md.bak');
+  });
+
+  it('returns null when only a non-brief file answers to the id', () => {
+    // Nothing resolves, and that is the honest answer: validate's rule 4 then
+    // reports the reference as dangling, which sends the reader to the file
+    // that is actually missing (T-0283).
+    assert.strictEqual(findBriefFile(makeBriefDir(['T-0001-01-old.md.bak']), 'T-0001-01'), null);
+    assert.strictEqual(findBriefFile(makeBriefDir(['T-0001-01.md.orig']), 'T-0001-01'), null);
+    assert.strictEqual(findBriefFile(makeBriefDir(['T-0001-01-x.md.rej']), 'T-0001-01'), null);
+    assert.strictEqual(findBriefFile(makeBriefDir(['T-0001-01.md.swp']), 'T-0001-01'), null);
+  });
+
+  it('matches the id a file name CLAIMS, not the prefix it starts with', () => {
+    // "T-0001-012-x.md" is a .md whose name starts with "T-0001-01"; the id it
+    // claims is T-0001-01 only if you stop reading after two digits, and
+    // BRIEF_FILE_RE does not.
+    assert.strictEqual(findBriefFile(makeBriefDir(['T-0001-012-x.md']), 'T-0001-01'), null);
+    // ...and the id it does claim is not there either — it is not a brief id.
+    assert.strictEqual(findBriefFile(makeBriefDir(['T-0001-notes.md']), 'T-0001-01'), null);
+  });
+
+  it('BRIEF_FILE_RE is the pattern findBriefFile matches by, and validate.js imports that same one', () => {
+    // The two used to be separate constants in two files and answered
+    // differently (T-0283). This asserts the shape; that there is one copy is a
+    // grep, and that validate reads it is tests/validate.test.js.
+    assert.ok(BRIEF_FILE_RE.test('T-0007-01.md'));
+    assert.ok(BRIEF_FILE_RE.test('T-0007-01-some-slug.md'));
+    assert.ok(!BRIEF_FILE_RE.test('T-0007-01-old.md.bak'));
+    assert.ok(!BRIEF_FILE_RE.test('T-0007-01'));
+    assert.ok(!BRIEF_FILE_RE.test('README.md'));
+    const m = BRIEF_FILE_RE.exec('T-0007-01-some-slug.md');
+    assert.strictEqual(`${m[1]}-${m[2]}`, 'T-0007-01', 'the name yields the brief id it claims');
+  });
+
   it('BRIEF_ID_RE matches the "T-XXXX-YY" shape and nothing looser', () => {
     assert.ok(BRIEF_ID_RE.test('T-0007-01'));
     assert.ok(!BRIEF_ID_RE.test('T-0007'));
@@ -1099,7 +1336,7 @@ describe('findBriefFile() — shared brief lookup (used by server.js + validate.
 // and server.js (POST /api/task) — T-0074.
 describe('addTask()', () => {
   function tmpBacklog() {
-    return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-addtask-test-')), 'backlog.md');
+    return path.join(tempDir('briefboard-addtask-test-'), 'backlog.md');
   }
   function read(file) {
     return parseBacklog(fs.readFileSync(file, 'utf8'));
@@ -1139,12 +1376,85 @@ describe('addTask()', () => {
     assert.strictEqual(task.description, 'text');
   });
 
-  it('normalizes an unknown type/priority exactly as the CLI always has', () => {
+  // T-0286. Until this card the two were replaced by the default, so a typo
+  // filed a task under a type nobody typed and said nothing about it.
+  it('refuses a type outside the list and writes nothing', () => {
     const file = tmpBacklog();
-    addTask(file, { title: 'Bogus', type: 'chore', priority: 'Extreme' });
-    const [task] = read(file);
-    assert.strictEqual(task.type, 'feature');
-    assert.strictEqual(task.priority, 'Medium');
+    assert.throws(
+      () => addTask(file, { title: 'Bogus', type: 'chore' }),
+      /type must be one of: feature, bug, external/
+    );
+    assert.ok(!fs.existsSync(file), 'no backlog file is created for a refused task');
+  });
+
+  it('refuses a priority outside the list and writes nothing', () => {
+    const file = tmpBacklog();
+    assert.throws(
+      () => addTask(file, { title: 'Bogus', priority: 'Extreme' }),
+      /priority must be one of: Blocker, Critical, Major, Medium, Minor/
+    );
+    assert.ok(!fs.existsSync(file), 'no backlog file is created for a refused task');
+  });
+
+  // The whole subtlety of the card: absent is not the same as given-and-wrong.
+  // An empty string is something the caller typed (`--type ""`, or a dangling
+  // `--type` the CLI turns into ''), so it is a mistake, not an omission.
+  it('refuses an empty type/priority, but takes the default when the field is absent or null', () => {
+    const file = tmpBacklog();
+    assert.throws(() => addTask(file, { title: 'A', type: '' }), /type must be one of/);
+    assert.throws(() => addTask(file, { title: 'A', priority: '' }), /priority must be one of/);
+    assert.ok(!fs.existsSync(file), 'neither empty value wrote anything');
+
+    assert.strictEqual(addTask(file, { title: 'Absent' }), 'T-0001');
+    assert.strictEqual(addTask(file, { title: 'Null', type: null, priority: null }), 'T-0002');
+    const tasks = read(file);
+    assert.deepStrictEqual(
+      tasks.map((t) => [t.type, t.priority]),
+      [
+        ['feature', 'Medium'],
+        ['feature', 'Medium'],
+      ]
+    );
+  });
+
+  it('refuses before allocating an id, so the next good task takes the id the refused one did not', () => {
+    const file = tmpBacklog();
+    assert.strictEqual(addTask(file, { title: 'First' }), 'T-0001');
+    const before = fs.readFileSync(file);
+    assert.throws(() => addTask(file, { title: 'Bad', type: 'chore' }), /type must be one of/);
+    assert.throws(() => addTask(file, { title: 'Bad', priority: 'Extreme' }), /priority must be one of/);
+    assert.deepStrictEqual(fs.readFileSync(file), before, 'the backlog is byte-identical after a refusal');
+    assert.strictEqual(addTask(file, { title: 'Second' }), 'T-0002');
+  });
+
+  it('accepts every legal type and priority verbatim', () => {
+    for (const type of TASK_TYPES) {
+      const file = tmpBacklog();
+      addTask(file, { title: 'Typed', type });
+      assert.strictEqual(read(file)[0].type, type);
+    }
+    for (const priority of PRIORITIES) {
+      const file = tmpBacklog();
+      addTask(file, { title: 'Prioritized', priority });
+      assert.strictEqual(read(file)[0].priority, priority);
+    }
+  });
+
+  // The half of T-0286 that must NOT change: the writer became strict, the
+  // reader stays lenient, so a hand-edited or older backlog still reads.
+  it('the strictness does not reach parseBacklog(): a hand-edited unknown type/priority still reads', () => {
+    const file = tmpBacklog();
+    addTask(file, { title: 'Real', type: 'bug', priority: 'Critical' });
+    const text = fs
+      .readFileSync(file, 'utf8')
+      .replace('- type: bug', '- type: chore')
+      .replace('· Critical ·', '· Major ·');
+    const [task] = parseBacklog(text);
+    assert.strictEqual(task.type, 'feature', 'an unknown type reads back as feature');
+    assert.strictEqual(task.priority, 'Major');
+    // And a priority the header syntax does not know is not a header at all,
+    // which is the lenient reader's other half (see the HEADER_RE test above).
+    assert.deepStrictEqual(parseBacklog('## T-0001 · Extreme · Bad priority\n- type: feature\n'), []);
   });
 
   it('keeps type external and round-trips it through the file (T-0092)', () => {
@@ -1720,22 +2030,40 @@ describe('stripWorkerReports() (T-0161)', () => {
   });
 });
 
+// Regression guards over the real dev backlog and its archive. They are skipped
+// in the public tree, and skipped BECAUSE the tree is public (T-0253): the
+// condition these used to carry — "the file is absent", "the file has no tasks"
+// — is keyed on the very thing going wrong, so deleting doc/backlog.md here
+// would have switched four guards off in silence at the moment they were needed.
+// Keyed on the marker, that accident leaves them running, and readDevTaskFile()
+// below fails them by name.
+//
+// The "no tasks" branch is gone with it, and not merely rewritten: the export
+// removes doc/backlog.md outright rather than leaving an empty starter, so an
+// EMPTY dev backlog was never a public-snapshot state. Here it is an accident of
+// exactly the same kind as a missing one, and now fails the same way.
+const SKIP_DEV_TASKS = skipMaintainerData('doc/backlog.md');
+
+/** The dev file this guard is about, read with a failure that says what is wrong. */
+function readDevTaskFile(file) {
+  const name = path.basename(file);
+  assert.ok(
+    fs.existsSync(file),
+    `${name} is gone from this checkout, so the guard over it cannot run — restore it or, if this ` +
+      'is a public tree, the marker in tests/helpers/public-tree.js is what should have skipped this'
+  );
+  // Line endings are the working copy's business (git may check the file out as
+  // CRLF on Windows); everything else must match exactly, which is what catches
+  // a field written unconditionally.
+  const text = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+  const tasks = parseBacklog(text);
+  assert.ok(tasks.length > 0, `${name} parses to no tasks, so this guard would assert nothing`);
+  return { text, tasks };
+}
+
 describe('round-trip on the real doc/backlog.md', () => {
-  it('parseBacklog -> serializeBacklog -> parseBacklog yields the same tasks', (t) => {
-    // Regression guard for the real dev backlog. In a clean public snapshot
-    // (release-export) doc/backlog.md is an empty starter with no tasks, so
-    // there is nothing to round-trip. Skip when the file is absent or parses to
-    // no tasks; otherwise run it as before.
-    if (!fs.existsSync(BACKLOG_PATH)) {
-      t.skip('doc/backlog.md is absent (clean public snapshot)');
-      return;
-    }
-    const realText = fs.readFileSync(BACKLOG_PATH, 'utf8');
-    const tasksFirst = parseBacklog(realText);
-    if (tasksFirst.length === 0) {
-      t.skip('doc/backlog.md has no tasks (clean public snapshot)');
-      return;
-    }
+  it('parseBacklog -> serializeBacklog -> parseBacklog yields the same tasks', { skip: SKIP_DEV_TASKS }, () => {
+    const { tasks: tasksFirst } = readDevTaskFile(BACKLOG_PATH);
 
     const reserialized = serializeBacklog(tasksFirst);
     const tasksSecond = parseBacklog(reserialized);
@@ -1743,39 +2071,18 @@ describe('round-trip on the real doc/backlog.md', () => {
     assert.deepStrictEqual(tasksSecond, tasksFirst);
   });
 
-  it('a write pass leaves the file byte for byte as it was (T-0087: no stray depends lines)', (t) => {
-    if (!fs.existsSync(BACKLOG_PATH)) {
-      t.skip('doc/backlog.md is absent (clean public snapshot)');
-      return;
-    }
-    // Line endings are the working copy's business (git may check the file out
-    // as CRLF on Windows); everything else must match exactly, which is what
-    // catches a field written unconditionally.
-    const realText = fs.readFileSync(BACKLOG_PATH, 'utf8').replace(/\r\n/g, '\n');
-    const tasks = parseBacklog(realText);
-    if (tasks.length === 0) {
-      t.skip('doc/backlog.md has no tasks (clean public snapshot)');
-      return;
-    }
-    assert.strictEqual(serializeBacklog(tasks), realText);
+  it('a write pass leaves the file byte for byte as it was (T-0087: no stray depends lines)', { skip: SKIP_DEV_TASKS }, () => {
+    const { text, tasks } = readDevTaskFile(BACKLOG_PATH);
+    assert.strictEqual(serializeBacklog(tasks), text);
   });
 
   // Both of this project's own files, head included: the byte-for-byte test
   // above passes the default preamble, so it would go on passing if a write
   // replaced a custom head with it (T-0167).
   for (const file of [BACKLOG_PATH, archivePathFor(BACKLOG_PATH)]) {
-    it(`a write pass preserves the preamble of ${path.basename(file)}`, (t) => {
-      if (!fs.existsSync(file)) {
-        t.skip(`${path.basename(file)} is absent (clean public snapshot)`);
-        return;
-      }
-      const realText = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
-      const tasks = parseBacklog(realText);
-      if (tasks.length === 0) {
-        t.skip(`${path.basename(file)} has no tasks (clean public snapshot)`);
-        return;
-      }
-      assert.strictEqual(serializeBacklog(tasks, parsePreamble(realText)), realText);
+    it(`a write pass preserves the preamble of ${path.basename(file)}`, { skip: SKIP_DEV_TASKS }, () => {
+      const { text, tasks } = readDevTaskFile(file);
+      assert.strictEqual(serializeBacklog(tasks, parsePreamble(text)), text);
     });
   }
 });

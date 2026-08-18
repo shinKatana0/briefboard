@@ -18,7 +18,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
@@ -28,6 +27,7 @@ const { fetch, SESSION_START_TIMEOUT_MS } = require('./helpers/bounded.js');
 const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- fixture helpers ----------
 
@@ -69,7 +69,7 @@ const activeRoots = [];
 
 // A plain (non-git) project root, so the isolation refusal can be exercised too.
 function makeRoot(backlog = backlogWithReadyTask()) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-worker-api-test-'));
+  const root = tempDir('briefboard-worker-api-test-');
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog);
   activeRoots.push(root);

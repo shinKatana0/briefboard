@@ -14,7 +14,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
 
@@ -25,6 +24,7 @@ const { fetch, waitForExit, stopProcess } = require('./helpers/bounded.js');
 const { readJson, answerOf } = require('./helpers/response.js');
 const { HOST, SERVER_PATH, freePort, occupyPort, waitForBanner } = require('./helpers/board.js');
 const { AUTO_PORT_VALUE, DEFAULT_PORT, FALLBACK_ATTEMPTS } = require('../server/listen.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const cleanups = [];
 
@@ -34,7 +34,7 @@ afterEach(async () => {
 
 // A project root named `name`, so path.basename(PROJECT) is under test control.
 function makeProjectRoot(name) {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-startup-test-'));
+  const parent = tempDir('briefboard-startup-test-');
   cleanups.push(async () => fs.rmSync(parent, { recursive: true, force: true }));
   const root = path.join(parent, name);
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });

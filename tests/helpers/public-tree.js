@@ -60,4 +60,21 @@ function skipOutsideExport(what) {
   return PUBLIC_TREE && `${what} is not in the public tree: the export drops it (T-0252)`;
 }
 
-module.exports = { PUBLIC_TREE, isPublicTree, skipOutsideExport, SEEDED_IGNORE_RULES };
+/**
+ * The same, for a regression guard over the MAINTAINER'S OWN task data —
+ * doc/backlog.md, its archive, doc/brief/ (T-0253). Worded apart from
+ * skipOutsideExport because a public checkout does not merely lack these files:
+ * `briefboard init` hands its user a backlog of their own, gitignored by the
+ * rules the export seeds. So the reason is not "the file is missing" but "the
+ * file here is not the one this guard is about" — which is also why the skip
+ * must key on the tree and never on the file, the trap this card closes.
+ */
+function skipMaintainerData(what) {
+  return (
+    PUBLIC_TREE &&
+    `${what} is the maintainer's own task data: the export drops it, and a public ` +
+      'checkout\'s own backlog is nobody\'s regression guard (T-0253)'
+  );
+}
+
+module.exports = { PUBLIC_TREE, isPublicTree, skipOutsideExport, skipMaintainerData, SEEDED_IGNORE_RULES };

@@ -19,7 +19,6 @@ require('./helpers/env.js');
 const { describe, it, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
@@ -32,6 +31,7 @@ const {
 } = require('../server/sessions.js');
 const { SPAWN_WAIT_BUDGET_MS, waitFor: waitForCondition } = require('./helpers/wait.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const WIN = process.platform === 'win32';
 // What the product does on this platform, mirrored so the trees these tests kill
@@ -82,7 +82,7 @@ let escapeScript;
 let seq = 0;
 
 before(() => {
-  fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-kill-tree-'));
+  fixtures = tempDir('briefboard-kill-tree-');
   workerScript = path.join(fixtures, 'worker.js');
   fs.writeFileSync(
     workerScript,
@@ -156,9 +156,53 @@ function asTemplate([file, args]) {
 
 const trees = [];
 
+// Every tree this file starts, written down when its paths are made rather than
+// when its pid has been read (T-0258).
+//
+// Measured, reproducing the escaping-launcher test's shape and stopping where a
+// timed-out test stops: the escaped worker's cwd IS the project directory, and
+// while it lives the directory answers EPERM to every attempt — 321 of them over
+// 10s — while the same directory with the worker killed first went in 2ms at the
+// first attempt. Killing it then made the very next attempt succeed, 32ms later.
+// So no teardown budget is the answer: the worker lives 300s, and until it dies
+// the removal cannot succeed at any budget.
+//
+// It is reaped from here because the test body cannot be trusted to reach its
+// own cleanup. Under four concurrent suites that wait timed out in every suite,
+// and the escaped worker is by construction the one thing nothing else can find:
+// it is detached and unreferenced, its launcher is already gone, so
+// `runner.shutdown()` has no tree to walk and its `taskkill /t` reaches nothing.
+const spawned = [];
+
 function treePaths() {
   const id = `tree-${++seq}`;
-  return { pidFile: path.join(fixtures, id + '.pid'), workFile: path.join(fixtures, id + '.work') };
+  const paths = {
+    pidFile: path.join(fixtures, id + '.pid'),
+    workFile: path.join(fixtures, id + '.work'),
+  };
+  spawned.push(paths);
+  return paths;
+}
+
+// The pid file is the only channel that survives a test which never got to read
+// it: the worker writes it as its first act, and a test that timed out waiting
+// for it usually finds it there a moment later. Missing, it is waited for on the
+// suite's one measured allowance for a spawned process (tests/helpers/wait.js) —
+// a worker that starts after the teardown holds the directory just the same, and
+// one that never starts holds nothing, which is what the timeout here means.
+async function reapSpawned() {
+  for (const { pidFile } of spawned.splice(0)) {
+    let pid = readWorkerPid(pidFile);
+    if (!pid) {
+      try {
+        pid = await waitFor(() => readWorkerPid(pidFile), 'a started worker to report its pid');
+      } catch {
+        continue;
+      }
+    }
+    hardKill(pid);
+    await waitGone(pid);
+  }
 }
 
 function readWorkerPid(pidFile) {
@@ -228,6 +272,9 @@ afterEach(async () => {
     pids.push(tree.workerPid, tree.child.pid);
   }
   await Promise.all(pids.map(waitGone));
+  // After the trees the tests registered, and before the projects afterEach
+  // below removes the directories those workers are standing in.
+  await reapSpawned();
 });
 
 describe('killChild ends the whole process tree (T-0155)', () => {
@@ -351,7 +398,7 @@ const projects = [];
 const runners = [];
 
 function makeRunner(command) {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-kill-tree-project-'));
+  const project = tempDir('briefboard-kill-tree-project-');
   projects.push(project);
   const runner = createSessionRunner({
     project,
@@ -469,10 +516,38 @@ describe('shutdown() does not wait out a process it could not kill (T-0173)', ()
     // write stream's own 'close'. A resolved shutdown() cannot coexist with a log
     // this board still holds, so there was no assertion left to make.
 
-    // Killed here rather than left to the shared cleanup, which does not wait
-    // for it: the escaped worker's cwd is the project directory, and on Windows
-    // that alone keeps the directory undeletable however few handles are open.
-    hardKill(workerPid);
-    await waitFor(() => !isProcessAlive(workerPid), 'the escaped worker to be gone');
+    // The escaped worker is reaped by the shared teardown and not here (T-0258).
+    // It used to be killed on these last two lines, which every assertion above
+    // stands between: under load this test failed at the pid wait, the lines
+    // never ran, and the project directory this worker stands in stayed EPERM
+    // past 60s in four suites of four. What kills it now runs whether the body
+    // got here or not.
+  });
+
+  // The same escapee, with the cleanup's own channel cut: nothing is registered
+  // in `trees`, which is the state a test that timed out at the pid wait leaves
+  // behind. Then the teardown is called here, in the open, so that the thing
+  // which used to depend on reaching the end of a test body can be failed.
+  it('is reaped by the teardown even when no test registered it (T-0258)', async () => {
+    const { pidFile, workFile } = treePaths();
+    const runner = makeRunner(asTemplate(escapingLauncher(pidFile, workFile)));
+    const project = projects.at(-1);
+    const started = await runner.startSession('T-0004');
+    assert.equal(started.started, true);
+    await waitFor(() => readWorkerPid(pidFile) > 0, 'the worker to report its pid');
+    const workerPid = readWorkerPid(pidFile);
+    await runner.shutdown();
+    // The premise, and the reason a budget cannot be the answer: the board has
+    // let go and the escapee is still there, with 300s of life left in it.
+    assert.equal(isProcessAlive(workerPid), true, 'the escapee outlives the board, as it must here');
+
+    await reapSpawned();
+
+    assert.equal(isProcessAlive(workerPid), false, 'the teardown reaps it without being told the pid');
+    assert.equal(selfExited(workFile), false, 'and that is the reaping, not old age (T-0182)');
+    // What the reaping is for: the escapee's cwd is this directory, and measured
+    // here, a live cwd is what no removal budget can outwait — EPERM at every
+    // one of 321 attempts over 10s, then gone 32ms after the worker was killed.
+    await removeTree(project, { budgetMs: 5000 });
   });
 });

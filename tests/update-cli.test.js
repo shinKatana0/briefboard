@@ -10,27 +10,21 @@
 // a genuine version difference without publishing anything.
 
 require('./helpers/env.js');
-const { describe, it, after } = require('node:test');
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { tempDir } = require('./helpers/tmp.js');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const PACKAGE_PARTS = ['server', 'tools', 'ui', 'agents', 'AGENTS.md', 'CLAUDE.md', 'bin', 'package.json'];
 
-const tmpDirs = [];
-
-after(() => {
-  for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
-});
-
+// fs.realpathSync: on macOS os.tmpdir() is a symlink, and a path this file
+// compares against what a child process reports has to be the resolved one.
 function makeTmpDir(prefix) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
-  tmpDirs.push(dir);
-  return dir;
+  return fs.realpathSync(tempDir(prefix));
 }
 
 /** A self-contained copy of this package, optionally at a different version. */

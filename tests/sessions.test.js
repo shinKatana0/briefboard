@@ -11,7 +11,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawn } = require('node:child_process');
 
 const {
@@ -34,6 +33,7 @@ const {
 } = require('../server/sessions.js');
 const { stopProcess } = require('./helpers/bounded.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- helpers ----------
 
@@ -55,7 +55,7 @@ const roots = [];
 const runners = [];
 
 function makeProject() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-sessions-test-'));
+  const root = tempDir('briefboard-sessions-test-');
   roots.push(root);
   return root;
 }

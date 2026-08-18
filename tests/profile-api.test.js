@@ -14,7 +14,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
 // hang the run (T-0124).
@@ -24,6 +23,7 @@ const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
 const { removeTree } = require('./helpers/rm.js');
 const { parseBacklog } = require('../server/parser.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // T-0011 carries a declared profile, T-0012 one that is not declared (the typo
 // case), T-0013 none at all, T-0014 is finished.
@@ -72,7 +72,7 @@ function sampleBacklog() {
 }
 
 function makeFixtureRoot() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-profile-test-'));
+  const root = tempDir('briefboard-profile-test-');
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), sampleBacklog());
   return root;

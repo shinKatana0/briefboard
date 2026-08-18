@@ -15,9 +15,9 @@ require('./helpers/env.js');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const child_process = require('node:child_process');
+const { tempDir } = require('./helpers/tmp.js');
 
 const {
   loadHtml,
@@ -413,9 +413,9 @@ describe('text search filter', () => {
       });
       return out;
     })()`);
-    assert.strictEqual(result.en, 'Search title/description…');
-    assert.strictEqual(result.ru, 'Поиск по названию/описанию…');
-    assert.strictEqual(result.ja, 'タイトル・説明を検索…');
+    assert.strictEqual(result.en, 'Search title/description/labels…');
+    assert.strictEqual(result.ru, 'Поиск по названию/описанию/меткам…');
+    assert.strictEqual(result.ja, 'タイトル・説明・ラベルを検索…');
   });
 
   it('applyStaticLabels() sets #search-filter.placeholder from the current language and updates it on setLang()', () => {
@@ -427,8 +427,8 @@ describe('text search filter', () => {
       out.afterRu = document.getElementById('search-filter').placeholder;
       return out;
     })()`);
-    assert.strictEqual(result.initial, 'Search title/description…');
-    assert.strictEqual(result.afterRu, 'Поиск по названию/описанию…');
+    assert.strictEqual(result.initial, 'Search title/description/labels…');
+    assert.strictEqual(result.afterRu, 'Поиск по названию/описанию/меткам…');
   });
 
   it('input event on #search-filter updates searchQuery and re-renders (board reflects the narrowed list)', () => {
@@ -822,7 +822,7 @@ describe('XLSX export', () => {
 
     let tmpDir;
     try {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-xlsx-'));
+      tmpDir = tempDir('briefboard-xlsx-');
       const zipPath = path.join(tmpDir, 'tasks.zip');
       const outDir = path.join(tmpDir, 'unzipped');
       fs.writeFileSync(zipPath, buf);
@@ -2747,6 +2747,9 @@ describe('new task from the board', () => {
       type: 'bug',
       priority: 'Blocker',
       description: 'Why it matters.',
+      // Nothing was typed into the label field, and the empty list says so
+      // rather than leaving it to be read off an absent key (T-0282).
+      labels: [],
     });
 
     const state = sandbox.probe();
@@ -2898,6 +2901,172 @@ describe('new task from the board', () => {
     assert.strictEqual(body.type, 'feature');
     assert.strictEqual(body.priority, 'Medium');
     assert.strictEqual(body.description, '');
+  });
+
+  // ---------- the label field (T-0282) ----------
+  // The form is driven the way a user drives it — type a name, press Enter,
+  // click a chip's × — and what is asserted is what left in the request. The
+  // chips are the form's own state until then: there is no task to post to yet,
+  // which is the whole difference from the card dialog's editor.
+  //
+  // Tasks the board knows, so `labelsInUse()` has something to offer.
+  const LABELLED_BOARD = `tasks = [
+    { id: 'T-1', type: 'feature', status: 'ready', priority: 'Major', created: '2026-01-01', closed: '',
+      briefs: [], depends: [], blockedBy: [], labels: ['ui', 'docs'], title: 'Existing', description: '' }
+  ];`;
+
+  // The gestures, on the container that carries them: the area is rewritten on
+  // every change, so the listeners live on it and the events arrive from the
+  // chip or the input the user acted on.
+  const LABEL_GESTURES = `
+    var area = overlay.querySelector('[data-nt-labels]');
+    function typeLabel(name) {
+      var input = document.createElement('input');
+      input.dataset.labelAdd = '';
+      input.value = name;
+      var ev = { type: 'keydown', key: 'Enter', target: input, prevented: false,
+                 preventDefault: function () { ev.prevented = true; } };
+      area.dispatch('keydown', ev);
+      return { prevented: ev.prevented, leftInTheField: input.value };
+    }
+    function dropLabel(name) {
+      var chip = document.createElement('button');
+      chip.className = 'label-drop';
+      chip.dataset.labelDrop = name;
+      area.dispatch('click', { type: 'click', target: chip });
+    }
+  `;
+
+  it('the dialog opens with an empty label field, offering the labels already in use', () => {
+    const { result } = run(`(function () {
+      ${LABELLED_BOARD}
+      ${OPEN}
+      return { html: overlay.innerHTML, held: overlay._ntLabels };
+    })()`);
+    assert.deepStrictEqual(result.held, [], 'a new task starts with no labels');
+    // The card dialog's editor, markup and all: chips area, the input, the offer.
+    assert.ok(result.html.includes('data-nt-labels'), result.html);
+    assert.ok(result.html.includes('class="label-editor"'), result.html);
+    assert.ok(result.html.includes('data-label-add'), result.html);
+    assert.ok(result.html.includes('<datalist id="nt-label-options">'), result.html);
+    assert.ok(result.html.includes('<option value="ui">'), result.html);
+    assert.ok(result.html.includes('<option value="docs">'), result.html);
+    assert.ok(result.html.includes('<label for="nt-labels">Labels</label>'), result.html);
+  });
+
+  it('typing a name and pressing Enter adds a chip, without submitting the form', () => {
+    const { result, sandbox } = run(`(function () {
+      ${LABELLED_BOARD}
+      ${OPEN}
+      ${LABEL_GESTURES}
+      var typed = typeLabel('  release  ');
+      return { typed: typed, held: overlay._ntLabels, html: area.innerHTML, stack: modals.length };
+    })()`);
+    assert.deepStrictEqual(result.held, ['release'], 'trimmed and kept on the form');
+    assert.strictEqual(result.typed.prevented, true, 'Enter here must not submit the form');
+    assert.strictEqual(result.typed.leftInTheField, '', 'the field is cleared for the next name');
+    assert.strictEqual(result.stack, 1, 'the dialog stays open');
+    assert.strictEqual(sandbox.fetchCalls.length, 0, 'nothing is posted before the form is submitted');
+    // The chip is drawn, and the offer now leaves out what the form carries.
+    assert.ok(result.html.includes('data-label-drop="release"'), result.html);
+    assert.ok(result.html.includes('<option value="ui">'), result.html);
+    assert.ok(!result.html.includes('<option value="release">'), result.html);
+  });
+
+  it('a chip is removed by its ×, and a repeated name is not added twice', () => {
+    const { result } = run(`(function () {
+      ${LABELLED_BOARD}
+      ${OPEN}
+      ${LABEL_GESTURES}
+      typeLabel('ui');
+      typeLabel('docs');
+      typeLabel('ui');
+      var afterRepeat = overlay._ntLabels.slice();
+      typeLabel('');
+      var afterBlank = overlay._ntLabels.slice();
+      dropLabel('ui');
+      return { afterRepeat: afterRepeat, afterBlank: afterBlank,
+               held: overlay._ntLabels, html: area.innerHTML };
+    })()`);
+    assert.deepStrictEqual(result.afterRepeat, ['ui', 'docs'], 'a name already on the form is not a second chip');
+    assert.deepStrictEqual(result.afterBlank, ['ui', 'docs'], 'an empty field adds nothing');
+    assert.deepStrictEqual(result.held, ['docs']);
+    assert.ok(!result.html.includes('data-label-drop="ui"'), result.html);
+    assert.ok(result.html.includes('data-label-drop="docs"'), result.html);
+  });
+
+  it('submitting sends the chips the form holds, in the create request', async () => {
+    const sandbox = boot(`(function () {
+      ${LABELLED_BOARD}
+      ${OPEN}
+      ${LABEL_GESTURES}
+      typeLabel('ui');
+      typeLabel('release');
+      dropLabel('ui');
+      typeLabel('docs');
+      field('#nt-title').value = 'Labelled at birth';
+      submit();
+      probe = function () { return { stack: modals.length }; };
+    })()`);
+    await flush();
+    assert.strictEqual(sandbox.fetchCalls.length, 1, 'one request, at submit time');
+    const call = sandbox.fetchCalls[0];
+    assert.strictEqual(call.url, '/api/task');
+    const body = JSON.parse(call.opts.body);
+    assert.deepStrictEqual(body.labels, ['release', 'docs']);
+    assert.strictEqual(body.title, 'Labelled at birth');
+    assert.strictEqual(sandbox.probe().stack, 0, 'the dialog closed on success');
+  });
+
+  it('the label endpoint is never touched from this form — there is no task yet', async () => {
+    const sandbox = boot(`(function () {
+      ${LABELLED_BOARD}
+      ${OPEN}
+      ${LABEL_GESTURES}
+      typeLabel('ui');
+      field('#nt-title').value = 'One request only';
+      submit();
+    })()`);
+    await flush();
+    assert.deepStrictEqual(
+      sandbox.fetchCalls.map((c) => c.url),
+      ['/api/task'],
+      'setTaskLabels() must not be reused here'
+    );
+  });
+
+  it('a field label exists in all three languages and none of them is the English one', () => {
+    const { result } = run(`(function () {
+      var out = {};
+      ['en', 'ru', 'ja'].forEach(function (l) { lang = l; out[l] = t('field_labels'); });
+      return out;
+    })()`);
+    assert.strictEqual(result.en, 'Labels');
+    assert.strictEqual(result.ru, 'Метки');
+    assert.strictEqual(result.ja, 'ラベル');
+  });
+
+  it('the field is localized in the dialog markup, not hardcoded English', () => {
+    const { result } = run(`(function () {
+      lang = 'ja';
+      ${OPEN}
+      return { html: overlay.innerHTML };
+    })()`);
+    assert.ok(result.html.includes('<label for="nt-labels">ラベル</label>'), result.html);
+    assert.ok(!result.html.includes('>Labels<'), result.html);
+  });
+
+  it('a label typed into the form is escaped, never interpreted as markup', () => {
+    const { result } = run(`(function () {
+      ${LABELLED_BOARD}
+      ${OPEN}
+      ${LABEL_GESTURES}
+      typeLabel('<img src=x>');
+      return { html: area.innerHTML, held: overlay._ntLabels };
+    })()`);
+    assert.deepStrictEqual(result.held, ['<img src=x>']);
+    assert.ok(!result.html.includes('<img'), result.html);
+    assert.ok(result.html.includes('&lt;img src=x&gt;'), result.html);
   });
 });
 
@@ -4045,5 +4214,446 @@ describe('placeholder substitution in the UI source', () => {
     // path; its own call concatenates the placeholder, so it is not matched.
     const found = UI_SRC.match(/\.replace\(\s*(['"`])\{[^'"`]*\}\1/g) || [];
     assert.deepStrictEqual(found, []);
+  });
+});
+
+// =====================================================================
+// labels (T-0279)
+// =====================================================================
+describe('labels on the board', () => {
+  const LABEL_TASKS = `[
+    { id: 'T-1', type: 'feature', status: 'ready', priority: 'Major', created: '2026-01-01', closed: '', briefs: [], depends: [], blockedBy: [], labels: ['ui', 'docs'], title: 'Front end thing', description: 'nothing here' },
+    { id: 'T-2', type: 'bug', status: 'open', priority: 'Critical', created: '2026-01-02', closed: '', briefs: [], depends: [], blockedBy: ['T-1'], labels: ['ui'], title: 'Broken button', description: 'crash on submit' },
+    { id: 'T-3', type: 'feature', status: 'open', priority: 'Major', created: '2026-01-03', closed: '', briefs: [], depends: [], blockedBy: [], labels: ['api'], title: 'Endpoint', description: 'plain' },
+    { id: 'T-4', type: 'feature', status: 'done', priority: 'Minor', created: '2026-01-04', closed: '2026-02-01', briefs: [], depends: [], blockedBy: [], labels: [], title: 'Unlabelled', description: 'plain' }
+  ]`;
+
+  const reset = `
+    tasks = ${LABEL_TASKS};
+    typeFilter = 'all'; searchQuery = ''; priorityFilter = new Set();
+    blockedOnly = false; labelFilter = new Set(); lang = 'en';
+  `;
+
+  // ---------- the filter ----------
+  it('an empty labelFilter is inactive — every task is shown, as before', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      return filteredTasks().map(function (x) { return x.id; });
+    })()`);
+    assert.deepStrictEqual(result, ['T-1', 'T-2', 'T-3', 'T-4']);
+  });
+
+  it('one selected label keeps exactly the tasks carrying it', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      labelFilter = new Set(['ui']);
+      return filteredTasks().map(function (x) { return x.id; });
+    })()`);
+    assert.deepStrictEqual(result, ['T-1', 'T-2']);
+  });
+
+  it('two selected labels are ORed: a task carrying EITHER passes', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      labelFilter = new Set(['docs', 'api']);
+      return filteredTasks().map(function (x) { return x.id; });
+    })()`);
+    assert.deepStrictEqual(result, ['T-1', 'T-3']);
+  });
+
+  it('and it is ANDed with the type, priority, search and blocked filters', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      var out = {};
+      labelFilter = new Set(['ui']);
+      typeFilter = 'bug';
+      out.withType = filteredTasks().map(function (x) { return x.id; });
+      typeFilter = 'all';
+      priorityFilter = new Set(['Critical']);
+      out.withPriority = filteredTasks().map(function (x) { return x.id; });
+      priorityFilter = new Set();
+      searchQuery = 'crash';
+      out.withSearch = filteredTasks().map(function (x) { return x.id; });
+      searchQuery = '';
+      blockedOnly = true;
+      out.withBlocked = filteredTasks().map(function (x) { return x.id; });
+      return out;
+    })()`);
+    assert.deepStrictEqual(result.withType, ['T-2']);
+    assert.deepStrictEqual(result.withPriority, ['T-2']);
+    assert.deepStrictEqual(result.withSearch, ['T-2']);
+    assert.deepStrictEqual(result.withBlocked, ['T-2']);
+  });
+
+  it('a label nobody carries selects nothing rather than everything', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      labelFilter = new Set(['gone']);
+      return filteredTasks().map(function (x) { return x.id; });
+    })()`);
+    assert.deepStrictEqual(result, []);
+  });
+
+  // ---------- the free-text search (the answer to "sort by them") ----------
+  it('the search box matches a label the way it matches the title', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      searchQuery = 'doc';
+      return filteredTasks().map(function (x) { return x.id; });
+    })()`);
+    assert.deepStrictEqual(result, ['T-1']);
+  });
+
+  it('and matches it case-insensitively, like the rest of the search', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      searchQuery = 'API';
+      return filteredTasks().map(function (x) { return x.id; });
+    })()`);
+    assert.deepStrictEqual(result, ['T-3']);
+  });
+
+  it('labelsInUse() is the sorted set the tasks carry, deduped', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      return labelsInUse();
+    })()`);
+    assert.deepStrictEqual(result, ['api', 'docs', 'ui']);
+  });
+
+  // ---------- the card ----------
+  it('a card draws its labels in a row of their own under the title, not in the flag row', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      var el = cardEl(tasks[0]);
+      return { html: el.innerHTML };
+    })()`);
+    const { html } = result;
+    assert.ok(html.includes('<div class="labels">'), html);
+    assert.ok(html.includes('<span class="label-chip">ui</span>'), html);
+    assert.ok(html.includes('<span class="label-chip">docs</span>'), html);
+    // Under the title, and after the `.top` row that carries the alarms.
+    assert.ok(html.indexOf('class="labels"') > html.indexOf('class="title"'), html);
+    // No colour of its own: T-0144's "label and place, no colour spent".
+    assert.ok(!/label-chip[^>]*style=/.test(html), 'a chip carries a colour of its own');
+    assert.ok(!/class="label-chip [^"]+"/.test(html), 'a chip carries a per-label class');
+  });
+
+  it('a card with no labels draws no row at all', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      return { html: cardEl(tasks[3]).innerHTML };
+    })()`);
+    assert.ok(!result.html.includes('class="labels"'), result.html);
+  });
+
+  it('a label is escaped on the card, never interpreted as markup', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      tasks[0].labels = ['<img src=x>'];
+      return { html: cardEl(tasks[0]).innerHTML };
+    })()`);
+    assert.ok(!result.html.includes('<img'), result.html);
+    assert.ok(result.html.includes('&lt;img src=x&gt;'), result.html);
+  });
+
+  // Without the labels in cardSig the chips would wait for a page reload: a
+  // re-labelled task moves nothing else about itself (the T-0083/T-0087 lesson).
+  it('cardSig() changes when the labels do, so the card is rebuilt', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      var before = cardSig(tasks[0]);
+      tasks[0].labels = ['ui', 'docs', 'api'];
+      var added = cardSig(tasks[0]);
+      tasks[0].labels = ['docs', 'ui'];
+      var reordered = cardSig(tasks[0]);
+      tasks[0].labels = ['uidocs'];
+      var joined = cardSig(tasks[0]);
+      return { before: before, added: added, reordered: reordered, joined: joined };
+    })()`);
+    assert.notStrictEqual(result.added, result.before);
+    assert.notStrictEqual(result.reordered, result.before);
+    // The separator matters: ['ui','docs'] and ['uidocs'] are different cards.
+    assert.notStrictEqual(result.joined, result.before);
+  });
+
+  it('a label added while the board is open repaints that card, without a reload', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      render();
+      var readyCards = scrollContainers['ready'].children;
+      var before = readyCards.filter(function (c) { return c.dataset.id === 'T-1'; })[0];
+      tasks[0].labels = ['ui', 'docs', 'release'];
+      render();
+      var after = scrollContainers['ready'].children.filter(function (c) { return c.dataset.id === 'T-1'; })[0];
+      return { sameNode: before === after, html: after.innerHTML };
+    })()`);
+    assert.strictEqual(result.sameNode, false, 'the stale node was reused');
+    assert.ok(result.html.includes('>release</span>'), result.html);
+  });
+
+  // ---------- the header filter ----------
+  it('the filter is hidden while no task carries a label, and shown once one does', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      tasks = [];
+      render();
+      var empty = document.getElementById('label-filter').hidden;
+      tasks = ${LABEL_TASKS};
+      render();
+      return { empty: empty, filled: document.getElementById('label-filter').hidden };
+    })()`);
+    assert.strictEqual(result.empty, true);
+    assert.strictEqual(result.filled, false);
+  });
+
+  it('the menu lists every label in use, ticking the selected ones', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      labelFilter = new Set(['docs']);
+      render();
+      return { html: document.getElementById('label-filter-menu').innerHTML };
+    })()`);
+    assert.ok(result.html.includes('data-label-pick="api"'), result.html);
+    assert.ok(result.html.includes('data-label-pick="docs" checked'), result.html);
+    assert.ok(result.html.includes('data-label-pick="ui"><span>ui</span>'), result.html);
+  });
+
+  it('the button counts the selection and marks itself active', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      render();
+      var idle = { text: document.getElementById('label-filter-btn').textContent,
+                   active: document.getElementById('label-filter-btn').classList.contains('active') };
+      labelFilter = new Set(['ui', 'docs']);
+      render();
+      var picked = { text: document.getElementById('label-filter-btn').textContent,
+                     active: document.getElementById('label-filter-btn').classList.contains('active') };
+      return { idle: idle, picked: picked };
+    })()`);
+    assert.strictEqual(result.idle.text, 'Labels ▾');
+    assert.strictEqual(result.idle.active, false);
+    assert.strictEqual(result.picked.text, 'Labels (2) ▾');
+    assert.strictEqual(result.picked.active, true);
+  });
+
+  it('a selected label the last task dropped falls out of the selection', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      labelFilter = new Set(['api', 'ui']);
+      render();
+      tasks[2].labels = [];
+      render();
+      return { kept: Array.from(labelFilter), shown: filteredTasks().map(function (x) { return x.id; }) };
+    })()`);
+    assert.deepStrictEqual(result.kept, ['ui']);
+    assert.deepStrictEqual(result.shown, ['T-1', 'T-2']);
+  });
+
+  it('ticking a checkbox adds the label and re-renders; ticking again removes it', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      render();
+      var menu = document.getElementById('label-filter-menu');
+      var box = document.createElement('input');
+      box.dataset.labelPick = 'ui';
+      menu.dispatch('change', { type: 'change', target: box });
+      var afterFirst = filteredTasks().map(function (x) { return x.id; });
+      menu.dispatch('change', { type: 'change', target: box });
+      var afterSecond = filteredTasks().map(function (x) { return x.id; });
+      return { afterFirst: afterFirst, afterSecond: afterSecond };
+    })()`);
+    assert.deepStrictEqual(result.afterFirst, ['T-1', 'T-2']);
+    assert.deepStrictEqual(result.afterSecond, ['T-1', 'T-2', 'T-3', 'T-4']);
+  });
+
+  it('the button opens and closes the popover', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      render();
+      var btn = document.getElementById('label-filter-btn');
+      var menu = document.getElementById('label-filter-menu');
+      // The markup ships the menu hidden; this fake DOM builds elements from
+      // ids, not from the HTML, so the starting state is set here.
+      menu.hidden = true;
+      var closed = menu.hidden;
+      btn.dispatch('click', { type: 'click', target: btn });
+      var opened = { hidden: menu.hidden, expanded: btn.getAttribute('aria-expanded') };
+      btn.dispatch('click', { type: 'click', target: btn });
+      return { closed: closed, opened: opened, again: menu.hidden };
+    })()`);
+    assert.strictEqual(result.closed, true);
+    assert.deepStrictEqual(result.opened, { hidden: false, expanded: 'true' });
+    assert.strictEqual(result.again, true);
+  });
+
+  // ---------- the dialog's editor ----------
+  it('the dialog shows a removable chip per label and offers the set already in use', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      openTask('T-1');
+      return { html: modals[modals.length - 1].innerHTML };
+    })()`);
+    const { html } = result;
+    assert.ok(html.includes('data-label-drop="ui"'), html);
+    assert.ok(html.includes('data-label-drop="docs"'), html);
+    assert.ok(html.includes('data-label-add'), html);
+    assert.ok(html.includes('<datalist id="label-options-T-1">'), html);
+    // Only what the task does not carry yet: offering "ui" back is noise.
+    assert.ok(html.includes('<option value="api">'), html);
+    assert.ok(!html.includes('<option value="ui">'), html);
+  });
+
+  it('a task with no labels gets the empty marker and the input all the same', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      openTask('T-4');
+      return { html: modals[modals.length - 1].innerHTML };
+    })()`);
+    assert.ok(result.html.includes('>none<'), result.html);
+    assert.ok(result.html.includes('data-label-add'), result.html);
+  });
+
+  it('a label is escaped in the dialog too', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      tasks[0].labels = ['<img src=x>'];
+      openTask('T-1');
+      return { html: modals[modals.length - 1].innerHTML };
+    })()`);
+    assert.ok(!result.html.includes('<img'), result.html);
+  });
+
+  it('adding a label POSTs the WHOLE list to the narrow endpoint', async () => {
+    const { sandbox } = run(`(function () {
+      ${reset}
+      var input = document.createElement('input');
+      input.dataset.labelAdd = '';
+      input.value = ' release ';
+      wireLabelEditor({
+        querySelectorAll: function () { return []; },
+        querySelector: function () { return input; },
+      }, tasks[0]);
+      input.dispatch('keydown', { type: 'keydown', key: 'Enter', target: input });
+    })()`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const writes = sandbox.fetchCalls.filter((c) => c.opts && c.opts.method === 'POST');
+    assert.strictEqual(writes.length, 1);
+    assert.strictEqual(writes[0].url, '/api/task/T-1/labels');
+    assert.deepStrictEqual(JSON.parse(writes[0].opts.body), { labels: ['ui', 'docs', 'release'] });
+  });
+
+  it('removing a label POSTs the whole list without it', async () => {
+    const { sandbox } = run(`(function () {
+      ${reset}
+      var drop = document.createElement('button');
+      drop.dataset.labelDrop = 'ui';
+      wireLabelEditor({
+        querySelectorAll: function () { return [drop]; },
+        querySelector: function () { return null; },
+      }, tasks[0]);
+      drop.dispatch('click', { type: 'click', target: drop });
+    })()`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const writes = sandbox.fetchCalls.filter((c) => c.opts && c.opts.method === 'POST');
+    assert.strictEqual(writes.length, 1);
+    assert.strictEqual(writes[0].url, '/api/task/T-1/labels');
+    assert.deepStrictEqual(JSON.parse(writes[0].opts.body), { labels: ['docs'] });
+  });
+
+  it('a name the task already carries sends nothing at all', async () => {
+    const { sandbox } = run(`(function () {
+      ${reset}
+      var input = document.createElement('input');
+      input.dataset.labelAdd = '';
+      input.value = 'ui';
+      wireLabelEditor({
+        querySelectorAll: function () { return []; },
+        querySelector: function () { return input; },
+      }, tasks[0]);
+      input.dispatch('keydown', { type: 'keydown', key: 'Enter', target: input });
+      var blank = document.createElement('input');
+      blank.dataset.labelAdd = '';
+      blank.value = '   ';
+      wireLabelEditor({
+        querySelectorAll: function () { return []; },
+        querySelector: function () { return blank; },
+      }, tasks[0]);
+      blank.dispatch('keydown', { type: 'keydown', key: 'Enter', target: blank });
+    })()`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepStrictEqual(sandbox.fetchCalls.filter((c) => c.opts && c.opts.method === 'POST'), []);
+  });
+
+  it('a failed write is reported, and a busy backlog says so', async () => {
+    for (const [status, message] of [
+      [500, 'Failed to change the labels'],
+      [503, 'The backlog is busy right now — try again'],
+    ]) {
+      const { sandbox } = run(`(function () {
+        lang = 'en';
+        fetchResponse = { ok: false, status: ${status}, json: function () { return Promise.resolve({}); } };
+        setTaskLabels('T-1', ['ui']);
+      })()`);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.deepStrictEqual(sandbox.alertCalls, [message]);
+    }
+  });
+
+  // ---------- the export ----------
+  it('the sheet carries a Labels column with the comma-joined value', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      return { xml: buildSheetXml() };
+    })()`);
+    assert.ok(result.xml.includes('Labels'), result.xml);
+    assert.ok(result.xml.includes('ui, docs'), result.xml);
+  });
+
+  it('the column follows the brief column, so the header row still names each value', () => {
+    const { result } = run(`(function () {
+      ${reset}
+      var xml = buildSheetXml();
+      return { brief: xml.indexOf('Brief'), labels: xml.indexOf('Labels'), status: xml.indexOf('Status') };
+    })()`);
+    assert.ok(result.brief < result.labels, 'Labels must follow Brief');
+    assert.ok(result.labels < result.status, 'and come before Status');
+  });
+
+  // ---------- i18n ----------
+  it('every new string exists in all three languages and differs from English', () => {
+    const KEYS = [
+      'meta_labels', 'empty_labels', 'labels_add_placeholder', 'labels_remove',
+      'labels_failed', 'filter_labels', 'filter_labels_title', 'xlsx_col_labels',
+    ];
+    const { result } = run(`(function () {
+      var out = {};
+      ['en', 'ru', 'ja'].forEach(function (l) {
+        lang = l;
+        out[l] = ${JSON.stringify(KEYS)}.map(function (k) { return t(k); });
+      });
+      return out;
+    })()`);
+    for (const l of ['en', 'ru', 'ja']) {
+      for (let i = 0; i < KEYS.length; i++) assert.ok(result[l][i], `${l}.${KEYS[i]} is missing`);
+    }
+    assert.notDeepStrictEqual(result.ru, result.en);
+    assert.notDeepStrictEqual(result.ja, result.en);
+    // The placeholder is what names the label being removed; a translation that
+    // loses it names nothing.
+    for (const l of ['en', 'ru', 'ja']) {
+      assert.ok(result[l][3].includes('{label}'), `${l} lost the placeholder`);
+    }
+  });
+
+  it('the search placeholder names labels in all three languages', () => {
+    const { result } = run(`(function () {
+      var out = {};
+      ['en', 'ru', 'ja'].forEach(function (l) { lang = l; out[l] = t('search_placeholder'); });
+      return out;
+    })()`);
+    assert.match(result.en, /labels/i);
+    assert.match(result.ru, /метк/i);
+    assert.match(result.ja, /ラベル/);
   });
 });

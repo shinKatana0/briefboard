@@ -1,4 +1,4 @@
-# briefboard (agentboard)
+# briefboard
 
 English | [Русский](README.ru.md) | [日本語](README.ja.md)
 
@@ -14,6 +14,8 @@ with a mandatory brief before implementation starts and a review before merge.
 > The package is published to npm as `briefboard` — `npx briefboard init`
 > deploys it into any project (see [Quick start](#quick-start) below). Cloning
 > the repository is an alternative path for contributors and local development.
+> If you arrived looking for `agentboard`, that was this project's earlier name —
+> the package and the repository are both `briefboard` now.
 
 ![briefboard — live board + CLI demo](doc/img/demo.gif)
 
@@ -21,8 +23,8 @@ with a mandatory brief before implementation starts and a review before merge.
 
 Agents that work straight from a chat conversation lose structure quickly: it is
 unclear what has already been decided, what is still in progress, and who made a
-given decision and why. `agentboard`/`briefboard` puts a simple, formal process
-on top of any agentic tool (Claude Code, Codex, and the like) — a task backlog, a
+given decision and why. `briefboard` puts a simple, formal process on top
+of any agentic tool (Claude Code, Codex, and the like) — a task backlog, a
 mandatory brief before implementation, and a review before merge — plus a live
 board that shows all of it to a human in real time.
 
@@ -126,13 +128,20 @@ the backlog (335 KB → 28 KB here, roughly 89k tokens → 7k).
 - Columns by status: Backlog → Open → Ready → In progress → Review; Done and
   Cancelled are collapsible strips below the board.
 - Filter by task type (all / feature / bug / external).
-- Full-text search over task title and description.
+- Full-text search over task title, description, ID and labels.
 - Multi-select filter by priority (Blocker / Critical / Major / Medium / Minor).
+- Labels you define yourself: chips on the card, an editor in the card's dialog
+  and a `Labels ▾` multi-select filter in the header. Nothing declares a label —
+  it exists while some task carries it, and typing a new name in the editor is
+  how one is created (`node tools/task.mjs labels T-0007 ui,docs` does the same
+  from the terminal). A task can be filed already carrying them — `add --labels`
+  and the field in the "+" form — so a project whose every task must be labelled
+  does not depend on a second command being remembered.
 - Theme toggle: light / dark.
 - Interface language toggle: EN / RU / JA.
 - The "+ New task" button, first in the header next to the title, creates a task
-  (title, type, priority, description) straight from the board — it always lands
-  in `backlog`.
+  (title, type, priority, labels, description) straight from the board — it
+  always lands in `backlog`.
 - Drag & drop a card from "Backlog"/"Open" onto the "Cancelled" strip to cancel a
   task straight from the UI.
 - Drag & drop a card from "Backlog" into the "Open" column to open it — no
@@ -1017,10 +1026,12 @@ briefboard update [--apply] [--force]
 briefboard --version             # package version + this project's copy version
 briefboard serve [--port N]      # start the board for the current directory
 
-node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."]
+node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."] [--labels ui,docs]
                                   # create a new task in doc/backlog.md; --desc - takes the
                                   # description from stdin, and refuses an empty one rather
                                   # than filing a task with a dash for a description
+                                  # --labels files the task already carrying them, in the same
+                                  # ONE comma-separated argument the `labels` command takes
 node tools/task.mjs status T-0007 <backlog|open|ready|in_progress|review|done|cancelled>
                                   # change a task's status (validates the transition)
 node tools/task.mjs depends T-0007 T-0005,T-0006   # set the tasks T-0007 waits for
@@ -1029,12 +1040,27 @@ node tools/task.mjs depends T-0007 T-0005,T-0006   # set the tasks T-0007 waits 
                                   # T-0008 leaves T-0008 alone as the prerequisite. The
                                   # command prints what it dropped when it dropped anything
 node tools/task.mjs depends T-0007 --clear         # drop them again
+node tools/task.mjs labels T-0007 ui,docs          # set this task's labels
+                                  # the whole list in ONE comma-separated argument, and it
+                                  # REPLACES the previous one, exactly like depends. The set
+                                  # of labels is implicit: a label exists while some task
+                                  # carries it, and nothing declares it anywhere
+node tools/task.mjs labels T-0007 --clear          # drop them again
 node tools/task.mjs profile T-0007 fast            # run profile for this task's sessions
 node tools/task.mjs profile T-0007 --clear         # back to the default profile
                                   # only values declared in BRIEFBOARD_PROFILES are
                                   # accepted — see the run profile above
 node tools/task.mjs brief T-0007 <slug>
-                                  # create doc/brief/T-0007-01-slug.md and link it to the task
+                                  # create doc/brief/T-0007-01-slug.md and link it to the task;
+                                  # NN is one past the highest the task already links, and a
+                                  # file that already answers to it is never written over
+node tools/task.mjs link T-0007-01
+                                  # put a brief file that ALREADY exists on the task's briefs:
+                                  # line — written by hand, recovered, brought in from
+                                  # elsewhere. Refuses an id no file answers to, and a repeat
+                                  # adds no duplicate. This is the way out of "the file is on
+                                  # disk and the task does not know it" without editing
+                                  # doc/backlog.md by hand
 node tools/task.mjs note T-0007 --section "Worker report" --text "..."
 node tools/task.mjs note T-0007 --section "Worker report" --text -
                                   # append a section to the task's description (text from
@@ -1062,11 +1088,19 @@ node tools/task.mjs validate     # structural check of doc/backlog.md and of the
 node tools/task.mjs             # no arguments: prints every subcommand it has, which is
                                   # the list that cannot go stale
 
-node tools/screenshot.mjs [--lang en|ru|ja] [--width N] [--height N] [--out FILE] [--browser PATH]
+node tools/screenshot.mjs [--lang en|ru|ja] [--width N] [--height N] [--out FILE]
+                          [--browser PATH] [--eval JS | --click SELECTOR]
                                   # start a throwaway board on a free port, photograph it with
                                   # an installed Chrome or Edge, stop it, print the path of the
                                   # png. Needs a browser — the only thing in briefboard that
                                   # does (see Requirements)
+                                  # --eval runs a snippet in the page once the board has drawn
+                                  # and --click is the same for one click, so what exists only
+                                  # after an interaction — a task dialog, the label popover, the
+                                  # new-task form — can be photographed too. A snippet that
+                                  # throws or leaves the page unchanged fails the run and keeps
+                                  # no png, so the picture you get back is never of an
+                                  # undisturbed board
 ```
 
 ## Requirements

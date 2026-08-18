@@ -1,4 +1,4 @@
-# briefboard (agentboard)
+# briefboard
 
 [English](README.md) | [Русский](README.ru.md) | 日本語
 
@@ -19,6 +19,8 @@ AIコーディングエージェントの作業を厳格なワークフロー
 > `npx briefboard init` で任意のプロジェクトに展開できます
 > （下記の[クイックスタート](#クイックスタート)を参照）。リポジトリの
 > クローンは、コントリビューターや開発向けの代替手段です。
+> `agentboard` を探して来た方へ: それは本プロジェクトの旧名です。現在はパッケージも
+> リポジトリも `briefboard` という名前です。
 
 ![briefboard — live board + CLI demo](doc/img/demo.gif)
 
@@ -26,7 +28,7 @@ AIコーディングエージェントの作業を厳格なワークフロー
 
 チャットでの会話からそのまま作業するエージェントは、すぐに構造を失います。
 何がすでに決まっているのか、何がまだ進行中なのか、ある判断を誰がなぜ下したのかが
-分からなくなります。`agentboard`/`briefboard` は、任意のエージェント系ツール
+分からなくなります。`briefboard` は、任意のエージェント系ツール
 （Claude Code、Codex など）の上に、シンプルで形式的なプロセスを載せます。
 すなわち、タスクのバックログ、実装前の必須ブリーフ、マージ前のレビュー、
 そしてそのすべてを人間にリアルタイムで見せるライブボードです。
@@ -134,13 +136,21 @@ backlog ──▶ open ──▶ ready ──▶ in_progress ──▶ review �
 - ステータス別のカラム: Backlog → Open → Ready → In progress → Review。
   Done と Cancelled はボードの下にある折りたたみ可能な帯です。
 - タスク種別でのフィルター（all / feature / bug / external）。
-- タスクのタイトルと説明に対する全文検索。
+- タスクのタイトル・説明・ID・ラベルに対する全文検索。
 - 優先度での複数選択フィルター（Blocker / Critical / Major / Medium / Minor）。
+- 自分で決めるラベル: カード上のチップ、カードのダイアログにあるエディター、
+  そしてヘッダーの `Labels ▾` 複数選択フィルター。ラベルはどこにも宣言しません —
+  どれかのタスクが持っている間だけ存在し、エディターで新しい名前を打つことが
+  そのまま作成になります（`node tools/task.mjs labels T-0007 ui,docs` が
+  ターミナルから同じことをします）。タスクは最初からラベル付きで作成できます —
+  `add --labels` と「+」フォームの入力欄 — そのため、すべてのタスクにラベルを
+  付ける決まりのプロジェクトでも、2つ目のコマンドを覚えているかどうかに
+  依存しません。
 - テーマ切り替え: light / dark。
 - インターフェース言語の切り替え: EN / RU / JA。
 - ヘッダーの先頭、タイトルの隣にある「+ 新しいタスク」ボタンで、ボードから直接
-  タスク（タイトル・種類・優先度・説明）を作成できます。作成されたタスクは必ず
-  `backlog` に入ります。
+  タスク（タイトル・種類・優先度・ラベル・説明）を作成できます。作成されたタスクは
+  必ず `backlog` に入ります。
 - 「Backlog」/「Open」のカードを「Cancelled」の帯にドラッグ＆ドロップして、
   UIから直接タスクをキャンセルできます。
 - 「Backlog」のカードを「Open」列にドラッグ＆ドロップすると、確認なしで
@@ -1024,20 +1034,35 @@ briefboard update [--apply] [--force]
 briefboard --version             # パッケージのバージョン + プロジェクトのコピーのバージョン
 briefboard serve [--port N]      # カレントディレクトリのボードを起動する
 
-node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."]
+node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."] [--labels ui,docs]
                                   # doc/backlog.md に新しいタスクを作成する。--desc - なら説明を
                                   # 標準入力から読み、空の入力は拒否する（説明の代わりにダッシュ
                                   # だけのタスクを作らないため）
+                                  # --labels は最初からラベル付きでタスクを作成する。`labels`
+                                  # コマンドと同じく、カンマ区切りの1つの引数で渡す
 node tools/task.mjs status T-0007 <backlog|open|ready|in_progress|review|done|cancelled>
                                   # タスクのステータスを変更する（遷移の妥当性を検証）
 node tools/task.mjs depends T-0007 T-0005,T-0006   # T-0007 が待つタスクを設定する
 node tools/task.mjs depends T-0007 --clear         # その一覧を消す
+node tools/task.mjs labels T-0007 ui,docs          # このタスクのラベルを設定する
+                                  # 一覧はカンマ区切りの1つの引数で渡し、depends と同じく前の
+                                  # 一覧を置き換える。ラベルの集合は暗黙的で、どれかのタスクが
+                                  # 持っている間だけ存在し、どこにも宣言されない
+node tools/task.mjs labels T-0007 --clear          # ラベルをすべて外す
 node tools/task.mjs profile T-0007 fast            # このタスクのセッションの実行プロファイル
 node tools/task.mjs profile T-0007 --clear         # 既定のプロファイルに戻す
                                   # BRIEFBOARD_PROFILES に宣言された値だけが受け付けられる —
                                   # 上記の実行プロファイルを参照
 node tools/task.mjs brief T-0007 <slug>
-                                  # doc/brief/T-0007-01-slug.md を作成しタスクに紐付ける
+                                  # doc/brief/T-0007-01-slug.md を作成しタスクに紐付ける。NN は
+                                  # そのタスクがすでに紐付けている最大の番号の次で、その id に
+                                  # すでに応えるファイルは決して上書きしない
+node tools/task.mjs link T-0007-01
+                                  # すでに存在するブリーフのファイル — 手で書いた、復旧した、
+                                  # 他から持ってきた — をタスクの briefs: 行に載せる。どのファイル
+                                  # も応えない id は拒否し、繰り返し実行しても重複は増えない。
+                                  # 「ファイルはディスクにあるのにタスクが知らない」状態から
+                                  # doc/backlog.md を手で編集せずに抜け出す道
 node tools/task.mjs note T-0007 --section "Worker report" --text "..."
 node tools/task.mjs note T-0007 --section "Worker report" --text -
                                   # タスクの説明にセクションを追記する（"-" なら本文は stdin
@@ -1065,10 +1090,17 @@ node tools/task.mjs validate     # doc/backlog.md とアーカイブの構造チ
 node tools/task.mjs             # 引数なし: 持っているサブコマンドをすべて表示する。古くなり
                                   # ようのない一覧
 
-node tools/screenshot.mjs [--lang en|ru|ja] [--width N] [--height N] [--out FILE] [--browser PATH]
+node tools/screenshot.mjs [--lang en|ru|ja] [--width N] [--height N] [--out FILE]
+                          [--browser PATH] [--eval JS | --click SELECTOR]
                                   # 空きポートで使い捨てのボードを起動し、インストール済みの
                                   # Chrome か Edge で撮影し、停止して png のパスを表示する。
                                   # ブラウザが必要 — briefboard で唯一のもの（「動作環境」参照）
+                                  # --eval はボードが描画された後にページ内でスニペットを実行し、
+                                  # --click はクリック1回について同じことをする。タスクのダイアログ、
+                                  # ラベルのポップオーバー、新規タスクのフォームなど、操作の後に
+                                  # しか存在しないものも撮影できる。例外を投げた、あるいはページを
+                                  # 変えなかったスニペットは実行を失敗させ png を残さないので、
+                                  # 戻ってくる画像が手つかずのボードであることは決してない
 ```
 
 ## 動作環境

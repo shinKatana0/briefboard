@@ -1,8 +1,8 @@
 # Contributing
 
-Thanks for your interest in improving briefboard (agentboard). This project runs
-its own work through the same task workflow it ships, so contributions follow
-that process.
+Thanks for your interest in improving briefboard (formerly named `agentboard`).
+This project runs its own work through the same task workflow it ships, so
+contributions follow that process.
 
 ## Repository layout
 
@@ -65,16 +65,24 @@ npm run test:verbose # the same suite with a line per test (spec reporter)
 
 `npm test` reports progress as dots and prints the `tests/pass/fail` totals; a
 failure still gets its file, test path, message, diff, stack and the file's own
-stderr. On this suite that is 29 lines instead of 1061 — which matters because
-coding agents pay for every line they read. When something fails, re-run just
-the file it names:
+stderr. A test that passed costs one character in the compact run and a line in
+the verbose one, so a green run leaves about two orders of magnitude less to
+read — which matters because coding agents pay for every line they read.
+
+Measured 2026-08-17, one green run each, 2024 tests: 48 lines / ~600 tokens
+compact against 2644 lines / ~49k tokens verbose, counting a token as four
+characters. The absolute figures are dated because the suite grows and they grow
+with it — the previous pair was taken at 759 tests and had gone stale by a
+factor of two and a half (T-0257). The ratio is what they are quoted for, and
+that one does not shrink.
+
+When something fails, re-run just the file it names:
 
 ```bash
 node --test --test-reporter=spec tests/parser.test.js
 ```
 
-Re-run only the file it names, never the whole suite verbosely. Measured: the
-verbose run costs ~18k tokens of context, the compact one ~300.
+Re-run only the file it names, never the whole suite verbosely.
 
 Cover your changes with tests that match the brief's acceptance criteria, and
 make sure the whole suite is green before moving a task to `review`.
@@ -84,29 +92,63 @@ status change, the status lands before the result can be read (twice in one day)
 
 ### A test never writes into the repository
 
-Everything a test writes lives in a directory it created under `os.tmpdir()`:
-project fixtures, and — when a test has to change what the server serves — a
-throwaway copy of the install tree (`makeInstallCopy` in `tests/server.test.js`).
+Everything a test writes lives in a directory it created under `os.tmpdir()`,
+and that directory comes from `tempDir` in `tests/helpers/tmp.js` — never from
+`fs.mkdtempSync` directly. The helper writes the path down and removes it in a
+root `after()`, so the removal survives a test that failed or was cut off at
+`--test-timeout`, which the last line of a test body does not (T-0258). Without
+it the suite left its directories in `%TEMP%` for good: 118766 of them on one
+machine, 114k from the eight files that removed nothing at all, in the same
+`%TEMP%` this repository measures teardown and spawn latency in.
+`tests/suite-hygiene.test.js` bans the raw call and `tests/temp-dirs.test.js`
+holds the helper to the promise.
+
+What lives in such a directory: project fixtures, and — when a test has to
+change what the server serves — a throwaway copy of the install tree
+(`makeInstallCopy` in `tests/server.test.js`).
 Editing a repository file and restoring it in a `finally` is not good enough: a
 run that dies never reaches the `finally`, the change stays in the working copy,
 and the next run reads the polluted file as the "original" and restores *that* —
 so the pollution sticks and rides into an unrelated commit (T-0111).
 
-`npm test` enforces this: `tools/test-run.mjs` takes `git status --porcelain`
-before and after the run and fails if the run added an entry, naming it.
+Both scripts enforce this, because both go through `tools/test-run.mjs`: it takes
+`git status --porcelain` before and after the run and fails if the run added an
+entry, naming it.
 
 ### A test may fail, but it may never hang
 
 The suite hung forever three times in some thirty runs before this was written:
 a worker at 0% CPU, its spawned server alive, and no test ever failing — a run
 that in CI eats the whole job budget instead of reporting anything (T-0124). Two
-habits caused it, and three rules keep it impossible:
+habits caused it, and five rules keep it impossible:
 
-- **Every test runs under a time limit.** Both scripts pass `--test-timeout`
-  (`tools/test-run.mjs` for `npm test`, the flag itself for `test:verbose`). The
-  limit is far above the slowest honest test — measure before lowering it — and
-  it is the backstop: whatever else is missed, a stuck test fails and the run
-  ends.
+- **Every test runs under a time limit.** `tools/test-run.mjs` passes
+  `--test-timeout`, and both scripts go through it — the limit is defined in one
+  place and no npm script calls `node --test` itself. It is far above the
+  slowest honest test — measure before lowering it — and it is the backstop:
+  whatever else is missed, a stuck test is failed at the limit.
+- **A run that goes silent is killed.** Failing the test is not the same as
+  ending the run. A test that hangs while holding the event loop open — a live
+  timer, a server still listening — was reported failed at the limit and then
+  left the process sitting there with no summary and no exit code (measured on
+  Windows 11, T-0245). So the wrapper bounds the run from outside, and the
+  budget it spends is silence rather than total time: every finished test prints
+  a mark, while an honest whole run here takes anywhere from 285s idle to 1024s
+  with three other suites on the same machine (measured 2026-08-17, 24 cores).
+  Three times the per-test limit with
+  nothing printed and it kills the process **tree** — killing the runner alone
+  would leave the child it handed the test file to still running. The report of
+  a killed run dies with it, so the message points at `npm run test:verbose`,
+  whose last line before the silence is the test to look at.
+
+  Silence is counted from the run's first output, not from its spawn, and the
+  span before that has a budget of its own (`BRIEFBOARD_STARTUP_MS`, against
+  `BRIEFBOARD_SILENCE_MS` after it). What one budget over both spans really
+  bounds is how fast this machine can start a process: measured 2026-08-17,
+  spawn to first output cost 0.6s idle and up to 29.1s under four concurrent
+  suites, and at 2000ms the wrapper killed healthy runs before `node --test` had
+  printed a line (T-0266). A run killed before it spoke has no last line, so
+  that kill says so instead of pointing at `test:verbose`.
 - **A spawned server's stdout is read, or never piped.** An unread pipe fills,
   and a server blocked on writing to it stops answering every request. Spawn
   with `stdio: ['ignore', 'ignore', 'pipe']` when the output is not needed, or
@@ -131,11 +173,25 @@ habits caused it, and three rules keep it impossible:
   on the board (T-0183 — three cards of investigation).
 
 `tests/suite-hygiene.test.js` asserts the last three by reading the test sources,
-and `tests/test-run.test.js` asserts the first by running a deliberately hanging
-test under the real entry point.
+and `tests/test-run.test.js` asserts the first two by running a deliberately
+hanging test under the real entry point.
 
 A guard that needs a list of exemptions is a dead guard: assert the *shape* of
 the mistake, which needs no exemption and holds for next year's copy (T-0189).
+
+### A run that executed nothing is not a pass
+
+Measured on an unpacked tarball of 0.2.0: `tests/` is not published with the
+package, so the glob matched no file, node's own runner printed `pass 0` and
+exited 0 — a green run that ran nothing, which is the failure this suite is
+otherwise built against (T-0250). So the wrapper counts what the run executed
+and fails when that is zero, or when no count came back at all.
+
+The count arrives out of band, on a second reporter of ours writing to a file,
+because the wrapper has to work with whichever reporter it was handed and each
+formats its totals its own way. A clone always has `tests/`, so meeting this
+failure here means the patterns you passed matched nothing — the message
+names them.
 
 ### A test brings its own environment
 

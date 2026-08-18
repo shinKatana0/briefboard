@@ -18,7 +18,6 @@ require('./helpers/env.js');
 const { describe, it, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
 
@@ -43,6 +42,7 @@ const {
 const { waitForExit } = require('./helpers/bounded.js');
 const { removeTree } = require('./helpers/rm.js');
 const { SPAWN_WAIT_BUDGET_MS, waitFor: waitForCondition } = require('./helpers/wait.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const WIN = process.platform === 'win32';
 // The same pair of numbers tests/kill-tree.test.js reasons about (T-0182): the
@@ -71,7 +71,7 @@ let workerScript;
 let seq = 0;
 
 before(() => {
-  fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-leftovers-'));
+  fixtures = tempDir('briefboard-leftovers-');
   workerScript = path.join(fixtures, 'worker.js');
   fs.writeFileSync(
     workerScript,
@@ -222,7 +222,7 @@ const projects = [];
 const runners = [];
 
 function makeProject() {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-leftovers-project-'));
+  const project = tempDir('briefboard-leftovers-project-');
   projects.push(project);
   return project;
 }
@@ -619,6 +619,52 @@ describe('a written-down pid is only killed if it is still the same process (T-0
   });
 });
 
+// What this one wait is worth, and why it is not the suite's spawn budget. That
+// budget bounds how long the OS takes to get round to a process the test
+// started (tests/helpers/wait.js). This waits for something else: the board
+// reading the REAL process table, a subprocess of the board's own, bounded by
+// SCAN_TIMEOUT_MS and doubled towards SCAN_MAX_TIMEOUT_MS by every read that
+// misses it (T-0236). Both numbers were 30s, so the wait could not outlast even
+// ONE read that spent its budget, and it passed only while the machine was
+// quiet — the shape T-0195 and T-0238 turned out to have.
+//
+// Measured by instrumenting this very wait, under four concurrent full suites
+// (Windows 11, node v24.18.0, 24 cores, 2026-08-17): at the 30s mark the tree
+// was not written down, one read had been killed at 32.1s against its 30s
+// budget, and a second was 7.3s under way on the 60s that failure had earned it.
+// That one answered after 38.7s and the tree was written down at 61.5s — 2.05x
+// the wait that had already failed the test, in 2 of 4 concurrent suites.
+//
+// So the budget is the board's rather than the suite's, and it is the board's
+// own sum: one read that spends its whole budget and fails, then the doubled one
+// that follows. It buys nothing on a healthy machine, where the same wait ends
+// in 1.0-2.9s, and it stays inside the 120s per-test limit with the launcher's
+// own start-up paid for (17.1s at its worst here), so a board that really never
+// writes the tree down still fails as a failure rather than as a cut-off test.
+const TREE_WAIT_MS = SCAN_TIMEOUT_MS * 3;
+
+// The wait, plus what the board last said about itself when it expires. A
+// diagnosis and not a verdict: treeUnknown is set by any read that missed its
+// budget and cleared by the next one that works, so the run measured above
+// carried it at 30s and was written down anyway at 61.5s. It is here so the
+// next occurrence is read off the failure instead of costing another round of
+// instrumentation (T-0262).
+async function waitForTree(project, workerPid) {
+  const read = () => {
+    const stored = readRegistry(project);
+    const found = stored && stored.sessions.find((s) => s.id === 'T-0001');
+    const pids = found && found.descendants ? found.descendants.map((p) => p.pid) : [];
+    return { found, done: pids.includes(workerPid) ? found.descendants : null };
+  };
+  try {
+    return await waitFor(() => read().done, 'the board to write down the session tree', TREE_WAIT_MS);
+  } catch (e) {
+    const { found } = read();
+    if (!found || !found.treeUnknown) throw e;
+    throw new Error(`${e.message}; the board last said: ${found.treeReason}`);
+  }
+}
+
 describe('the board writes down the tree of a running session (T-0193)', () => {
   it('records the launcher and the agent under it, and shows neither on the card', async () => {
     const { pidFile, workFile } = treePaths();
@@ -634,12 +680,7 @@ describe('the board writes down the tree of a running session (T-0193)', () => {
     tree.workerPid = await waitFor(() => readWorkerPid(pidFile), 'the worker to report its pid');
     const workerPid = tree.workerPid;
 
-    const recorded = await waitFor(() => {
-      const stored = readRegistry(project);
-      const found = stored && stored.sessions.find((s) => s.id === 'T-0001');
-      const pids = found && found.descendants ? found.descendants.map((p) => p.pid) : [];
-      return pids.includes(workerPid) ? found.descendants : null;
-    }, 'the board to write down the session tree');
+    const recorded = await waitForTree(project, workerPid);
 
     assert.ok(
       recorded.some((p) => p.pid === session.pid),
@@ -657,23 +698,82 @@ describe('the board writes down the tree of a running session (T-0193)', () => {
 // only the launcher killed — which is exactly what a board dying takes with it
 // on Windows, the job object reaching the launcher and nothing under it. The
 // worker is then an orphan with a board that is never coming back.
+//
+// It reads NO process table (T-0237). It used to, and that read is why eight
+// tests here paid for the machine's table twice: once in the fixture, to work
+// out what the dead board would have written down, and once in the sweep under
+// test. Measured under four concurrent full suites on 2026-08-17, one read costs
+// 39.5–47.1 s (T-0224 measured p99 16.1 s under lighter load; the same read is
+// 78 ms in a Linux container), so a two-read test costs 85–95 s against the
+// suite's 120 s per-test backstop — and 'kills the agent that outlived its
+// board' then failed in 4 of 4 concurrent runs on room rather than on merit.
+// The pids the board would have written down are the pids this test STARTED, so
+// the fixture already knows them; only the start times have to come from the
+// machine, and only where a test's outcome turns on them.
 async function orphan() {
   const tree = await startTree();
-  const table = await machineTable();
-  const recorded = processTree(table, tree.child.pid);
-  assert.ok(
-    recorded.some((p) => p.pid === tree.workerPid),
-    'the worker is missing from the tree the board would have written down'
-  );
   killAlone(tree.child.pid);
   await waitGone(tree.child.pid);
   assert.equal(isProcessAlive(tree.workerPid), true, 'the worker outlived its launcher, as it must');
-  return { tree, recorded };
+  return tree;
+}
+
+// The registry entries a dead board would have left, with a start time the
+// CALLER supplies. Every test below that uses this one is a test the start time
+// cannot decide: one that hands it a deliberately wrong one and asserts nothing
+// is killed, one whose sweep never looks at the table at all, and one whose
+// session is another board's and never reaches the sweep. Where a mismatching
+// `since` could carry the assertion on its own — the ones that assert a kill —
+// the entries come from `orphanFromTable()` instead, so a fixture is never what
+// makes the expected outcome true (T-0182).
+function wroteDown(tree, since) {
+  return [tree.child.pid, tree.workerPid, tree.grandPid].filter((pid) => pid).map((pid) => ({ pid, since }));
+}
+
+// A leftover written down with the start times the machine really reports, at
+// the cost of ONE read — taken after the launcher is dead, so the rows describe
+// the machine as the sweep will find it and not as it was a moment before. The
+// rows come back with them: a test that asserts a kill hands this same snapshot
+// to the sweep as its table, which is what turns two reads into one.
+//
+// What that substitution gives up is the sweep proving, in this test, that it
+// can read the real machine by itself. That is not lost, only moved: 'records
+// the launcher and the agent under it' has a real board scan read the real table
+// through the default source and asserts the tree it found there, and 'leaves a
+// pid the machine has since handed to a stranger alone' has the sweep itself
+// read it through the default source and asserts it logged no failure. What no
+// other test can stage is a real process being really killed off a real table,
+// and that is what these keep.
+async function orphanFromTable() {
+  const tree = await orphan();
+  const rows = await machineTable();
+  return { tree, recorded: recordFromTable(tree, rows, [tree.workerPid]), rows };
+}
+
+// The pids this fixture started, written down with the start times `rows` really
+// reports for them — which is what the board's own scan would have written down,
+// arrived at from the pids instead of from a tree walk. A pid the table no
+// longer carries is left out: it has already died, and the board would not have
+// recorded it either. On Windows that is the launcher, which the staged crash
+// kills; on POSIX the launcher survives and is recorded, and the sweep needs it
+// there — its process group is how a child born after the scan is reached.
+function recordFromTable(tree, rows, mustCarry = []) {
+  const since = new Map(rows.map((row) => [row.pid, row.since]));
+  const recorded = [tree.child.pid, tree.workerPid, tree.grandPid]
+    .filter((pid) => pid && since.has(pid))
+    .map((pid) => ({ pid, since: since.get(pid) }));
+  for (const pid of mustCarry) {
+    assert.ok(
+      recorded.some((entry) => entry.pid === pid),
+      `pid ${pid} is missing from the tree the board would have written down`
+    );
+  }
+  return recorded;
 }
 
 describe('the next board start ends what the dead board left running (T-0193)', () => {
   it('kills the agent that outlived its board, and says so', async () => {
-    const { tree, recorded } = await orphan();
+    const { tree, recorded, rows } = await orphanFromTable();
     const project = makeProject();
     // The board's pid is a process that has stopped running, staged as hard as
     // the platform allows: on POSIX that is a zombie nobody reaped, which
@@ -682,7 +782,10 @@ describe('the next board start ends what the dead board left running (T-0193)', 
     writeRegistry(project, { pid: tree.child.pid, board: await stoppedPid(), descendants: recorded });
 
     const logger = makeLogger();
-    const runner = makeRunner(project, { logger });
+    // The one read this test pays for, handed to the sweep instead of made twice
+    // (T-0237). Real rows off this machine, taken seconds ago and still true of
+    // it: the worker below is really running and is really killed.
+    const runner = makeRunner(project, { logger, listProcesses: () => rows });
     const swept = await runner.swept;
 
     assert.ok(swept.killed.includes(tree.workerPid), 'the worker was not among the killed');
@@ -693,22 +796,27 @@ describe('the next board start ends what the dead board left running (T-0193)', 
   });
 
   it('leaves a pid the machine has since handed to a stranger alone', async () => {
-    const { tree, recorded } = await orphan();
-    const project = makeProject();
+    const tree = await orphan();
     // The same live processes, written down with a start time none of them
     // reports: that is what a pid reused after the board died looks like from
-    // here, and the stranger holding it now is not ours to kill.
-    writeRegistry(project, {
-      pid: tree.child.pid,
-      board: await deadPid(),
-      descendants: recorded.map((entry) => ({ ...entry, since: 'when a stranger started' })),
-    });
+    // here, and the stranger holding it now is not ours to kill. No table is read
+    // to build it — a start time that must NOT match is one the fixture is
+    // entitled to invent (T-0237).
+    const recorded = wroteDown(tree, 'when a stranger started');
+    const project = makeProject();
+    writeRegistry(project, { pid: tree.child.pid, board: await deadPid(), descendants: recorded });
 
     const logger = makeLogger();
+    // No injected table here, deliberately: this is where the sweep reads the
+    // real machine through its own default source, and the empty error log below
+    // is what says the read succeeded rather than failed into the same silence
+    // (T-0237). A stranger left alone by a sweep that never got a table would be
+    // the hollow version of this test.
     const runner = makeRunner(project, { logger });
     const swept = await runner.swept;
 
     assert.deepStrictEqual(swept.killed, []);
+    assert.deepStrictEqual(logger.errored, [], 'the sweep never got a table, so it left the pid alone for the wrong reason');
     const before = ticks(tree.workFile);
     await sleep(SETTLE_MS);
     assert.equal(isProcessAlive(tree.workerPid), true, 'a stranger was killed');
@@ -721,23 +829,36 @@ describe('the next board start ends what the dead board left running (T-0193)', 
   });
 
   it('leaves the sessions of a board that is still running to that board', async () => {
-    const { tree, recorded } = await orphan();
+    const tree = await orphan();
     const project = makeProject();
     // A second board on the same project, alive: its session is none of our
     // business, and neither are the processes it is holding.
     const other = await liveBoard();
-    writeRegistry(project, { pid: tree.child.pid, board: other.pid, descendants: recorded });
+    writeRegistry(project, {
+      pid: tree.child.pid,
+      board: other.pid,
+      descendants: wroteDown(tree, 'when the other board started it'),
+    });
 
     const runner = makeRunner(project);
     const swept = await runner.swept;
 
     assert.deepStrictEqual(swept.killed, []);
+    // Nothing was even CONSIDERED a leftover: the live board's session never
+    // reaches the sweep, so `checked` is zero rather than the size of what was
+    // written down. Without this the test would pass just as well on a board that
+    // did sweep and found no start time it recognised — which the invented one
+    // above guarantees — and the fixture would be carrying the assertion (T-0182).
+    assert.equal(swept.checked, 0, "another board's session was treated as a leftover to check");
     await sleep(SETTLE_MS);
     assert.equal(isProcessAlive(tree.workerPid), true, "another board's agent was killed");
   });
 
   it('says so out loud when the machine will not list its processes', async () => {
-    const { tree, recorded } = await orphan();
+    const tree = await orphan();
+    // The sweep below is given no table at all, so no start time it was written
+    // down with can be compared against anything: this one is free to be invented.
+    const recorded = wroteDown(tree, 'when the dead board started it');
     const project = makeProject();
     writeRegistry(project, { pid: tree.child.pid, board: await deadPid(), descendants: recorded });
 
@@ -762,7 +883,8 @@ describe('the next board start ends what the dead board left running (T-0193)', 
   // under load this cleanup switches itself off, and the person it leaves paying
   // for a dead board's agents is the one who has to hear about it.
   it('names why it could not read the table, and what leaving them costs', async () => {
-    const { tree, recorded } = await orphan();
+    const tree = await orphan();
+    const recorded = wroteDown(tree, 'when the dead board started it');
     const project = makeProject();
     writeRegistry(project, { pid: tree.child.pid, board: await deadPid(), descendants: recorded });
 
@@ -790,7 +912,7 @@ describe('the next board start ends what the dead board left running (T-0193)', 
   });
 
   it('asks a second time before giving up on the cleanup for the whole board run', async () => {
-    const { tree, recorded } = await orphan();
+    const { tree, recorded, rows } = await orphanFromTable();
     const project = makeProject();
     writeRegistry(project, { pid: tree.child.pid, board: await deadPid(), descendants: recorded });
 
@@ -803,10 +925,13 @@ describe('the next board start ends what the dead board left running (T-0193)', 
       // machine measurably does: the same read swings between 1.1s and 8.5s over
       // tens of seconds, so a later attempt is a different question — while an
       // immediate one is not, and rescued 1 read of 14 (T-0224).
+      //
+      // The answering attempt hands back the fixture's own snapshot rather than
+      // reading the machine again — the same one read serving both ends (T-0237).
       listProcesses: (budget) =>
         ++asked === 1
           ? { rows: null, code: 'timeout', reason: `powershell: no answer within ${budget}ms` }
-          : readProcessTable(process.platform, FIXTURE_TABLE_MS),
+          : rows,
     });
     const swept = await runner.swept;
 
@@ -921,19 +1046,21 @@ describe('the next board start ends what the dead board left running (T-0193)', 
 
   it('takes a child the leftover started after the tree was written down', async () => {
     const tree = await startTree({ grandchild: true });
-    const table = await machineTable();
-    const recorded = processTree(table, tree.child.pid); // the scan happens here
+    await boardDies(tree);
+    const rows = await machineTable(); // the scan happens here
+    const recorded = recordFromTable(tree, rows, [tree.workerPid]);
     const grandPid = await startGrandchild(tree); // and this one is born after it
     assert.equal(
       recorded.some((p) => p.pid === grandPid),
       false,
       'the child was started after the scan and must not be in what was written down'
     );
-    await boardDies(tree);
 
     const project = makeProject();
     writeRegistry(project, { pid: tree.child.pid, board: await deadPid(), descendants: recorded });
-    const runner = makeRunner(project);
+    // The scan's table, handed to the sweep rather than read a second time
+    // (T-0237). It is the whole subject here that the grandchild is NOT in it.
+    const runner = makeRunner(project, { listProcesses: () => rows });
     await runner.swept;
 
     await waitForKilled(tree, 'the leftover worker to be killed at the next board start');
@@ -1060,7 +1187,7 @@ describe('the sweep does not give up on the leftovers for the rest of the board 
   });
 
   it('re-checks them against the table the scan reads, for the rest of the board run', async () => {
-    const { tree, recorded } = await orphan();
+    const { tree, recorded, rows } = await orphanFromTable();
     const project = makeProject();
     writeRegistry(project, { pid: tree.child.pid, board: await deadPid(), descendants: recorded });
 
@@ -1072,10 +1199,12 @@ describe('the sweep does not give up on the leftovers for the rest of the board 
       command: asTemplate(launcher(pidFile, workFile)),
       sweepRetryMs: 20,
       scanIntervalMs: 300,
+      // The answering read is the fixture's own snapshot, not a second trip to
+      // the machine (T-0237): the leftover it has to recognise is in there with
+      // the start time it was written down with, which is the whole comparison
+      // the scan's table is here to make.
       listProcesses: (budget) =>
-        answers
-          ? readProcessTable(process.platform, FIXTURE_TABLE_MS)
-          : { rows: null, code: 'timeout', reason: `powershell: no answer within ${budget}ms` },
+        answers ? rows : { rows: null, code: 'timeout', reason: `powershell: no answer within ${budget}ms` },
     });
     const swept = await runner.swept;
 
@@ -1096,7 +1225,10 @@ describe('the sweep does not give up on the leftovers for the rest of the board 
   });
 
   it('stops asking once nothing it wrote down is running any more', async () => {
-    const { tree, recorded } = await orphan();
+    const tree = await orphan();
+    // No table is ever read here — `refuses` fails every attempt — so nothing
+    // compares these start times against anything (T-0237).
+    const recorded = wroteDown(tree, 'when the dead board started it');
     const project = makeProject();
     writeRegistry(project, { pid: tree.child.pid, board: await deadPid(), descendants: recorded });
 
@@ -1219,8 +1351,13 @@ describe('a session whose tree could not be written down is not a session with n
       [],
       'a pid with no start time beside it was written down as something for the next board to kill'
     );
-    // And none of it reaches the card: this is bookkeeping for the next board run.
-    assert.equal('treeUnknown' in runner.get('T-0001'), false);
+    // The pids stay bookkeeping for the next board run; the fact that there are
+    // none to write down is handed out, because it is the half a person can act
+    // on and the log was the only place it was ever said (T-0242).
+    const handed = runner.get('T-0001');
+    assert.equal(handed.treeUnknown, true, 'the card is told nothing about a session with no tree written down');
+    assert.equal(handed.treeReason, stored.treeReason);
+    assert.equal('descendants' in handed, false);
   });
 
   it('goes on saying it while the failure lasts, and not once per read', async () => {

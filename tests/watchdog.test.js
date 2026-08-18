@@ -16,7 +16,6 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 const { createGitOps } = require('../server/git.js');
 const {
@@ -27,6 +26,7 @@ const {
   MIN_INTERVAL_MS,
 } = require('../server/watchdog.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- fixtures ----------
 
@@ -44,7 +44,7 @@ const roots = [];
 // `track` is what the global afterEach cleans up; a fixture shared by a whole
 // group has to outlive the first test in it and takes itself down instead.
 function makeRepo({ init = true, track = true } = {}) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-watchdog-')));
+  const root = fs.realpathSync(tempDir('briefboard-watchdog-'));
   if (track) roots.push(root);
   fs.writeFileSync(path.join(root, 'readme.txt'), 'x\n');
   if (!init) return root;

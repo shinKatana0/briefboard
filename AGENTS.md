@@ -17,9 +17,12 @@ regardless of the tool.
 ## Mandatory for any agent
 - Backlog and brief format: `agents/PROTOCOL.md` — read it before your first write.
 - All task changes go only through the CLI `node tools/task.mjs` (add / status /
-  depends / profile / brief / note / show / list / archive / board / sessions /
-  validate). Run it with no arguments and it prints the list it actually has.
+  depends / labels / profile / brief / link / note / show / list / archive /
+  board / sessions / validate). Run it with no arguments and it prints the list
+  it actually has.
 - Never delete tasks from `doc/backlog.md` — only the `cancelled` status.
+- Every task filed in this repository carries exactly one label, `product` or
+  `internal`; which one is decided in `agents/ORCHESTRATOR.md` §1 (T-0280).
 - The `done`/`cancelled`/`open`/`ready` statuses are set only by the orchestrator.
 
 ## The board

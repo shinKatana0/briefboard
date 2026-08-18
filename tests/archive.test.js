@@ -23,12 +23,13 @@ const { spawnSync } = require('node:child_process');
 const { parseBacklog, serializeBacklog, addTask } = require('../server/parser.js');
 const { validateBacklog } = require('../server/validate.js');
 const { writeBoardTrace, TRACE_SINCE } = require('../server/trace.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
 const roots = [];
 function makeTmpRoot() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-archive-test-'));
+  const root = tempDir('briefboard-archive-test-');
   roots.push(root);
   return root;
 }
@@ -57,6 +58,7 @@ function task(id, over = {}) {
     created: '2026-01-01 00:00:00',
     closed: '2026-01-02 00:00:00',
     briefs: [],
+    labels: [],
     depends: [],
     profile: '',
     extra: {},
@@ -141,6 +143,7 @@ describe('archive: what moves', () => {
       title: 'a title with · a separator in it',
       depends: ['T-0001'],
       briefs: ['T-0002-01'],
+      labels: ['ui', 'docs'],
       profile: 'fast',
       extra: { 'due-date': '2026-09-01' },
       description: '## Not a header\n\nA body.\n\n### Worker report\nBranch: x\n',
@@ -418,6 +421,7 @@ describe('archive: references across the border', () => {
       ['status', 'T-0001', 'in_progress'],
       ['note', 'T-0001', '--section', 'Worker report', '--text', 'late'],
       ['depends', 'T-0001', 'T-0002'],
+      ['labels', 'T-0001', 'ui'],
       ['brief', 'T-0001', 'slug'],
     ]) {
       const res = runCli(root, args);

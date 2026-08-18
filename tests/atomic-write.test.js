@@ -12,12 +12,12 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'); // same singleton parser.js sees via require('fs')
 const path = require('node:path');
-const os = require('node:os');
 
 const { atomicWrite } = require('../server/parser.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-atomic-test-'));
+  return tempDir('briefboard-atomic-test-');
 }
 
 function fsError(code) {

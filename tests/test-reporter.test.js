@@ -9,25 +9,18 @@
 // the totals, must survive - that is what these assertions pin down.
 
 require('./helpers/env.js');
-const { describe, it, after } = require('node:test');
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawnSync } = require('node:child_process');
+const { tempDir } = require('./helpers/tmp.js');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const COMPACT = './tools/test-reporter-compact.mjs';
 
-const tmpDirs = [];
-
-after(() => {
-  for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
-});
-
 function fixture(source) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-reporter-')));
-  tmpDirs.push(dir);
+  const dir = fs.realpathSync(tempDir('briefboard-reporter-'));
   const file = path.join(dir, 'fixture.test.js');
   fs.writeFileSync(file, source);
   return file;

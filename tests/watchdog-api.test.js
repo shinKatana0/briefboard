@@ -30,13 +30,13 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 const { fetch, SESSION_START_TIMEOUT_MS } = require('./helpers/bounded.js');
 const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
 const { SPAWN_WAIT_BUDGET_MS } = require('./helpers/wait.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- the project ----------
 
@@ -75,7 +75,7 @@ const servers = [];
 const roots = [];
 
 function makeProject() {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-watchdog-api-')));
+  const root = fs.realpathSync(tempDir('briefboard-watchdog-api-'));
   roots.push(root);
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog());
@@ -230,7 +230,7 @@ describe('the watchdog on GET /api/sessions', () => {
   });
 
   it('says nothing at all in a project that is not a git repository', async () => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-watchdog-nogit-')));
+    const root = fs.realpathSync(tempDir('briefboard-watchdog-nogit-'));
     roots.push(root);
     fs.mkdirSync(path.join(root, 'doc'), { recursive: true });
     fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog());

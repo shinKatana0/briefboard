@@ -6,11 +6,15 @@
  * argument, an unknown flag, an unknown command — instead of ignoring it (see
  * SPECS below, T-0220). The shapes are declared there, not in the case blocks.
  *
- *   node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."]
+ *   node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."] [--labels ui,docs]
  *       # `external` = something a third party owes us (access, keys, an answer);
  *       # other tasks wait on it through `depends` (see agents/PROTOCOL.md).
  *       # --desc - reads the description from stdin (as note --text - does), and
  *       # refuses an empty one rather than filing a task with a dash (T-0198).
+ *       # --labels takes the same ONE comma-separated argument the `labels`
+ *       # subcommand does, and follows the same rules: it is there so a project
+ *       # whose every task must carry a label can file one in a single command
+ *       # (T-0282), instead of a second call that gets dropped.
  *   node tools/task.mjs status T-0007 <backlog|open|ready|in_progress|review|done|cancelled> [--force]
  *       # transition must follow the lifecycle graph (server/parser.js TRANSITIONS);
  *       # ready -> in_progress additionally requires every task in `depends` to be
@@ -19,6 +23,12 @@
  *       # bypasses the "ready requires a brief" invariant.
  *   node tools/task.mjs depends T-0007 T-0001,T-0002  # set the prerequisite list (replaces it)
  *   node tools/task.mjs depends T-0007 --clear        # drop the prerequisite list
+ *   node tools/task.mjs labels T-0007 ui,docs         # set the whole label list (replaces it)
+ *   node tools/task.mjs labels T-0007 --clear         # drop the labels
+ *       # the set of labels is the user's and implicit: a label exists while
+ *       # some task carries it, so there is nothing to declare and nothing to
+ *       # register. Names are compared as written (`ui` and `UI` are two), and
+ *       # the rules they follow are in agents/PROTOCOL.md.
  *   node tools/task.mjs profile T-0007 fast          # run profile for this task's sessions
  *   node tools/task.mjs profile T-0007 --clear       # back to the default profile
  *       # the legal values are declared by the user in BRIEFBOARD_PROFILES
@@ -26,6 +36,14 @@
  *       # interprets them, it only checks membership and substitutes {profile}
  *       # into the session command template.
  *   node tools/task.mjs brief T-0007 <slug>          # creates doc/brief/T-0007-NN-slug.md and links it
+ *       # NN is one past the highest the TASK already links, so a brief file the
+ *       # task does not link is invisible to it. A file already holding the
+ *       # computed brief id is never overwritten: the command refuses and writes
+ *       # nothing at all (T-0264).
+ *   node tools/task.mjs link T-0007-01               # links a brief file that already exists
+ *       # the other half of the same accident: `brief` refuses to write over a
+ *       # file written by hand, and this is how that file gets onto the task's
+ *       # `briefs:` line without anyone editing doc/backlog.md (T-0267).
  *   node tools/task.mjs note T-0007 --section "Worker report" --text "..."
  *   node tools/task.mjs note T-0007 --section "Worker report" --text -   # text from stdin
  *       # appends to the task description under "### <section>"; never rewrites
@@ -65,7 +83,9 @@ const {
   STATUSES,
   TRANSITIONS,
   TASK_ID_RE,
+  BRIEF_ID_RE,
   blockingDependencies,
+  checkLabels,
   dependencyCycles,
   appendDescriptionSection,
   stripWorkerReports,
@@ -75,6 +95,7 @@ const {
   archiveClosedTasks,
   readArchivedTasks,
   archivePathFor,
+  findBriefFile,
 } = require('../server/parser.js');
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -98,6 +119,13 @@ const die = (msg) => { console.error('ERROR: ' + msg); process.exit(1); };
 // convert to die() outside the lock. See doc/brief/T-0046-01-backlog-write-lock.md.
 class CliError extends Error {}
 const fail = (msg) => { throw new CliError(msg); };
+
+// Same abort, for a refusal about how the command was CALLED rather than about
+// the state of the repository - it comes out of the lock as dieUsage() instead
+// of die(), so it carries the subcommand's usage line like every other
+// call-shaped refusal since T-0220 (T-0284).
+class CliUsageError extends CliError {}
+const failUsage = (msg) => { throw new CliUsageError(msg); };
 
 // Read-only load (list/show); mutating commands read inside updateBacklog's lock.
 function readTasks() {
@@ -127,6 +155,42 @@ function failMissing(id) {
           `To read it: node tools/task.mjs show ${id}`
       : `task ${id} not found`
   );
+}
+
+// Abort `brief` rather than write the template over a file that already answers
+// to this brief id. Two finished briefs were destroyed that way, and the call
+// that did it printed the path exactly as a successful one does (T-0264).
+function failBriefTaken(briefId, file) {
+  const taskId = briefId.slice(0, briefId.lastIndexOf('-'));
+  fail(
+    `${briefId} already has a file: ${rel(file)}\n` +
+      '  Nothing was written - the template would have replaced its content.\n' +
+      "  NN is one past the highest the task already links, so a file it does not link is invisible to it.\n" +
+      `  If that file is this brief, link it: node tools/task.mjs link ${briefId}\n` +
+      `  (that is the whole fix - ${taskId} then knows the file, and the next brief gets the next number);\n` +
+      '  if it is stale, move it aside and run the command again.'
+  );
+}
+
+// The next free brief number for a task: one past the highest NN it already
+// links, NOT briefs.length + 1. `link` (T-0267) can attach a file whose number
+// is not the next one - T-0007-03 to a task linking nothing - and counting the
+// list would then hand out 02, and on the call after that 03 again: a number the
+// task already holds. That collision is refused by failBriefTaken() above, on a
+// message telling the reader to link a file that is already linked, i.e. a dead
+// end with no way out through the CLI (measured before this changed). A hole in
+// the numbering is harmless - the order of `briefs:` means nothing and NN is a
+// label, not an index - and repeating a number is not.
+//
+// Only this task's own ids count: `briefs:` is hand-editable and may carry an id
+// belonging to another task.
+function nextBriefNumber(task) {
+  let highest = 0;
+  for (const briefId of task.briefs) {
+    if (!briefId.startsWith(task.id + '-')) continue;
+    highest = Math.max(highest, Number(briefId.slice(task.id.length + 1)));
+  }
+  return highest + 1;
 }
 
 // What the CLI may honestly say about a board that is open while we archive.
@@ -195,15 +259,21 @@ function warnOpenBoard() {
 // accepting it is silent data loss: T-0193 was filed exactly that way, with a
 // dash where the finding it existed to carry should have been, and the finding
 // had to be restored by hand from a worker's report (T-0198).
-function readStdinValue(flag) {
+//
+// `name` is the subcommand, and it is required rather than defaulted: this is
+// shared by `add` and `note`, and a refusal here is about how the command was
+// called, so it owes the caller that command's usage line (T-0284). An optional
+// parameter is how the third call site would silently get the usage-less form
+// back.
+function readStdinValue(name, flag) {
   let text = '';
   try {
     text = fs.readFileSync(0, 'utf8');
   } catch {
-    die(`${flag} - expects the text on standard input (pipe it in)`);
+    dieUsage(name, `${flag} - expects the text on standard input (pipe it in)`);
   }
   if (!text.trim())
-    die(`${flag} - got nothing on standard input: pipe the text in, or pass it as ${flag} "..."`);
+    dieUsage(name, `${flag} - got nothing on standard input: pipe the text in, or pass it as ${flag} "..."`);
   return text;
 }
 
@@ -228,9 +298,9 @@ function readStdinValue(flag) {
 const SPECS = {
   add: {
     args: [],
-    flags: { type: 'value', priority: 'value', title: 'value', desc: 'value' },
+    flags: { type: 'value', priority: 'value', title: 'value', desc: 'value', labels: 'value' },
     usage:
-      'node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."]',
+      'node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|Major|Medium|Minor --title "..." [--desc "..."] [--labels ui,docs]',
     hint: (positional) => `the title is a flag, not a position: --title ${quote(positional[0])}`,
   },
   status: {
@@ -251,6 +321,19 @@ const SPECS = {
           `  node tools/task.mjs depends ${positional[0]} ${positional.slice(1).join(',')}`
         : '',
   },
+  labels: {
+    args: ['T-0007', 'ui,docs'],
+    flags: { clear: 'bool' },
+    usage: 'node tools/task.mjs labels T-0007 ui,docs | --clear',
+    // Same shape and same accident as `depends` above: a list typed the way a
+    // person types one - separated by spaces - would record the first name and
+    // drop the rest.
+    hint: (positional) =>
+      positional.length > 1
+        ? 'the whole label list is ONE comma-separated argument:\n' +
+          `  node tools/task.mjs labels ${positional[0]} ${positional.slice(1).join(',')}`
+        : '',
+  },
   profile: {
     args: ['T-0007', '<profile>'],
     flags: { clear: 'bool' },
@@ -265,6 +348,27 @@ const SPECS = {
         .slice(1)
         .join('-')
         .toLowerCase()}`,
+  },
+  // A verb of its own rather than `brief --link` (T-0267). The two commands have
+  // opposite preconditions - `brief` refuses when the file exists, `link`
+  // requires it to - and a flag that inverts the precondition of the command it
+  // is attached to reads as "create" while creating nothing. It also has to be
+  // nameable in the refusal `brief` prints: pointing that reader back at `brief`
+  // is what the message is trying to lead them out of. The cost is a thirteenth
+  // subcommand in a set T-0220 keeps narrow, paid once.
+  link: {
+    args: ['T-0007-01'],
+    flags: {},
+    usage: 'node tools/task.mjs link T-0007-01',
+    // `link T-0007 T-0007-01` is the call to expect: every other command that
+    // touches a task takes the task id first, and here it is already inside the
+    // brief id.
+    hint: (positional) => {
+      const briefId = positional.find((a) => BRIEF_ID_RE.test(a));
+      return briefId
+        ? `the brief id names its own task: node tools/task.mjs link ${briefId}`
+        : '';
+    },
   },
   note: {
     args: ['T-0007'],
@@ -363,6 +467,9 @@ function withUpdate(mutate) {
   try {
     return updateBacklog(BACKLOG, mutate);
   } catch (e) {
+    // The narrower class first: it is a CliError too, and the order is what
+    // decides whether the usage line is printed.
+    if (e instanceof CliUsageError) dieUsage(cmd, e.message);
     if (e instanceof CliError) die(e.message);
     throw e;
   }
@@ -374,17 +481,41 @@ switch (cmd) {
     // Flag-level check first, so a missing --title names the flag the user
     // forgot. The shared helper re-checks the title itself (see addTask) and is
     // what catches a whitespace-only value.
-    if (!f.title) die('--title is required');
-    const desc = f.desc === '-' ? readStdinValue('--desc') : f.desc;
+    if (!f.title) dieUsage(cmd, '--title is required');
+    const desc = f.desc === '-' ? readStdinValue(cmd, '--desc') : f.desc;
+    // The same rules the `labels` subcommand applies, from the same helper in
+    // server/parser.js - down to the empty-value refusal, so a name this file
+    // cannot carry is refused BEFORE anything is written and `--labels` typed
+    // with nothing after it is not silently an unlabelled task (T-0282).
+    let labels = [];
+    if ('labels' in f) {
+      try {
+        labels = checkLabels(f.labels);
+      } catch (e) {
+        // The message comes from the shared helper, which does not know which
+        // subcommand asked - so the usage line is added here, where that is
+        // known. A name this file cannot carry is a wrong call like any other
+        // (T-0284).
+        dieUsage(cmd, e.message);
+      }
+      if (labels.length === 0)
+        dieUsage(cmd, '--labels needs a comma-separated list of labels (leave it out for none)');
+    }
     // Id allocation, defaults and the write itself live in server/parser.js
     // (addTask), shared with the server's POST /api/task - the CLI must not keep
     // its own copy of that logic. addTask does its own locked read-modify-write,
     // so no withUpdate() wrapper here; a thrown error means nothing was written.
     let id;
     try {
-      id = addTask(BACKLOG, { title: f.title, type: f.type, priority: f.priority, description: desc });
+      id = addTask(BACKLOG, {
+        title: f.title,
+        type: f.type,
+        priority: f.priority,
+        description: desc,
+        labels,
+      });
     } catch (e) {
-      die(e.message);
+      dieUsage(cmd, e.message);
     }
     console.log(id);
     break;
@@ -394,7 +525,12 @@ switch (cmd) {
     const { flags: f, positional } = parseArgs(cmd, rest);
     const [id, status] = positional;
     const force = 'force' in f;
-    if (!STATUSES.includes(status)) die(`status must be one of: ${STATUSES.join(', ')}`);
+    // The id is checked first and refused in its own words: without this a bare
+    // `status` answers about the value of an argument the reader never reached,
+    // so "no arguments at all" and "a task with no status" were one message, and
+    // neither carried the usage line (T-0273).
+    if (!id) dieUsage(cmd, 'status needs the task whose status is being set');
+    if (!STATUSES.includes(status)) dieUsage(cmd, `status must be one of: ${STATUSES.join(', ')}`);
     withUpdate((tasks) => {
       const t = tasks.find((x) => x.id === id);
       if (!t) failMissing(id);
@@ -461,7 +597,12 @@ switch (cmd) {
       const known = withArchived(tasks);
       const unique = [];
       for (const depId of wanted) {
-        if (!TASK_ID_RE.test(depId)) fail(`"${depId}" is not a task id (expected T-NNNN)`);
+        // A token that is not a task id at all is a wrong call, not a state the
+        // repository is in - exactly like `link`'s malformed brief id, which has
+        // printed the usage line since T-0267 (T-0284). Its two neighbours below
+        // stay state refusals: a well-formed id that names nothing, and a list
+        // that would close a cycle, are both facts about the backlog.
+        if (!TASK_ID_RE.test(depId)) failUsage(`"${depId}" is not a task id (expected T-NNNN)`);
         if (depId === id) fail(`${id} cannot depend on itself`);
         if (!known.some((x) => x.id === depId)) fail(`task ${depId} not found`);
         if (!unique.includes(depId)) unique.push(depId);
@@ -492,6 +633,46 @@ switch (cmd) {
     break;
   }
 
+  case 'labels': {
+    const { flags: f, positional } = parseArgs(cmd, rest);
+    const [id, listRaw] = positional;
+    const clear = 'clear' in f;
+    if (!id) dieUsage(cmd, 'labels needs the task whose labels are being set');
+    // Replaced, never appended to, exactly like `depends` - and said out loud
+    // below, because a second call meaning "add one more" otherwise succeeds
+    // silently and takes the first labels with it.
+    let wanted = [];
+    try {
+      // The rules live in server/parser.js, shared with the parser and with
+      // POST /api/task/:id/labels: a second reading of them here is how the
+      // three would come to disagree about "UI ".
+      wanted = clear ? [] : checkLabels(listRaw);
+    } catch (e) {
+      // Same as in `add`: the helper's message plus the usage line of the
+      // command that was actually typed (T-0284).
+      dieUsage(cmd, e.message);
+    }
+    if (!clear && wanted.length === 0)
+      dieUsage(cmd, 'labels needs either a comma-separated list of labels or --clear');
+    const { before, labels } = withUpdate((tasks) => {
+      const t = tasks.find((x) => x.id === id);
+      if (!t) failMissing(id);
+      const previous = t.labels.slice();
+      t.labels = wanted;
+      return { before: previous, labels: wanted };
+    });
+    console.log(`${id} labels: ${labels.length ? labels.join(', ') : '(none)'}`);
+    const lost = before.filter((l) => !labels.includes(l));
+    if (lost.length && labels.length) {
+      const union = before.concat(labels.filter((l) => !before.includes(l)));
+      console.log(`  (dropped: ${lost.join(', ')} — labels SETS the whole list, it never adds to it)`);
+      console.log(`  (to keep them, name them too: node tools/task.mjs labels ${id} ${union.join(',')})`);
+    } else if (lost.length) {
+      console.log(`  (dropped: ${lost.join(', ')})`);
+    }
+    break;
+  }
+
   case 'profile': {
     const { flags: f, positional } = parseArgs(cmd, rest);
     const [id, valueRaw] = positional;
@@ -507,8 +688,11 @@ switch (cmd) {
     if (wanted) {
       if (!profiles.values.length)
         die(`no run profiles are declared: set ${PROFILES_ENV}, e.g. ${PROFILES_ENV}='deep, fast' (the first is the default)`);
+      // A wrong value carries the usage line; the refusal above does not, and
+      // that is the difference between them: nothing about the call is wrong
+      // there, the environment declares no profiles at all (T-0273).
       if (!profiles.values.includes(wanted))
-        die(`"${wanted}" is not in ${PROFILES_ENV} (${profiles.values.join(', ')})`);
+        dieUsage(cmd, `"${wanted}" is not in ${PROFILES_ENV} (${profiles.values.join(', ')})`);
     }
     withUpdate((tasks) => {
       const t = tasks.find((x) => x.id === id);
@@ -522,22 +706,105 @@ switch (cmd) {
   case 'brief': {
     const { positional } = parseArgs(cmd, rest);
     const [id, slugRaw] = positional;
+    // Without this the lookup below runs on `undefined` and reports "task
+    // undefined not found" - a refusal that names the wrong problem and sends
+    // the reader looking for a task instead of adding the argument (T-0269).
+    // The slug needs no such guard: it deliberately defaults to "brief".
+    if (!id) dieUsage(cmd, 'brief needs the task the brief belongs to');
     const slug = (slugRaw || 'brief').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
     const file = withUpdate((tasks) => {
       const t = tasks.find((x) => x.id === id);
       if (!t) failMissing(id);
-      const nn = String(t.briefs.length + 1).padStart(2, '0');
+      const nn = String(nextBriefNumber(t)).padStart(2, '0');
       const briefId = `${id}-${nn}`;
       const outFile = path.join(BRIEF_DIR, `${briefId}-${slug}.md`);
+      // The disk decides, not the counter: nn comes from the task's briefs list,
+      // so a brief written by hand and not yet linked is invisible to it and the
+      // very next call lands on top of it (T-0264). By brief id and not by file
+      // name, because findBriefFile() resolves an id by prefix - a second
+      // T-0007-01-*.md is a second answer to one id, and readdir order decides
+      // which the board shows.
+      //
+      // Refusing rather than taking the next free NN: renumbering would link the
+      // task to a fresh empty template and leave the real brief orphaned, and
+      // nothing reports that - validate checks link -> file, never file -> link.
+      // A legitimate second brief is untouched: with the first linked, nn is 02
+      // and no file holds that id.
+      const taken = findBriefFile(BRIEF_DIR, briefId);
+      if (taken) failBriefTaken(briefId, taken);
       fs.mkdirSync(BRIEF_DIR, { recursive: true });
-      fs.writeFileSync(
-        outFile,
-        `# ${briefId} · ${t.title}\n\n## Context\n\n## Solution\n\n## Scope\n\n## Acceptance criteria\n- [ ] \n`
-      );
+      try {
+        // 'wx' is O_CREAT|O_EXCL: check and create in one operation, so there is
+        // no window after the lookup above. Nothing else closes it - the lock
+        // updateBacklog holds is on backlog.md and orders briefboard's own
+        // writers, not the editor or the agent writing a brief by hand, which is
+        // exactly who wrote the file that was lost.
+        fs.writeFileSync(
+          outFile,
+          `# ${briefId} · ${t.title}\n\n## Context\n\n## Solution\n\n## Scope\n\n## Acceptance criteria\n- [ ] \n`,
+          { flag: 'wx' }
+        );
+      } catch (e) {
+        if (e.code === 'EEXIST') failBriefTaken(briefId, outFile);
+        throw e;
+      }
       t.briefs.push(briefId);
       return outFile;
     });
     console.log(file);
+    break;
+  }
+
+  // The way out of the state that destroyed two finished briefs: the file is on
+  // disk, the task does not know it, and before this the only remaining move was
+  // to hand-edit the `briefs:` line of doc/backlog.md - which is the file
+  // tools/task.mjs exists to keep hands off, and the one a worker isolated in a
+  // worktree may not edit at all (T-0079). It reaches the shared backlog through
+  // AGENTBOARD_ROOT like every other command here (T-0267).
+  case 'link': {
+    const { positional } = parseArgs(cmd, rest);
+    const [briefId] = positional;
+    if (!briefId) dieUsage(cmd, 'link needs the brief id of the file being linked');
+    if (!BRIEF_ID_RE.test(briefId))
+      dieUsage(
+        cmd,
+        `${quote(briefId)} is not a brief id (expected T-NNNN-MM)`,
+        'the id is the file name without its slug: doc/brief/T-0007-01-some-slug.md is T-0007-01'
+      );
+    const id = briefId.slice(0, briefId.lastIndexOf('-'));
+    // Existence is checked BEFORE the write, not reported after it: a `briefs:`
+    // entry that resolves to nothing is exactly what validate's rule 4 reports,
+    // and this command must not be a way to create one.
+    const file = findBriefFile(BRIEF_DIR, briefId);
+    if (!file)
+      die(
+        `no file in ${rel(BRIEF_DIR)} answers to ${briefId} (expected ${briefId}.md or ${briefId}-<slug>.md)\n` +
+          `  link records a file that already exists; to create one: node tools/task.mjs brief ${id} <slug>`
+      );
+    const already = withUpdate((tasks) => {
+      const t = tasks.find((x) => x.id === id);
+      if (!t) failMissing(id);
+      // One brief id answers to one task. A `briefs:` line is hand-editable, so
+      // an id can end up under a task its own prefix does not name; linking it
+      // here as well would make two tasks claim one file.
+      const other = tasks.find((x) => x.id !== id && x.briefs.includes(briefId));
+      if (other)
+        fail(
+          `${briefId} is already linked by ${other.id}, which is not the task its id names; ` +
+            `remove it from ${other.id} first (a brief belongs to one task)`
+        );
+      if (t.briefs.includes(briefId)) return true;
+      t.briefs.push(briefId);
+      return false;
+    });
+    // Said, not silently repeated: a second run leaves the state the caller
+    // wanted, and a line identical to the first run's would claim it did the
+    // work twice - `briefs:` never gets a duplicate either way.
+    console.log(
+      already
+        ? `${id} already links ${briefId} (${rel(file)})`
+        : `${id} += ${briefId} (${rel(file)})`
+    );
     break;
   }
 
@@ -550,12 +817,12 @@ switch (cmd) {
     // The only rule the text itself cannot be given: a heading must stay one
     // line. Structure-lookalike lines in the text need no rejection - they are
     // escaped on write like any description (see escapeDescription).
-    if (/[\r\n]/.test(section)) die('--section must not contain line breaks');
+    if (/[\r\n]/.test(section)) dieUsage(cmd, '--section must not contain line breaks');
     if (f.text === undefined) dieUsage(cmd, '--text is required, e.g. --text "..." or --text - for stdin');
     // Multi-line reports are the normal case here, and quoting them through a
     // shell argument is where they get mangled; "-" takes them from stdin whole.
-    const text = f.text === '-' ? readStdinValue('--text') : f.text;
-    if (!text.trim()) die('nothing to append: the text is empty');
+    const text = f.text === '-' ? readStdinValue(cmd, '--text') : f.text;
+    if (!text.trim()) dieUsage(cmd, 'nothing to append: the text is empty');
     withUpdate((tasks) => {
       const t = tasks.find((x) => x.id === id);
       if (!t) failMissing(id);
@@ -570,6 +837,7 @@ switch (cmd) {
     // `show T-0007 --full`; --full consumes nothing, so nothing else can be one.
     const { flags: f, positional } = parseArgs(cmd, rest);
     const id = positional[0];
+    if (!id) dieUsage(cmd, 'show needs the task to print');
     // Both files, always: a task nobody can find is worse than a task found in
     // the archive, and after an `archive` run most ids live there.
     let t = readTasks().find((x) => x.id === id);
@@ -737,7 +1005,7 @@ switch (cmd) {
     // a single word — `task.mjs stauts T-0007 review` printed this same list and
     // exited 0, which in a script reads as the status having been set (T-0220).
     const help =
-      'commands: add | status | depends | profile | brief | note | show | list | archive | board | sessions | validate  (see the file header)';
+      'commands: add | status | depends | labels | profile | brief | link | note | show | list | archive | board | sessions | validate  (see the file header)';
     // `help` and its flag spellings are the same question as no command at all,
     // and refusing the one word every CLI answers would be a refusal of the kind
     // this task exists to remove. It is deliberately not in the list it prints:

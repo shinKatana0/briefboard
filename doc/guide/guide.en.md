@@ -26,7 +26,7 @@ type.
 
 ## 1. Introduction — what is briefboard
 
-briefboard (the repository is also called `agentboard`) is a lightweight kanban
+briefboard (formerly named `agentboard`) is a lightweight kanban
 board plus a command-line tool that makes AI coding agents run their work
 through a strict, explicit workflow: `backlog → open → ready → in_progress →
 review → done`. Two things are mandatory in that workflow — a written brief
@@ -234,8 +234,8 @@ browser and you will see the kanban board.
 - **Loopback by default.** The server binds to `127.0.0.1` (loopback), so the
   board — and its writing endpoints, `POST /api/task` (create) and
   `POST /api/task/:id/` `cancel` / `open` / `backlog` / `start` / `answer` /
-  `profile` / `done`, plus the three that write no backlog at all, `briefing`,
-  `review` and `remove-worktree` — is reachable
+  `profile` / `labels` / `done`, plus the three that write no backlog at all,
+  `briefing`, `review` and `remove-worktree` — is reachable
   only from the local machine. This is deliberate: there is no authentication.
 - **Public bind is opt-in.** To expose the board on the network, set the host
   explicitly via `HOST` or `AGENTBOARD_HOST` (for example
@@ -342,7 +342,7 @@ Step by step:
    This prints the new ID, e.g. `T-0007`.
 
    The same task can be created from the board itself: the "+ New task" button,
-   first in the header, opens a form (title, type, priority, description) and
+   first in the header, opens a form (title, type, priority, labels, description) and
    posts it to `POST /api/task`. The server assigns the ID and writes the task
    through the same shared helper the CLI uses, so the result is identical —
    and, exactly like the CLI, the task always lands in `backlog`.
@@ -431,11 +431,24 @@ Step by step:
 
 All task changes go through `node tools/task.mjs`. It guarantees the file
 format, sequential IDs, and atomic writes. The subcommands documented below are
-`add`, `status`, `depends`, `brief`, `note`, `show`, `list`, `archive`, `board`,
-`sessions` and `validate`; `profile` is one too, and lives with the feature it
+`add`, `status`, `depends`, `labels`, `brief`, `link`, `note`, `show`, `list`, `archive`,
+`board`, `sessions` and `validate`; `profile` is one too, and lives with the feature it
 belongs to — [The run profile](#the-run-profile-which-mode-an-agent-runs-in).
 For the list as the tool itself knows it, run `node tools/task.mjs` with no
 arguments: it prints every subcommand it has.
+
+**When a call is refused.** Every refusal exits `1` and writes to stderr, and
+which of two kinds it is decides what you get with it. A refusal about **how the
+command was called** — an unknown flag, a missing or extra positional argument, a
+`--type`, `--priority`, `--status` or label value outside its list, a `--desc -`
+or `--text -` with nothing on standard input — prints the subcommand's usage line
+underneath, and sometimes a hint aimed at the exact mistake, so the message that
+stops you also carries the call that works. A refusal about the **state of the
+repository** — no such task, a transition the lifecycle does not allow, a
+prerequisite still unfinished, no run profiles declared — prints the reason
+alone: the call was well formed, and a usage line would answer nothing. Either
+way nothing is written; the backlog is only ever touched by a call that got all
+the way through.
 
 ### `add` — create a new task
 
@@ -446,12 +459,18 @@ node tools/task.mjs add --type feature --priority Major --title "..." --desc "..
 Creates a new task in `doc/backlog.md` (in status `backlog`) and prints its ID.
 Flags:
 
-- `--type` — `feature`, `bug` or `external` (anything else is treated as
-  `feature`). `external` is work a third party owes you — see
-  "Waiting for something outside the project" below.
-- `--priority` — one of `Blocker`, `Critical`, `Major`, `Medium`, `Minor`
-  (anything else falls back to `Medium`).
+- `--type` — `feature`, `bug` or `external`. `external` is work a third party
+  owes you — see "Waiting for something outside the project" below.
+- `--priority` — one of `Blocker`, `Critical`, `Major`, `Medium`, `Minor`.
 - `--title` — the task title. **Required.**
+- `--labels` — the labels the task is filed with (optional), as ONE
+  comma-separated argument: `--labels "ui, docs"`. The names follow the same
+  rules as the [`labels`](#labels--your-own-classification-of-a-task) command
+  and are refused the same way, before anything is written. Leaving the flag out
+  means no labels, which is not an error anywhere; the flag with nothing after
+  it is refused rather than taken for that. It exists so a project whose every
+  task must carry a label can file one in a single command — a second call is
+  the one that gets dropped.
 - `--desc` — the free-form description (optional). `--desc -` reads it from
   standard input, which is how anything multi-line is passed without a shell
   mangling it; an empty standard input under that explicit `-` is refused, and
@@ -459,6 +478,15 @@ Flags:
   description belonged, and the finding it existed to carry was gone — the
   failure is silent, and what it loses is the whole reason the card exists.
   `note --text -` refuses the same way.
+
+**A flag left out and a flag given wrong are not the same thing.** Leaving
+`--type` or `--priority` out is the ordinary call and no error anywhere: the task
+is filed as a `feature` of `Medium` priority. A value **outside** the list is
+refused — the error names the legal values, nothing is written and no id is
+allocated. That changed in 0.3.0: such a value used to be replaced by the
+default, so `add --title X --type nonsense` exited `0` and filed a `feature`
+nobody asked for, with `show` as the only sign of it. If a script of yours relied
+on a wrong value being quietly corrected, it now fails where it used to succeed.
 
 ### `status` — change a task's status
 
@@ -509,6 +537,43 @@ The board shows the same information: a card whose prerequisites are unfinished
 carries a "blocked" marker, and the task dialog lists them, each with its current
 status and clickable straight through to that task.
 
+### `labels` — your own classification of a task
+
+```bash
+node tools/task.mjs labels T-0007 ui,docs
+node tools/task.mjs labels T-0007 --clear
+```
+
+Sets the whole label list at once — like `depends`, it replaces the previous list
+rather than adding to it, and says what it dropped when a call loses anything;
+`--clear` empties it. The field is written to `doc/backlog.md` only while the
+list is non-empty.
+
+Labels are yours, not briefboard's. `type` and priority are closed lists the
+format owns; a label set is **implicit** — there is no registry file and nothing
+to declare. A label exists while some task carries it, creating one is typing a
+name that nobody has used yet, and the last task dropping a label is what makes
+it disappear. The price of that, knowingly: a typo makes a new label silently,
+and renaming one means touching every task that carries it.
+
+A name is trimmed, at most 32 characters, and may hold anything except a comma
+(the list separator) and a line break; one task carries at most 8. Names are
+compared **as written** — `ui` and `UI` are two different labels — and what keeps
+them from diverging is the card's editor offering the labels already in use.
+
+On the board: the labels appear as chips on the card under its title, the card's
+dialog adds and removes them, a `Labels ▾` button in the header filters by any of
+them at once, and the search box matches them alongside the title and the
+description. Typing `docs` there is how you find the labelled tasks without
+opening the popover — which is why the board has no sorting control for labels.
+They are in the Excel export too, as a column of their own.
+
+A task can be filed already carrying them, in one command rather than two:
+`add --labels` takes the same list (see [`add`](#add--create-a-new-task)), and
+the board's "+" form has a field beside the title and the priority. That matters
+for a project whose convention is that every task carries a label — a rule kept
+by a second command is a rule that drifts.
+
 ### Waiting for something outside the project
 
 Sooner or later a task is finished as far as you are concerned and still cannot
@@ -540,9 +605,35 @@ see it, nothing closes it, and it goes stale silently).
 node tools/task.mjs brief T-0007 csv-export
 ```
 
-Creates `doc/brief/T-0007-NN-slug.md` (where `NN` is the next brief number for
-that task) with the standard section skeleton, and adds the brief ID to the
-task's `briefs` field.
+Creates `doc/brief/T-0007-NN-slug.md` (where `NN` is one past the highest brief
+number that task already links) with the standard section skeleton, and adds the
+brief ID to the task's `briefs` field.
+
+It never writes over a file that already answers to the ID it computed: such a
+file was written by someone, the template would replace it, and the command
+refuses and writes nothing at all. `link` below is how that file gets onto the
+task instead.
+
+### `link` — put an existing brief file on its task
+
+```bash
+node tools/task.mjs link T-0007-01
+```
+
+Adds `T-0007-01` to task T-0007's `briefs` field, for a brief file that already
+exists — written by hand, recovered, or brought in from elsewhere. It refuses an
+ID no file in `doc/brief/` answers to, so it cannot create a reference into
+nothing; a second run adds no duplicate and says it changed nothing.
+
+This is the way out of the one state `brief` cannot resolve: the file is on
+disk, the task does not know it, and the only remaining move used to be editing
+`doc/backlog.md` by hand — which is what this CLI exists to make unnecessary,
+and what an agent working in an isolated worktree cannot do at all.
+
+The brief number comes from the file, not from the task, so linking
+`T-0007-03` to a task that links nothing else leaves 01 and 02 unused. That gap
+is harmless: the number is a label, and `brief` goes on from the highest one the
+task links, never handing out a number it already holds.
 
 ### `note` — append a section to a task's description
 
@@ -738,6 +829,15 @@ dependencies — a `depends` entry pointing at a task that does not exist, a tas
 depending on itself, and dependency cycles of any length (the message names every
 task on the ring).
 
+Two more look at the brief files themselves rather than at the links to them: a
+brief file in `doc/brief/` that no task links — the message either names the task
+that should link it and prints the `link` command that does so, or says there is
+no such task at all — and two files answering to **one** brief id (say
+`T-0007-01-first.md` beside `T-0007-01-second.md`), where only the first is ever
+read by the board and by `task.mjs` alike, so the file you are editing may not be
+the one anybody sees. Both are errors; the second names every file, because
+choosing which to keep is the reader's next act.
+
 Two checks are about the archive in particular: an ID present in **both** files
 (two different tasks would then answer to one name — this is what an interrupted
 `archive` run, or an older briefboard's `add`, leaves behind), and a task in the
@@ -752,6 +852,7 @@ exits `1` otherwise.
 ```bash
 node tools/screenshot.mjs [--lang en|ru|ja] [--width N] [--height N]
                           [--out FILE] [--browser PATH]
+                          [--eval JS | --click SELECTOR]
 ```
 
 Not a task command: it changes nothing and prints one path. It starts a board of
@@ -775,9 +876,24 @@ The options are what a visual criterion actually turns on:
   and `ja` long before it breaks in `en`.
 - `--width` / `--height` — the viewport, `1400x900` by default. Narrow it to see
   what a small window does to the header and the columns.
+- `--out` — where to write the png. Without it the picture goes to
+  `.briefboard/screenshot-<lang>.png`, which is overwritten by the next capture
+  in the same language; give a path of your own to keep several pictures side by
+  side. Whatever you pass, the script prints the path it wrote.
 - `--browser` — the executable, when it is not in the usual place. Without it the
   script looks in the standard install locations and on `PATH`, and if there is
   no browser it says where it looked and exits non-zero.
+- `--eval` — a snippet of JS run in the page once the board has drawn, so that
+  the capture is taken *after* an interaction: `--eval "openTask('T-0007')"`
+  photographs that task's dialog. `--click` is the same thing for the common
+  case of one click — `--click "#label-filter-btn"` opens the label popover —
+  and the two are two ways of saying the same thing, so give one or the other.
+  Whatever exists only after an interaction (a dialog, the label popover, the
+  new-task form) is reachable this way.
+
+A snippet that throws, matches no element, or leaves the page unchanged **fails
+the run and keeps no png** — so a picture you get back is a picture of what you
+asked for, never of an undisturbed board that quietly ignored your snippet.
 
 This is the one command in briefboard that needs something installed (§2).
 
@@ -835,14 +951,14 @@ shows your tasks and gives you these controls:
 - **Blocked only.** The "Blocked" toggle in the header keeps just the tasks that
   are waiting on an unfinished prerequisite. It combines with the other filters
   by AND, so "blocked bugs of Critical priority" is one click away.
-- **Full-text search.** Search over task title and description.
+- **Full-text search.** Search over task title, description, ID and labels.
 - **Multi-select priority filter.** Filter by any combination of `Blocker`,
   `Critical`, `Major`, `Medium`, `Minor`.
 - **Theme toggle.** Switch between light and dark themes.
 - **Language toggle.** Switch the interface language between EN, RU, and JA via
   the `<select>` control.
 - **Create a task with "+ New task".** That button, first in the header next to
-  the title, opens a dialog with title, type, priority and description.
+  the title, opens a dialog with title, type, priority, labels and description.
   Submitting it posts to `POST /api/task`; the server validates the fields,
   assigns the ID and writes the task in status `backlog`. The card shows up on
   the board over SSE, with no page reload.

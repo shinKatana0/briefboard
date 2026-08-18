@@ -11,7 +11,7 @@
 // Run with: npm test
 
 require('./helpers/env.js');
-const { describe, it, after } = require('node:test');
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -19,7 +19,7 @@ const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 const { PRODUCT_ENV_VARS } = require('./helpers/env.js');
-const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const NEUTRALISER = path.join(__dirname, 'helpers', 'env.js');
@@ -47,16 +47,10 @@ const POLLUTED = {
   PORT: '4321',
 };
 
-const dirs = [];
-
-after(async () => {
-  for (const dir of dirs) await removeTree(dir);
-});
-
+// fs.realpathSync: on macOS os.tmpdir() is a symlink, and the fixture below is
+// spawned with this path as its cwd.
 function tmpDir(prefix) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
-  dirs.push(dir);
-  return dir;
+  return fs.realpathSync(tempDir(prefix));
 }
 
 function runFixture(source, extraEnv = {}) {

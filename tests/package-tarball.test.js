@@ -17,6 +17,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { skipOutsideExport } = require('./helpers/public-tree.js');
 
 const ROOT = path.join(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -28,6 +29,28 @@ const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 // tools/test-run.mjs packs it, allowlist or not, which is one real way a dev-only
 // file can slip into a release and the first assertion below is what would say so.
 const ALWAYS_PACKED = [/^package\.json$/, /^README/, /^LICEN[SC]E/];
+
+// Split by whether tools/release-export.mjs leaves the path in the public tree,
+// because that decides whether the assertion has a subject there at all
+// (T-0253). "release tooling" is the group the export removes — itself and
+// RELEASING.md — so in the public tree it is skipped with a reason the reporter
+// prints, rather than passing over two paths that cannot be packed because they
+// do not exist.
+const FORBIDDEN = {
+  'the maintainer\'s files': {
+    'doc/': 'the backlog, its archive and the briefs',
+    'tests/': 'the suite',
+    '.claude/': 'the local agent configuration',
+    '.github/': 'the CI workflows',
+    'CONTRIBUTING.md': 'the instructions for working ON briefboard',
+    'tools/test-run.mjs': 'the test runner',
+    'tools/sync-worker-agent.mjs': 'a development tool',
+  },
+  'release tooling': {
+    'RELEASING.md': 'the release checklist for the private repo',
+    'tools/release-export.mjs': 'the exporter for the public repo',
+  },
+};
 
 let packed;
 
@@ -63,23 +86,27 @@ describe('the published tarball carries the allowlist and nothing else (T-0239)'
   // Named one by one because this is the promise RELEASING.md makes to whoever
   // runs `npm pack --dry-run` before a publish, and because a leak here is a
   // release that cannot be taken back.
-  it('the maintainer\'s data and this repository\'s own tooling stay out', () => {
-    const forbidden = {
-      'doc/': 'the backlog, its archive and the briefs',
-      'tests/': 'the suite',
-      '.claude/': 'the local agent configuration',
-      '.github/': 'the CI workflows',
-      'RELEASING.md': 'the release checklist for the private repo',
-      'CONTRIBUTING.md': 'the instructions for working ON briefboard',
-      'tools/release-export.mjs': 'the exporter for the public repo',
-      'tools/test-run.mjs': 'the test runner',
-      'tools/sync-worker-agent.mjs': 'a development tool',
-    };
-    for (const [prefix, what] of Object.entries(forbidden)) {
-      const hits = packed.filter((f) => f === prefix || f.startsWith(prefix));
-      assert.deepStrictEqual(hits, [], `${what} must not ship: ${hits.join(', ')}`);
-    }
-  });
+  //
+  // Every one of them is asserted to EXIST in this checkout first (T-0253). "npm
+  // did not pack it" is worth nothing about a path that is not there to pack:
+  // the two entries below that the export drops used to pass in the public tree
+  // for that reason — not skipped, not failed, just green and empty. Two of nine
+  // assertions saying nothing is the quieter half of the same trap the skips
+  // above carried, and the premise check is what turns it into a failure.
+  for (const [group, forbidden] of Object.entries(FORBIDDEN)) {
+    it(`the maintainer's data and this repository's own tooling stay out — ${group}`, {
+      skip: group === 'release tooling' && skipOutsideExport('RELEASING.md and tools/release-export.mjs'),
+    }, () => {
+      for (const [prefix, what] of Object.entries(forbidden)) {
+        assert.ok(
+          fs.existsSync(path.join(ROOT, prefix)),
+          `${prefix} is not in this checkout, so "npm did not pack it" would prove nothing about ${what}`
+        );
+        const hits = packed.filter((f) => f === prefix || f.startsWith(prefix));
+        assert.deepStrictEqual(hits, [], `${what} must not ship: ${hits.join(', ')}`);
+      }
+    });
+  }
 
   it('the translated READMEs ship although the allowlist omits them', () => {
     for (const readme of ['README.md', 'README.ru.md', 'README.ja.md']) {

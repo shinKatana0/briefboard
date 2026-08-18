@@ -14,11 +14,11 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawn, spawnSync } = require('node:child_process');
 
-const { parseBacklog } = require('../server/parser.js');
+const { parseBacklog, MAX_LABEL_LEN, MAX_LABELS } = require('../server/parser.js');
 const { REGISTRY_FILE, REGISTRY_VERSION } = require('../server/sessions.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
@@ -32,7 +32,7 @@ function runCli(root, args, input) {
 }
 
 function makeTmpRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-cli-test-'));
+  return tempDir('briefboard-cli-test-');
 }
 
 function backlogPath(root) {
@@ -90,18 +90,60 @@ describe('task.mjs add', () => {
     assert.strictEqual(t.priority, 'Medium');
   });
 
-  it('defaults priority to Medium when the flag value is not one of PRIORITIES', () => {
+  // T-0286. Both used to be replaced by the default: `--type chore` filed a
+  // feature, exit 0, and the only sign was `show` printing a value nobody typed.
+  // Absent still defaults (the test above); typed-and-wrong is now refused.
+  it('refuses a --type outside the list, names the legal values, and files nothing', () => {
     const root = makeTmpRoot();
-    add(root, ['--title', 'Bogus priority', '--priority', 'Extreme']);
+    const res = runCli(root, ['add', '--title', 'Bogus type', '--type', 'chore']);
+    assert.notStrictEqual(res.status, 0, `accepted: ${res.stdout}`);
+    assert.match(res.stderr, /ERROR: type must be one of: feature, bug, external/);
+    assert.deepStrictEqual(readTasks(root), []);
+  });
+
+  it('refuses a --priority outside the list, names the legal values, and files nothing', () => {
+    const root = makeTmpRoot();
+    const res = runCli(root, ['add', '--title', 'Bogus priority', '--priority', 'Extreme']);
+    assert.notStrictEqual(res.status, 0, `accepted: ${res.stdout}`);
+    assert.match(res.stderr, /ERROR: priority must be one of: Blocker, Critical, Major, Medium, Minor/);
+    assert.deepStrictEqual(readTasks(root), []);
+  });
+
+  // A flag typed with nothing after it becomes '' in parseArgs, and an empty
+  // string is a value the caller supplied - not the omission that defaults.
+  it('refuses --type/--priority given empty or with nothing after them', () => {
+    const root = makeTmpRoot();
+    const calls = [
+      ['add', '--title', 'A', '--type', ''],
+      ['add', '--title', 'A', '--priority', ''],
+      ['add', '--title', 'A', '--type'],
+      ['add', '--title', 'A', '--priority'],
+    ];
+    for (const args of calls) {
+      const res = runCli(root, args);
+      assert.notStrictEqual(res.status, 0, `accepted ${args.join(' ')}: ${res.stdout}`);
+      assert.match(res.stderr, /ERROR: (type|priority) must be one of/);
+    }
+    assert.deepStrictEqual(readTasks(root), [], 'none of the four filed anything');
+
+    // And the same command without the flag at all still works.
+    add(root, ['--title', 'A']);
     const [t] = readTasks(root);
+    assert.strictEqual(t.type, 'feature');
     assert.strictEqual(t.priority, 'Medium');
   });
 
-  it('forces type to feature when the flag value is not a known type', () => {
+  it('accepts every legal --type and --priority verbatim', () => {
     const root = makeTmpRoot();
-    add(root, ['--title', 'Bogus type', '--type', 'chore']);
-    const [t] = readTasks(root);
-    assert.strictEqual(t.type, 'feature');
+    for (const type of ['feature', 'bug', 'external']) {
+      const id = add(root, ['--title', `Typed ${type}`, '--type', type]);
+      assert.strictEqual(readTasks(root).find((t) => t.id === id).type, type);
+    }
+    for (const priority of ['Blocker', 'Critical', 'Major', 'Medium', 'Minor']) {
+      const id = add(root, ['--title', `Prioritized ${priority}`, '--priority', priority]);
+      assert.strictEqual(readTasks(root).find((t) => t.id === id).priority, priority);
+    }
+    assert.strictEqual(runCli(root, ['validate']).status, 0);
   });
 
   it('accepts --type external and the result passes validate (T-0092)', () => {
@@ -611,6 +653,283 @@ describe('task.mjs brief', () => {
     assert.match(res.stderr, /ERROR/);
     assert.deepStrictEqual(fs.existsSync(briefDir(root)) ? fs.readdirSync(briefDir(root)) : [], []);
   });
+
+  // T-0264. The brief was written first and `brief` run afterwards to link it —
+  // the backwards order, and the template replaced two finished briefs with no
+  // word about it. `nn` comes from the TASK's own `briefs:` line, so a file the
+  // task does not link is invisible to the numbering and lands under the very
+  // next call.
+  const HANDWRITTEN = '# T-0001-01 · Written by hand\n\nEverything that had to survive.\n';
+
+  it('refuses to write over a file that already holds the computed brief id, and keeps its content', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Brief written by hand']);
+    fs.mkdirSync(briefDir(root), { recursive: true });
+    const existing = path.join(briefDir(root), `${id}-01-temp-leak.md`);
+    fs.writeFileSync(existing, HANDWRITTEN);
+
+    const res = runCli(root, ['brief', id, 'temp-leak']);
+
+    assert.notStrictEqual(res.status, 0, 'the call must be refused, not answered with a path');
+    assert.match(res.stderr, new RegExp(`${id}-01`));
+    assert.match(res.stderr, /temp-leak\.md/);
+    assert.strictEqual(fs.readFileSync(existing, 'utf8'), HANDWRITTEN);
+    // A refused call writes nothing at all: linking the brief would leave the
+    // task claiming a file the command declined to produce.
+    const [t] = readTasks(root);
+    assert.deepStrictEqual(t.briefs, []);
+  });
+
+  it('refuses on the brief id rather than the file name: another slug is still brief 01', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Same id, other slug']);
+    fs.mkdirSync(briefDir(root), { recursive: true });
+    const existing = path.join(briefDir(root), `${id}-01-temp-leak.md`);
+    fs.writeFileSync(existing, HANDWRITTEN);
+
+    const res = runCli(root, ['brief', id, 'something-else']);
+
+    assert.notStrictEqual(res.status, 0);
+    assert.strictEqual(fs.readFileSync(existing, 'utf8'), HANDWRITTEN);
+    // findBriefFile() resolves an id by prefix, so a second T-NNNN-01-*.md file
+    // is a second answer to the same id and the board shows whichever readdir
+    // returns first. Nothing may create that state.
+    assert.deepStrictEqual(fs.readdirSync(briefDir(root)), [`${id}-01-temp-leak.md`]);
+    const [t] = readTasks(root);
+    assert.deepStrictEqual(t.briefs, []);
+  });
+
+  it('still creates the next brief when the existing one is linked to the task', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Two briefs, both linked']);
+    addBrief(root, id, 'first');
+    const first = path.join(briefDir(root), `${id}-01-first.md`);
+    const before = fs.readFileSync(first, 'utf8');
+
+    const second = addBrief(root, id, 'second');
+
+    assert.strictEqual(second, path.join(briefDir(root), `${id}-02-second.md`));
+    assert.strictEqual(fs.readFileSync(first, 'utf8'), before);
+    const [t] = readTasks(root);
+    assert.deepStrictEqual(t.briefs, [`${id}-01`, `${id}-02`]);
+  });
+
+  // The refusal also explains WHY the id was taken, and that sentence has to
+  // describe the rule that produced it: `nn` is one past the highest NN the task
+  // links, and stopped being briefs.length + 1 in T-0267. Set up so the two
+  // rules disagree — the task links 02 and nothing else, so counting says 02 and
+  // the command says 03 (T-0273).
+  it('explains the numbering it actually uses, not the count that left with T-0267', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Linked out of order']);
+    fs.mkdirSync(briefDir(root), { recursive: true });
+    fs.writeFileSync(path.join(briefDir(root), `${id}-02-second.md`), HANDWRITTEN);
+    assert.strictEqual(runCli(root, ['link', `${id}-02`]).status, 0, 'the task links 02 and nothing else');
+    fs.writeFileSync(path.join(briefDir(root), `${id}-03-third.md`), HANDWRITTEN);
+
+    const res = runCli(root, ['brief', id, 'third']);
+
+    assert.strictEqual(res.status, 1, res.stdout);
+    assert.match(res.stderr, new RegExp(`${id}-03 already has a file`));
+    assert.match(res.stderr, /one past the highest/);
+    assert.doesNotMatch(res.stderr, /counts/, 'the count is the algorithm the command no longer uses');
+  });
+});
+
+// The other half of T-0264. Its refusal keeps the content safe, but the state it
+// refuses in — file on disk, task does not link it — had no way out through the
+// CLI: the message could only say "add the id to the `briefs:` line", i.e. edit
+// doc/backlog.md by hand, which is the file this tool exists to keep hands off
+// and the one a worker isolated in a worktree may not touch at all (T-0079).
+describe('task.mjs link (T-0267)', () => {
+  const HANDWRITTEN = '# T-0001-01 · Written by hand\n\nEverything that had to survive.\n';
+
+  function handwritten(root, name, text = HANDWRITTEN) {
+    fs.mkdirSync(briefDir(root), { recursive: true });
+    const file = path.join(briefDir(root), name);
+    fs.writeFileSync(file, text);
+    return file;
+  }
+
+  // The whole way out of the accident, in the order it happens.
+  it('takes a task from "the file exists and I cannot say so" to a linked brief and a valid backlog', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Brief written by hand first']);
+    const file = handwritten(root, `${id}-01-temp-leak.md`);
+
+    const refused = runCli(root, ['brief', id, 'temp-leak']);
+    assert.strictEqual(refused.status, 1, 'brief must still refuse to write over it');
+    assert.match(refused.stderr, new RegExp(`node tools/task\\.mjs link ${id}-01`), 'the refusal names the way out');
+
+    const res = runCli(root, ['link', `${id}-01`]);
+
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.match(res.stdout, new RegExp(`${id}-01`));
+    assert.deepStrictEqual(readTasks(root)[0].briefs, [`${id}-01`]);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), HANDWRITTEN, 'link never touches the file');
+    const validated = runCli(root, ['validate']);
+    assert.strictEqual(validated.status, 0, validated.stderr);
+  });
+
+  it('refuses a brief id no file answers to, writing nothing', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Nothing on disk']);
+
+    const res = runCli(root, ['link', `${id}-01`]);
+
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, new RegExp(`${id}-01`));
+    assert.match(res.stderr, /doc[/\\]brief/, 'the message names where it looked');
+    // A `briefs:` entry pointing at nothing is precisely what validate reports;
+    // this command may not be a way to create one.
+    assert.deepStrictEqual(readTasks(root)[0].briefs, []);
+  });
+
+  it('resolves the file the way the board does: "<id>.md" with no slug counts', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Slugless brief']);
+    handwritten(root, `${id}-01.md`);
+
+    assert.strictEqual(runCli(root, ['link', `${id}-01`]).status, 0);
+    assert.deepStrictEqual(readTasks(root)[0].briefs, [`${id}-01`]);
+  });
+
+  it('a second link of the same id adds no duplicate and says it did nothing', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Linked twice']);
+    handwritten(root, `${id}-01-once.md`);
+    const first = runCli(root, ['link', `${id}-01`]);
+
+    const second = runCli(root, ['link', `${id}-01`]);
+
+    assert.strictEqual(second.status, 0, second.stderr);
+    assert.notStrictEqual(second.stdout, first.stdout, 'a repeat must not print what the first run printed');
+    assert.match(second.stdout, /already links/);
+    assert.deepStrictEqual(readTasks(root)[0].briefs, [`${id}-01`]);
+    assert.match(
+      fs.readFileSync(backlogPath(root), 'utf8'),
+      new RegExp(`- briefs: ${id}-01\\s*$`, 'm'),
+      'the briefs: line itself carries the id once'
+    );
+  });
+
+  it('names the argument it was not given when called bare', () => {
+    const res = runCli(makeTmpRoot(), ['link']);
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /ERROR: link needs the brief id/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs link/);
+  });
+
+  // `link T-0007 T-0007-01` is the shape to expect, because every other command
+  // that touches a task takes the task id first.
+  it('answers the task-id-in-front call with the one that was meant', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Two ids given']);
+    const res = runCli(root, ['link', id, `${id}-01`]);
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, new RegExp(`node tools/task\\.mjs link ${id}-01`));
+  });
+
+  it('refuses an id that is not a brief id, and names the shape it wanted', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Bad id']);
+    for (const bad of [id, `${id}-1`, 'doc/brief/T-0001-01-slug.md']) {
+      const res = runCli(root, ['link', bad]);
+      assert.strictEqual(res.status, 1, `${bad} was accepted`);
+      assert.match(res.stderr, /is not a brief id/);
+      assert.match(res.stderr, /usage: node tools\/task\.mjs link/);
+    }
+    assert.deepStrictEqual(readTasks(root)[0].briefs, []);
+  });
+
+  it('refuses a brief whose task does not exist, without creating one', () => {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'The only task there is']);
+    handwritten(root, 'T-0099-01-ghost.md');
+
+    const res = runCli(root, ['link', 'T-0099-01']);
+
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /T-0099 not found/);
+    assert.strictEqual(readTasks(root).length, 1);
+  });
+
+  it('refuses an id another task already claims, rather than letting two tasks answer for one file', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Owns the id by name']);
+    const other = add(root, ['--title', 'Claims it in its briefs: line']);
+    handwritten(root, `${id}-01-disputed.md`);
+    // Only reachable by hand-editing the field, which PROTOCOL.md allows.
+    fs.writeFileSync(
+      backlogPath(root),
+      fs
+        .readFileSync(backlogPath(root), 'utf8')
+        .replace(new RegExp(`(## ${other}[^]*?)- briefs:\\s*$`, 'm'), `$1- briefs: ${id}-01`)
+    );
+    assert.deepStrictEqual(readTasks(root)[1].briefs, [`${id}-01`], 'fixture: the other task claims it');
+
+    const res = runCli(root, ['link', `${id}-01`]);
+
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, new RegExp(`already linked by ${other}`));
+    assert.deepStrictEqual(readTasks(root)[0].briefs, []);
+  });
+
+  // The trap the brief names: NN comes from the task, so linking a file whose
+  // number is not the next one leaves a hole. Counting the list (briefs.length +
+  // 1) then hands out a number BELOW the linked one and, one call later, the
+  // linked one itself — which `brief` refuses, on a message telling the reader to
+  // link a file that is already linked. That was a dead end with no CLI way out.
+  it('numbers past a hole: brief never hands out a number the task already links', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Hole in the numbering']);
+    handwritten(root, `${id}-03-third.md`);
+    assert.strictEqual(runCli(root, ['link', `${id}-03`]).status, 0);
+
+    const next = addBrief(root, id, 'after-the-hole');
+    const afterThat = addBrief(root, id, 'and-another');
+
+    assert.strictEqual(path.basename(next), `${id}-04-after-the-hole.md`);
+    assert.strictEqual(path.basename(afterThat), `${id}-05-and-another.md`);
+    assert.deepStrictEqual(readTasks(root)[0].briefs, [`${id}-03`, `${id}-04`, `${id}-05`]);
+    // The hole itself stays a hole and harms nothing.
+    assert.ok(!fs.existsSync(path.join(briefDir(root), `${id}-01.md`)));
+    assert.strictEqual(runCli(root, ['validate']).status, 0);
+  });
+
+  // A worker's only route to the shared backlog (T-0079): the CLI runs from
+  // somewhere else entirely and is pointed at the project by AGENTBOARD_ROOT.
+  // Every test here already spawns it that way; this one moves the working
+  // directory too, so the brief file can only be found under that root.
+  it('links into a backlog in another checkout, from a working directory that is not it', () => {
+    const root = makeTmpRoot();
+    const elsewhere = makeTmpRoot();
+    const id = add(root, ['--title', 'Reached through AGENTBOARD_ROOT']);
+    handwritten(root, `${id}-01-remote.md`);
+
+    const res = spawnSync(process.execPath, [CLI_PATH, 'link', `${id}-01`], {
+      cwd: elsewhere,
+      env: { ...process.env, AGENTBOARD_ROOT: root },
+      encoding: 'utf8',
+    });
+
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.deepStrictEqual(readTasks(root)[0].briefs, [`${id}-01`]);
+    assert.ok(!fs.existsSync(path.join(elsewhere, 'doc', 'brief')), 'nothing was written next to the cwd');
+  });
+
+  it('refuses an archived task by name, as every other writing command does', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Closed and moved out']);
+    assert.strictEqual(runCli(root, ['status', id, 'cancelled']).status, 0);
+    handwritten(root, `${id}-01-late.md`);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+
+    const res = runCli(root, ['link', `${id}-01`]);
+
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /is archived/);
+  });
 });
 
 describe('task.mjs note (T-0098)', () => {
@@ -996,6 +1315,243 @@ describe('task.mjs sessions', () => {
   });
 });
 
+// T-0279. Shaped exactly like `depends`: the whole list is ONE comma-separated
+// argument, it REPLACES what was there, and it says what it dropped — the same
+// three properties, because the same accident (a second call meaning "add one
+// more") costs the same here.
+describe('task.mjs labels (T-0279)', () => {
+  function labelledTask() {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Labelled task']);
+    return { root, id };
+  }
+
+  it('sets the whole list and writes it into the task', () => {
+    const { root, id } = labelledTask();
+    const res = runCli(root, ['labels', id, 'ui,docs']);
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.match(res.stdout, /ui, docs/);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['ui', 'docs']);
+    assert.match(fs.readFileSync(backlogPath(root), 'utf8'), /^- labels: ui, docs$/m);
+  });
+
+  it('--clear drops the field, and the line with it', () => {
+    const { root, id } = labelledTask();
+    runCli(root, ['labels', id, 'ui,docs']);
+    const res = runCli(root, ['labels', id, '--clear']);
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.deepStrictEqual(readTasks(root)[0].labels, []);
+    assert.ok(!fs.readFileSync(backlogPath(root), 'utf8').includes('- labels:'));
+  });
+
+  it('a second call REPLACES the list and says what it dropped', () => {
+    const { root, id } = labelledTask();
+    runCli(root, ['labels', id, 'ui,docs']);
+    const res = runCli(root, ['labels', id, 'api']);
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['api']);
+    assert.match(res.stdout, /dropped: ui, docs/);
+    // The call that was meant, ready to be copied.
+    assert.match(res.stdout, new RegExp(`node tools/task\\.mjs labels ${id} ui,docs,api`));
+  });
+
+  it('--clear names what it dropped too', () => {
+    const { root, id } = labelledTask();
+    runCli(root, ['labels', id, 'ui']);
+    assert.match(runCli(root, ['labels', id, '--clear']).stdout, /dropped: ui/);
+  });
+
+  it('a list rewritten to itself dropped nothing and says nothing', () => {
+    const { root, id } = labelledTask();
+    runCli(root, ['labels', id, 'ui,docs']);
+    assert.doesNotMatch(runCli(root, ['labels', id, 'docs,ui']).stdout, /dropped/);
+  });
+
+  it('trims, collapses a repeat and keeps the order written', () => {
+    const { root, id } = labelledTask();
+    assert.strictEqual(runCli(root, ['labels', id, ' ui , docs ,ui']).status, 0);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['ui', 'docs']);
+  });
+
+  // The rules live in server/parser.js and the endpoint applies the same ones
+  // (tests/labels-api.test.js): what is refused here is refused there.
+  const REFUSED = {
+    'a name over the length cap': ['y'.repeat(MAX_LABEL_LEN + 1), new RegExp(String(MAX_LABEL_LEN))],
+    'more names than a task may carry': [
+      Array.from({ length: MAX_LABELS + 1 }, (_, i) => 'l' + i).join(','),
+      new RegExp(String(MAX_LABELS)),
+    ],
+  };
+
+  for (const [name, [value, message]] of Object.entries(REFUSED)) {
+    it(`refuses ${name}, and writes nothing`, () => {
+      const { root, id } = labelledTask();
+      const before = fs.readFileSync(backlogPath(root), 'utf8');
+      const res = runCli(root, ['labels', id, value]);
+      assert.strictEqual(res.status, 1, res.stdout);
+      assert.match(res.stderr, message);
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before);
+    });
+  }
+
+  // A comma cannot reach a name from here at all — it is the separator, and that
+  // is the same list the endpoint's ["ui","docs"] means.
+  it('a comma in the argument separates, it never lands inside a name', () => {
+    const { root, id } = labelledTask();
+    assert.strictEqual(runCli(root, ['labels', id, 'ui,docs']).status, 0);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['ui', 'docs']);
+  });
+
+  it('is case-sensitive: ui and UI are two labels', () => {
+    const { root, id } = labelledTask();
+    runCli(root, ['labels', id, 'ui,UI']);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['ui', 'UI']);
+  });
+
+  it('reports an unknown task and writes nothing', () => {
+    const { root } = labelledTask();
+    const res = runCli(root, ['labels', 'T-9999', 'ui']);
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /T-9999 not found/);
+    assert.deepStrictEqual(readTasks(root)[0].labels, []);
+  });
+
+  it('shows usage when the list is missing', () => {
+    const { root, id } = labelledTask();
+    const res = runCli(root, ['labels', id]);
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /comma-separated list of labels or --clear/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs labels/);
+  });
+
+  it('answers a space-separated list with the comma-separated call that was meant', () => {
+    const { root, id } = labelledTask();
+    const res = runCli(root, ['labels', id, 'ui', 'docs']);
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, new RegExp(`node tools/task\\.mjs labels ${id} ui,docs`));
+    assert.deepStrictEqual(readTasks(root)[0].labels, [], 'the first name must not be taken alone');
+  });
+
+  it('leaves the rest of the task alone, and show reports the field', () => {
+    const { root, id } = labelledTask();
+    runCli(root, ['labels', id, 'ui']);
+    const [t] = readTasks(root);
+    assert.strictEqual(t.title, 'Labelled task');
+    assert.strictEqual(t.status, 'backlog');
+    assert.deepStrictEqual(JSON.parse(runCli(root, ['show', id]).stdout).labels, ['ui']);
+  });
+
+  it('is listed among the commands', () => {
+    assert.match(runCli(makeTmpRoot(), ['help']).stdout, /\blabels\b/);
+  });
+});
+
+// A label at creation (T-0282). The point of the flag is that the rule "every
+// task carries a label" survives being written down: a second command is the one
+// that gets dropped when a session is cut short.
+describe('task.mjs add --labels (T-0282)', () => {
+  it('files a task already carrying them, and prints the id of that task', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Labelled at birth', '--labels', 'ui, docs']);
+    const [task] = readTasks(root);
+    assert.strictEqual(task.id, id, 'the printed id must be the labelled task');
+    assert.deepStrictEqual(task.labels, ['ui', 'docs']);
+    assert.match(fs.readFileSync(backlogPath(root), 'utf8'), /^- labels: ui, docs$/m);
+    // One command, no second call: the whole reason the flag exists.
+    assert.strictEqual(readTasks(root).length, 1);
+  });
+
+  it('with no --labels the task carries none and the file has no labels line at all', () => {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'Plain task']);
+    assert.deepStrictEqual(readTasks(root)[0].labels, []);
+    assert.ok(!fs.readFileSync(backlogPath(root), 'utf8').includes('- labels:'));
+  });
+
+  it('takes the rest of the flags with it, unchanged', () => {
+    const root = makeTmpRoot();
+    add(root, ['--type', 'bug', '--priority', 'Blocker', '--title', 'Both', '--desc', 'Why.', '--labels', 'ui']);
+    const [task] = readTasks(root);
+    assert.strictEqual(task.type, 'bug');
+    assert.strictEqual(task.priority, 'Blocker');
+    assert.strictEqual(task.description, 'Why.');
+    assert.deepStrictEqual(task.labels, ['ui']);
+  });
+
+  it('trims, collapses a repeat and keeps the order written, exactly as `labels` does', () => {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'Messy list', '--labels', ' ui , docs ,ui']);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['ui', 'docs']);
+  });
+
+  // The acceptance criterion, checked the only way that cannot drift: the two
+  // commands are run on the same bad value and their refusals are compared with
+  // each other, not with a string copied into this file.
+  const REFUSED_AT_CREATION = {
+    'a name over the length cap': 'y'.repeat(MAX_LABEL_LEN + 1),
+    'more names than a task may carry': Array.from({ length: MAX_LABELS + 1 }, (_, i) => 'l' + i).join(','),
+  };
+
+  for (const [name, value] of Object.entries(REFUSED_AT_CREATION)) {
+    it(`refuses ${name} in the same words the labels command does, and creates nothing`, () => {
+      const root = makeTmpRoot();
+      const id = add(root, ['--title', 'Something to relabel']);
+      const viaSubcommand = runCli(root, ['labels', id, value]);
+      assert.strictEqual(viaSubcommand.status, 1, viaSubcommand.stdout);
+
+      const before = fs.readFileSync(backlogPath(root), 'utf8');
+      const viaAdd = runCli(root, ['add', '--title', 'Never filed', '--labels', value]);
+      assert.strictEqual(viaAdd.status, 1, viaAdd.stdout);
+      assert.strictEqual(
+        viaAdd.stderr.split('\n')[0],
+        viaSubcommand.stderr.split('\n')[0],
+        'the two commands must refuse the same value in the same words'
+      );
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, 'the task was created anyway');
+      assert.strictEqual(readTasks(root).length, 1);
+    });
+  }
+
+  // A comma inside a name is unreachable from here as it is from `labels`: the
+  // comma is the separator, so this is the third refusal in the shape it can
+  // actually take - a name that is nothing but separators.
+  it('a comma separates and never lands inside a name', () => {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'Comma list', '--labels', 'ui,docs']);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['ui', 'docs']);
+  });
+
+  it('--labels with nothing after it is refused rather than read as "no labels"', () => {
+    const root = makeTmpRoot();
+    const res = runCli(root, ['add', '--title', 'Half a flag', '--labels']);
+    assert.strictEqual(res.status, 1, res.stdout);
+    assert.match(res.stderr, /--labels needs a comma-separated list/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs add/);
+    assert.deepStrictEqual(readTasks(root), [], 'nothing may be created by a refused call');
+  });
+
+  it('the usage line names the flag, and an unknown one is still refused', () => {
+    const res = runCli(makeTmpRoot(), ['add', '--title', 'Typo ahead', '--lables', 'ui']);
+    assert.strictEqual(res.status, 1, res.stdout);
+    assert.match(res.stderr, /add has no flag --lables/);
+    assert.match(res.stderr, /flags of add: .*--labels <value>/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs add .*\[--labels ui,docs\]/);
+  });
+
+  // The non-goal of the brief: nothing here may make a label mandatory. A task
+  // filed without one, and a whole project of them, stay valid.
+  it('validate still passes on a task filed with no labels', () => {
+    const root = makeTmpRoot();
+    const plain = add(root, ['--title', 'No labels here']);
+    const labelled = add(root, ['--title', 'Labelled', '--labels', 'product']);
+    const res = runCli(root, ['validate']);
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.match(res.stdout, /^OK\s*$/);
+    assert.deepStrictEqual(readTasks(root).find((t) => t.id === plain).labels, []);
+    assert.deepStrictEqual(readTasks(root).find((t) => t.id === labelled).labels, ['product']);
+  });
+});
+
 describe('task.mjs profile (T-0108)', () => {
   // The declaration is an environment variable, so the CLI has to be given one:
   // the legal values are the user's, and the CLI reads them exactly where the
@@ -1037,6 +1593,9 @@ describe('task.mjs profile (T-0108)', () => {
     assert.strictEqual(res.status, 1);
     assert.match(res.stderr, /fst/);
     assert.match(res.stderr, /deep, fast/);
+    // A value outside the declared list is a wrong call, so the usage line
+    // comes with the complaint (T-0273).
+    assert.match(res.stderr, /usage: node tools\/task\.mjs profile/);
     assert.strictEqual(readTasks(root)[0].profile, '', 'nothing was written');
   });
 
@@ -1045,6 +1604,9 @@ describe('task.mjs profile (T-0108)', () => {
     const res = run(['profile', id, 'fast']);
     assert.strictEqual(res.status, 1);
     assert.match(res.stderr, /BRIEFBOARD_PROFILES/);
+    // And no usage line here: the call is well formed, there is simply nothing
+    // declared to choose from, so repeating the syntax would answer nothing.
+    assert.doesNotMatch(res.stderr, /usage:/);
     assert.strictEqual(readTasks(root)[0].profile, '');
   });
 
@@ -1102,8 +1664,10 @@ describe('task.mjs refuses what a subcommand has no place for (T-0220)', () => {
     add: ['add', 'Fix the thing', '--title', 'Fix the thing'],
     status: ['status', '{id}', 'open', 'now'],
     depends: ['depends', '{id}', '{other}', '{other}'],
+    labels: ['labels', '{id}', 'ui', 'docs'],
     profile: ['profile', '{id}', 'deep', 'now'],
     brief: ['brief', '{id}', 'my', 'slug'],
+    link: ['link', '{id}', '{other}'],
     note: ['note', '{id}', '--section', 'S', '--text', 'hello', 'again'],
     show: ['show', '{id}', '{other}'],
     list: ['list', 'ready'],
@@ -1238,6 +1802,207 @@ describe('task.mjs refuses what a subcommand has no place for (T-0220)', () => {
     assert.strictEqual(readTasks(root).length, 0);
   });
 });
+
+// The mirror image of T-0220: there the call had one argument too many, here it
+// has one too few. `brief` and `show` had no `if (!id)` guard, so a bare call
+// fell through to the task lookup and came back as "task undefined not found" —
+// a refusal about a task nobody named, and without the usage line every other
+// refusal has printed since T-0220. The reader goes looking for a missing task
+// instead of typing the missing argument (T-0269).
+describe('task.mjs names the task argument it was not given (T-0269)', () => {
+  // Every subcommand whose first positional is the task it acts on. `status`
+  // joined them in T-0273: a bare call was refused there too, but by the check
+  // on the SECOND argument, so the message was about a status value nobody had
+  // reached and carried no usage line.
+  const NEEDS_A_TASK = ['brief', 'show', 'note', 'depends', 'labels', 'profile', 'status'];
+
+  for (const name of NEEDS_A_TASK) {
+    it(`${name}: a call with no task names the missing argument and prints the usage`, () => {
+      const root = makeTmpRoot();
+      add(root, ['--title', 'Untouched']);
+      const before = fs.readFileSync(backlogPath(root), 'utf8');
+
+      const res = runCli(root, [name]);
+
+      assert.strictEqual(res.status, 1, `${name} did not refuse: ${res.stdout}`);
+      assert.match(res.stderr, new RegExp(`ERROR: ${name} needs the task`));
+      assert.doesNotMatch(res.stderr, /undefined/, 'nobody asked about a task named "undefined"');
+      assert.match(res.stderr, new RegExp(`usage: node tools/task\\.mjs ${name}`));
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, 'nothing was written');
+      assert.ok(!fs.existsSync(briefDir(root)), 'and no brief file was created either');
+    });
+  }
+});
+
+// The other half of T-0269, one shape over. `status` and `add` refused a wrong
+// call with die(), so the message that stopped it did not carry the right one —
+// the whole point of the usage line every other refusal has printed since
+// T-0220. And a bare `status` was refused by the check on its SECOND argument,
+// which made it indistinguishable from a call that did name the task (T-0273).
+describe('task.mjs prints the usage line under a refused call (T-0273)', () => {
+  it('status with no arguments and status with only a task are two different answers', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Untouched']);
+
+    const noArgs = runCli(root, ['status']);
+    const noValue = runCli(root, ['status', id]);
+
+    assert.strictEqual(noArgs.status, 1, noArgs.stdout);
+    assert.strictEqual(noValue.status, 1, noValue.stdout);
+    assert.notStrictEqual(
+      noArgs.stderr,
+      noValue.stderr,
+      'both wrong calls answered about the status value, so the output could not tell them apart'
+    );
+    assert.match(noArgs.stderr, /ERROR: status needs the task/);
+    assert.match(noValue.stderr, /ERROR: status must be one of/);
+  });
+
+  it('the status-value refusal lists the legal values AND the usage line', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Untouched']);
+
+    const res = runCli(root, ['status', id, 'nearly-done']);
+
+    assert.strictEqual(res.status, 1, res.stdout);
+    assert.match(res.stderr, /ERROR: status must be one of: backlog, open, ready, in_progress, review, done, cancelled/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs status T-0007 </);
+    assert.strictEqual(readTasks(root)[0].status, 'backlog', 'nothing was written');
+  });
+
+  it('add with no arguments prints the usage line under "--title is required"', () => {
+    const root = makeTmpRoot();
+
+    const res = runCli(root, ['add']);
+
+    assert.strictEqual(res.status, 1, res.stdout);
+    assert.match(res.stderr, /ERROR: --title is required/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs add --type /);
+    assert.strictEqual(readTasks(root).length, 0, 'nothing was written');
+  });
+
+  // The rest of the same list (T-0284). These were left out of the four above
+  // because none is a one-line swap: three come from server/parser.js, which
+  // does not know which subcommand asked; two sit beside `--section is required`
+  // and `--text is required`, which did print the usage line; one is inside
+  // readStdinValue(), shared by two commands; and one is thrown from inside the
+  // write lock. The table is what they have in common - a refusal about the
+  // CALL, so the message that stops it carries the one that would work.
+  //
+  // `usage` is the subcommand the line must name, and it is not always the one
+  // whose code refuses: `--desc -` and `--text -` are refused by the same
+  // function, and the two rows below are the whole proof that it names its
+  // caller rather than a hardcoded default.
+  const CALL_SHAPED = [
+    {
+      what: 'add: a label name the file cannot carry',
+      args: ['add', '--title', 'Never filed', '--labels', 'y'.repeat(MAX_LABEL_LEN + 1)],
+      message: new RegExp(`is longer than ${MAX_LABEL_LEN} characters`),
+      usage: 'add',
+    },
+    {
+      what: 'add: a title that is only whitespace',
+      args: ['add', '--title', '   '],
+      message: /ERROR: title is required/,
+      usage: 'add',
+    },
+    {
+      what: 'add: --desc - with nothing piped in',
+      args: ['add', '--title', 'Never filed', '--desc', '-'],
+      input: '',
+      message: /ERROR: --desc - got nothing on standard input/,
+      usage: 'add',
+    },
+    {
+      // T-0286, and it needed no new call site: the refusal comes out of
+      // addTask() through the same catch the two rows above go through.
+      what: 'add: a --type that is not one of the three',
+      args: ['add', '--title', 'Never filed', '--type', 'chore'],
+      message: /ERROR: type must be one of: feature, bug, external/,
+      usage: 'add',
+    },
+    {
+      what: 'add: a --priority that is not one of the five',
+      args: ['add', '--title', 'Never filed', '--priority', 'Extreme'],
+      message: /ERROR: priority must be one of: Blocker, Critical, Major, Medium, Minor/,
+      usage: 'add',
+    },
+    {
+      what: 'labels: a label name the file cannot carry',
+      args: ['labels', 'T-0001', 'y'.repeat(MAX_LABEL_LEN + 1)],
+      message: new RegExp(`is longer than ${MAX_LABEL_LEN} characters`),
+      usage: 'labels',
+    },
+    {
+      what: 'note: a section heading with a line break in it',
+      args: ['note', 'T-0001', '--section', 'Worker\nreport', '--text', 'anything'],
+      message: /ERROR: --section must not contain line breaks/,
+      usage: 'note',
+    },
+    {
+      what: 'note: a text that is only whitespace',
+      args: ['note', 'T-0001', '--section', 'Worker report', '--text', '   '],
+      message: /ERROR: nothing to append: the text is empty/,
+      usage: 'note',
+    },
+    {
+      what: 'note: --text - with nothing piped in',
+      args: ['note', 'T-0001', '--section', 'Worker report', '--text', '-'],
+      input: '',
+      message: /ERROR: --text - got nothing on standard input/,
+      usage: 'note',
+    },
+    {
+      // The seventh, found while walking the file for the six: `link` has
+      // printed the usage line under exactly this refusal since T-0267, and
+      // `depends` did not.
+      what: 'depends: a token that is not a task id at all',
+      args: ['depends', 'T-0001', 'garbage'],
+      message: /ERROR: "garbage" is not a task id \(expected T-NNNN\)/,
+      usage: 'depends',
+    },
+  ];
+
+  for (const row of CALL_SHAPED) {
+    it(`${row.what}: the message carries the usage line of ${row.usage}`, () => {
+      const root = makeTmpRoot();
+      assert.strictEqual(add(root, ['--title', 'Untouched']), 'T-0001');
+      const before = fs.readFileSync(backlogPath(root), 'utf8');
+
+      const res = runCli(root, row.args, row.input);
+
+      assert.strictEqual(res.status, 1, `not refused: ${res.stdout}`);
+      assert.match(res.stderr, row.message);
+      assert.match(res.stderr, new RegExp(`^usage: node tools/task\\.mjs ${row.usage}\\b`, 'm'));
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, 'nothing was written');
+    });
+  }
+
+  // The other side of the same split, at the three places the table above
+  // touched: a refusal about the STATE of the repository still prints no usage
+  // line, because nothing about the call is wrong and repeating the syntax
+  // answers a question nobody asked. `depends` is the sharp one - two of its
+  // three checks on the same list stayed die(), one line apart from the one that
+  // did not.
+  const STATE_SHAPED = [
+    { what: 'depends: a well-formed id that names no task', args: ['depends', 'T-0001', 'T-9999'] },
+    { what: 'show: a task that is in neither file', args: ['show', 'T-9999'] },
+    { what: 'link: a brief id no file answers to', args: ['link', 'T-0001-01'] },
+  ];
+
+  for (const row of STATE_SHAPED) {
+    it(`${row.what}: refused without a usage line`, () => {
+      const root = makeTmpRoot();
+      add(root, ['--title', 'Untouched']);
+
+      const res = runCli(root, row.args);
+
+      assert.strictEqual(res.status, 1, `not refused: ${res.stdout}`);
+      assert.doesNotMatch(res.stderr, /^usage:/m, 'the call is well formed; the repository is not in that state');
+    });
+  }
+});
+
 
 // `depends` sets the whole list and never adds to it. The word "set" in the docs
 // says so, but only to someone reading them at the moment they add a second

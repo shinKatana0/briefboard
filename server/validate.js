@@ -11,6 +11,8 @@
 // already-defaulted objects) so opeators/CI actually see broken status/type/header lines
 // and dangling brief references instead of them being silently swallowed.
 
+const fs = require('node:fs');
+
 const {
   parseBacklog,
   STATUSES,
@@ -18,7 +20,10 @@ const {
   CLOSED_STATUSES,
   HEADER_RE,
   FIELD_RE,
+  MAX_LABEL_LEN,
+  MAX_LABELS,
   findBriefFile,
+  BRIEF_FILE_RE,
   dependencyCycles,
 } = require('./parser.js');
 
@@ -33,6 +38,34 @@ const HEADER_LOOSE_RE = /^## T-\d{4}/;
 // version must not fail on a part that did not exist then.
 const DATE_RE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/;
 const DATE_SHAPE = 'YYYY-MM-DD or YYYY-MM-DD HH:MM:SS';
+
+// What is wrong with a raw `- labels:` value, or nothing (T-0279). parseBacklog
+// drops a name breaking the rules, so a hand-edited file loses it on the next
+// save without a word - this is what says so first.
+//
+// One check and deliberately no more: the set of labels is implicit, so there is
+// no such thing as an "unknown" label to report, and a "this one looks like that
+// one" warning would fire on every genuinely new label. A validator that cries
+// wolf on the normal path is worse than no check at all.
+function labelProblems(rawValue) {
+  const problems = [];
+  // "- labels:" with nothing after it is an empty list, not an empty item.
+  if (rawValue.trim() === '') return problems;
+  const items = rawValue.split(',').map((s) => s.trim());
+  if (items.some((name) => !name)) {
+    problems.push(`empty label in "${rawValue}" (a stray comma - the empty string is not a label)`);
+  }
+  for (const name of items) {
+    if (name.length > MAX_LABEL_LEN) {
+      problems.push(`label "${name}" is longer than ${MAX_LABEL_LEN} characters`);
+    }
+  }
+  const kept = [...new Set(items.filter(Boolean))];
+  if (kept.length > MAX_LABELS) {
+    problems.push(`${kept.length} labels, and a task carries at most ${MAX_LABELS}`);
+  }
+  return problems;
+}
 
 // The checks that are about ONE file's text: broken headers, ids repeated
 // inside it, raw status/type values. `prefix` names the file when the text is
@@ -96,6 +129,9 @@ function validateFile(text, prefix) {
       if (key === 'type' && !TASK_TYPES.includes(value)) {
         at(`${curId}: invalid raw type "${value}" (must be exactly one of: ${TASK_TYPES.join(', ')})`);
       }
+      if (key === 'labels') {
+        for (const problem of labelProblems(value)) at(`${curId}: ${problem}`);
+      }
       continue;
     }
     // First non-field line after a header ends the fields section for this task,
@@ -132,6 +168,23 @@ function validateFile(text, prefix) {
 // What the archive file is called in a message. The validator is handed text,
 // not paths, and "the archive" would leave the reader hunting for the file.
 const ARCHIVE_NAME = 'backlog-archive.md';
+
+// A file this validator has an opinion about is exactly a file findBriefFile()
+// would resolve: BRIEF_FILE_RE comes from parser.js, which owns the notion, so
+// the two cannot drift apart again the way they did until T-0283.
+
+// The names in briefDir, or none. Missing or unreadable is not an error here:
+// callers pass null (no brief directory at all) and a project may simply have
+// written no brief yet - rule 4 already reports a REFERENCE that does not
+// resolve, which is what makes an unreadable directory visible.
+function briefFileNames(briefDir) {
+  if (!briefDir) return [];
+  try {
+    return fs.readdirSync(briefDir).sort();
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Validate the raw text of doc/backlog.md, and of doc/backlog-archive.md when the
@@ -195,7 +248,84 @@ function validateBacklog(text, briefDir, archiveText) {
     }
   }
 
-  // 5. Dependencies (T-0087). A dangling or self-referential `depends` entry can
+  const knownIds = new Set(all.map((t) => t.id));
+
+  // 5. The other direction: a brief FILE that no task links (T-0268). Rule 4
+  // checks link -> file and nothing checked file -> link, so an unlinked brief
+  // was reported by nothing at all - not here, not by the board, not by the
+  // pre-commit hook. That is the exact state in which two finished briefs were
+  // destroyed: the file was on disk, the card did not link it, and `brief`
+  // therefore computed the very number the file already held (T-0264).
+  //
+  // Read across BOTH files, like every check below this line: tasks move to the
+  // archive and their briefs stay where they are, so looking only at
+  // doc/backlog.md would declare every brief of every closed task an orphan -
+  // 147 of them in this repository, which is not a check, it is noise.
+  //
+  // An ERROR rather than a warning, decided on the count the brief asked for and
+  // not on taste. Measured on this repository 2026-08-17: 206 brief files, 273
+  // tasks across both files, and ZERO orphans. So a hard failure costs nothing
+  // standing, while the state it names is the one that ate content - and since
+  // T-0267 it is fixable with the single command the message prints, which is
+  // what a check that can break a commit has to offer. A warning nobody has to
+  // act on would leave this exactly as loud as it was before: unread.
+  const linked = new Set();
+  for (const t of all) for (const briefId of t.briefs) linked.add(briefId);
+  // Filled by the same pass, spent by rule 5b below: one readdir answers both
+  // questions, and the id -> files grouping is what 5b needs anyway.
+  const filesByBriefId = new Map();
+  for (const name of briefFileNames(briefDir)) {
+    const m = BRIEF_FILE_RE.exec(name);
+    if (!m) continue;
+    const [, taskId, nn] = m;
+    const briefId = `${taskId}-${nn}`;
+    const sameId = filesByBriefId.get(briefId);
+    if (sameId) sameId.push(name);
+    else filesByBriefId.set(briefId, [name]);
+    if (linked.has(briefId)) continue;
+    // Two different accidents, told apart in the wording: a card that exists and
+    // does not link its own brief is one command from being right, while a file
+    // for a task nobody ever filed is a question about where the file came from.
+    errors.push(
+      knownIds.has(taskId)
+        ? `${briefId}: ${name} is in ${briefDir}, but ${taskId} does not link it ` +
+            `(link it: node tools/task.mjs link ${briefId})`
+        : `${briefId}: ${name} is in ${briefDir}, but there is no task ${taskId} in ` +
+            `doc/backlog.md or doc/${ARCHIVE_NAME}`
+    );
+  }
+
+  // 5b. Two files answering to ONE brief id (T-0275). Built on rule 5's pass,
+  // and numbered after it for the same reason: same readdir, same subject.
+  // findBriefFile() resolves an id by prefix, so T-0007-01-first.md and
+  // T-0007-01-second.md are both answers to T-0007-01 and only one of them is
+  // ever served: the board shows that one, the reader may well be editing the
+  // other, and nothing says a word. Rule 5 does not see it - both files carry a
+  // linked id, so neither is an orphan -
+  // and `brief`/`link` only refuse to CREATE the second file (T-0264), which
+  // says nothing about a duplicate that arrived by a rename, a merge or a
+  // recovered copy dropped in beside the original.
+  //
+  // An ERROR, on rule 5's precedent and for its reason. Measured on this
+  // repository 2026-08-17: 206 brief files, 206 distinct ids, ZERO duplicates -
+  // so a hard failure costs nothing standing, while the state it names is one
+  // where the board and the CLI can disagree about what a brief says.
+  //
+  // The message names every file, because the reader's next act is to choose
+  // which to keep and a message naming one of them cannot be acted on. It does
+  // not guess which is stale: that is content, and this validator has no opinion
+  // about content. The names are in the order briefFileNames() returns them,
+  // which is sorted - the same message on every machine.
+  for (const [briefId, names] of filesByBriefId) {
+    if (names.length < 2) continue;
+    errors.push(
+      `${briefId}: ${names.length} files in ${briefDir} answer to this one brief id: ` +
+        `${names.join(', ')} - only the first of them is ever read, by the board and by ` +
+        `task.mjs alike; keep one and rename or delete the rest`
+    );
+  }
+
+  // 6. Dependencies (T-0087). A dangling or self-referential `depends` entry can
   // never be satisfied, so the task it belongs to would stay blocked forever;
   // a cycle blocks every task in it. The cycle message names the participants -
   // "there is a cycle" alone is not something anyone can act on.
@@ -203,7 +333,6 @@ function validateBacklog(text, briefDir, archiveText) {
   // Resolved across both files: a prerequisite that was done and then archived
   // is still a prerequisite, and reporting it as non-existent would turn every
   // archive run into a wall of false errors.
-  const knownIds = new Set(all.map((t) => t.id));
   for (const t of all) {
     for (const depId of t.depends) {
       if (depId === t.id) errors.push(`${t.id}: depends on itself`);

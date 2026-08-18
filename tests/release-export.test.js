@@ -12,15 +12,14 @@
 // the shipped file, not a paraphrase of it.
 
 require('./helpers/env.js');
-const { describe, it, after } = require('node:test');
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
-const { removeTree } = require('./helpers/rm.js');
 const { isPublicTree, skipOutsideExport, SEEDED_IGNORE_RULES } = require('./helpers/public-tree.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const REAL_SCRIPT = path.join(__dirname, '..', 'tools', 'release-export.mjs');
 
@@ -29,12 +28,6 @@ const REAL_SCRIPT = path.join(__dirname, '..', 'tools', 'release-export.mjs');
 // the public tree; see tests/helpers/public-tree.js for why absence would be the
 // wrong key.
 const SKIP_NO_SCRIPT = skipOutsideExport('tools/release-export.mjs');
-
-const dirs = [];
-
-after(async () => {
-  for (const dir of dirs) await removeTree(dir);
-});
 
 function git(args, cwd) {
   const res = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
@@ -51,8 +44,7 @@ function write(root, rel, text) {
 
 // A repo shaped like this one: shipped files plus the dev-only task data.
 function makeRepo() {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-release-export-')));
-  dirs.push(root);
+  const root = fs.realpathSync(tempDir('briefboard-release-export-'));
 
   fs.mkdirSync(path.join(root, 'tools'), { recursive: true });
   fs.copyFileSync(REAL_SCRIPT, path.join(root, 'tools', 'release-export.mjs'));
@@ -76,8 +68,7 @@ function makeRepo() {
 }
 
 function exportFrom(root) {
-  const outDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-public-'))) + path.sep + 'tree';
-  dirs.push(path.dirname(outDir));
+  const outDir = fs.realpathSync(tempDir('briefboard-public-')) + path.sep + 'tree';
   const res = spawnSync(process.execPath, [path.join(root, 'tools', 'release-export.mjs'), '--out', outDir], {
     cwd: root,
     encoding: 'utf8',
@@ -130,8 +121,7 @@ describe('release-export: the public tree', () => {
 
   it('refuses to write into a non-empty dir', { skip: SKIP_NO_SCRIPT }, () => {
     const root = makeRepo();
-    const outDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-public-')));
-    dirs.push(outDir);
+    const outDir = fs.realpathSync(tempDir('briefboard-public-'));
     fs.writeFileSync(path.join(outDir, 'already-here.txt'), 'x\n');
 
     const res = spawnSync(process.execPath, [path.join(root, 'tools', 'release-export.mjs'), '--out', outDir], {
@@ -175,8 +165,7 @@ describe('the public-tree marker', () => {
   // skip. This fixture is that accident: every file the naive key would look for is
   // gone, and nothing the export writes is there. The marker must stay false.
   it('stays false on a dev tree that lost the very files those tests read', () => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-lost-files-')));
-    dirs.push(root);
+    const root = fs.realpathSync(tempDir('briefboard-lost-files-'));
     write(root, 'README.md', '# briefboard\n');
     write(root, 'doc/brief/T-0001-01-thing.md', '# brief\n');
     // This repository's own .gitignore, which carries none of the seeded rules.
@@ -190,9 +179,8 @@ describe('the public-tree marker', () => {
   // Each mark alone is one plausible accident away from being true here, which is
   // why both are required; these fix that so it cannot be relaxed unnoticed.
   it('needs both marks, not either one', () => {
-    const onlyGitkeep = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-mark-keep-')));
-    const onlyRules = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-mark-rules-')));
-    dirs.push(onlyGitkeep, onlyRules);
+    const onlyGitkeep = fs.realpathSync(tempDir('briefboard-mark-keep-'));
+    const onlyRules = fs.realpathSync(tempDir('briefboard-mark-rules-'));
 
     write(onlyGitkeep, 'doc/brief/.gitkeep', '');
     write(onlyGitkeep, '.gitignore', 'node_modules\n');

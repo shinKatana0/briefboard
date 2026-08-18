@@ -14,7 +14,6 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 const { createSessionRunner } = require('../server/sessions.js');
 const gitOpsModule = require('../server/git.js');
@@ -22,6 +21,7 @@ const { createGitOps } = gitOpsModule;
 const { parseBacklog } = require('../server/parser.js');
 const { stripProse } = require('./helpers/js-source.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
@@ -55,7 +55,7 @@ const roots = [];
 const runners = [];
 
 function makeDir() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-worktree-test-'));
+  const root = tempDir('briefboard-worktree-test-');
   roots.push(root);
   return root;
 }

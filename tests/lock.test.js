@@ -10,8 +10,8 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawn } = require('node:child_process');
+const { tempDir } = require('./helpers/tmp.js');
 
 // Set BEFORE requiring parser.js: it reads the budget once at load. Without it
 // the in-process "foreign lock held past the timeout" test below would sit in
@@ -39,7 +39,7 @@ const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 const STRESS_LOCK_TIMEOUT_MS = '60000';
 
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-lock-test-'));
+  return tempDir('briefboard-lock-test-');
 }
 
 function mkTask(id) {

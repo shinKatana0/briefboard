@@ -24,6 +24,8 @@
  *                                    task waiting on session questions
  *   /api/task/T-0007/profile (POST) → sets the task's run profile and nothing
  *                                    else; no status, no session (T-0108)
+ *   /api/task/T-0007/labels (POST) → replaces the task's label list and nothing
+ *                                    else; any status, no session (T-0279)
  *   /api/task/T-0007/review (POST) → starts the review session on a task that is
  *                                    ALREADY in review; changes no status
  *   /api/task/T-0007/done   (POST) → narrow review -> done transition, refused
@@ -60,7 +62,9 @@ const {
   ANSWER_STATUSES,
   SESSION_QUESTIONS_HEADING,
   PRIORITIES,
+  STATUSES,
   TASK_TYPES,
+  checkLabels,
   LOCK_TIMEOUT_CODE,
 } = require('./parser');
 const { createSessionRunner } = require('./sessions');
@@ -82,7 +86,7 @@ const {
 
 const ROOT = path.resolve(__dirname, '..');
 // AGENTBOARD_ROOT lets a single installation serve any project:
-//   AGENTBOARD_ROOT=/path/to/project node ~/tools/agentboard/server/server.js
+//   AGENTBOARD_ROOT=/path/to/project node ~/tools/briefboard/server/server.js
 const PROJECT = process.env.AGENTBOARD_ROOT ? path.resolve(process.env.AGENTBOARD_ROOT) : ROOT;
 const DOC_DIR = path.join(PROJECT, 'doc');
 const BRIEF_DIR = path.join(DOC_DIR, 'brief');
@@ -459,8 +463,8 @@ function boardTasks(text) {
 // name are read once at start-up), so it is serialized alongside the parsed
 // board. The two session kinds are reported apart because the board's drop
 // confirmation has to say whether an agent will actually be started (T-0084).
-function boardMetaJson() {
-  return JSON.stringify({
+function boardMeta() {
+  return {
     sessions: {
       enabled: sessionRunner.enabled,
       worker: sessionRunner.workerEnabled,
@@ -478,7 +482,18 @@ function boardMetaJson() {
       profileUsedBy: sessionRunner.profileUsedBy,
     },
     project: { name: PROJECT_NAME },
-  });
+  };
+}
+function boardMetaJson() {
+  return JSON.stringify(boardMeta());
+}
+
+// The answer for a board whose backlog cannot be read (T-0247). The meta rides
+// along with it because none of it comes from that file: the project name in
+// particular is read at start-up, and dropping it made the header of a board
+// with no backlog lose the one word that says WHICH project is being looked at.
+function missingBacklogBody() {
+  return { tasks: [], error: 'doc/backlog.md not found', ...boardMeta() };
 }
 
 // Re-reads the backlog when its mtime+size changed and records which tasks now
@@ -845,6 +860,56 @@ function handleProfileTask(req, res, id) {
   });
 }
 
+// Replaces the task's whole label list, and only that: no status changes and
+// nothing is started (T-0279).
+//
+// Every status is accepted, which is the deliberate difference from /profile
+// above: a run profile past `review` describes nothing that will ever run, while
+// a label is classification, and a closed task is exactly what someone filters
+// by label in a report. An archived task is still refused — applyNarrowWrite
+// reads and writes BACKLOG alone, so a task living in doc/backlog-archive.md is
+// a 404, and the archive's read-only rule arrives by itself.
+function handleLabelsTask(req, res, id) {
+  readJsonBody(req, (err, body) => {
+    try {
+      if (err) {
+        const status = err.httpStatus || 400;
+        json(res, status, { error: err.message }, status === 413 ? { Connection: 'close' } : undefined);
+        return;
+      }
+      // The list's shape is this endpoint's own: JSON has arrays, so the whole
+      // list arrives as one, and a bare string is a caller who sent the CLI's
+      // comma-separated argument to the wrong door. Absent means the empty list,
+      // as it does on /profile.
+      if (body.labels !== undefined && body.labels !== null && !Array.isArray(body.labels)) {
+        throw badRequest('labels must be an array of strings');
+      }
+      // The name rules live in server/parser.js, shared with the parser and with
+      // `tools/task.mjs labels`; here they only change shape into a 400.
+      let labels;
+      try {
+        labels = checkLabels(body.labels);
+      } catch (e) {
+        throw badRequest(e.message);
+      }
+      applyNarrowWrite(
+        res,
+        id,
+        STATUSES,
+        // Unreachable while every status is accepted, and kept because
+        // applyNarrowWrite's contract is a status list plus what to say about it.
+        'task is in no status whose labels can be changed',
+        (task) => {
+          task.labels = labels;
+          return { ok: true, id, labels: task.labels };
+        }
+      );
+    } catch (e) {
+      failRequest(res, e);
+    }
+  });
+}
+
 // ---------- starting a session on a task already in its own status ----------
 // Two buttons in the card's dialog, not drops: the task is ALREADY in the status
 // whose session this is, so there is no column to move it into and no status to
@@ -1032,6 +1097,7 @@ const TASK_ACTIONS = {
   start: handleStartTask,
   answer: handleAnswerTask,
   profile: handleProfileTask,
+  labels: handleLabelsTask,
   review: handleReviewSession,
   done: handleDoneTask,
   'remove-worktree': handleRemoveWorktree,
@@ -1047,7 +1113,7 @@ const TASK_ACTION_RE = new RegExp(
 );
 
 // The actions that read a JSON body, and therefore have a Content-Type to check.
-const BODY_ACTIONS = ['answer', 'profile'];
+const BODY_ACTIONS = ['answer', 'profile', 'labels'];
 
 function badRequest(message) {
   const e = new Error(message);
@@ -1141,7 +1207,25 @@ function validateNewTask(body) {
   if (!PRIORITIES.includes(priority)) bad(`priority must be one of: ${PRIORITIES.join(', ')}`);
 
   const description = validateDescriptionText(body.description, 'description');
-  return { title, type, priority, description };
+
+  // The list's shape is the one POST /api/task/:id/labels already takes: JSON
+  // has arrays, so the whole list arrives as one, and a bare string is a caller
+  // who sent the CLI's comma-separated argument to the wrong door. Absent, null
+  // and [] all mean "no labels" - a task without one is not an error anywhere
+  // (T-0280), and this endpoint does not make it one (T-0282).
+  if (body.labels !== undefined && body.labels !== null && !Array.isArray(body.labels)) {
+    bad('labels must be an array of strings');
+  }
+  // The name rules live in server/parser.js, shared with the parser and with
+  // `tools/task.mjs add --labels`; here they only change shape into a 400, and
+  // they run before addTask() so a refused list writes nothing.
+  let labels;
+  try {
+    labels = checkLabels(body.labels);
+  } catch (e) {
+    bad(e.message);
+  }
+  return { title, type, priority, description, labels };
 }
 
 // The task always lands in `backlog`; this endpoint can set no other status
@@ -1279,7 +1363,7 @@ const handleRequest = (req, res) => {
     try {
       stats = boardStats();
     } catch {
-      json(res, 200, { tasks: [], error: 'doc/backlog.md not found' });
+      json(res, 200, missingBacklogBody());
       return;
     }
     // Derived from mtime+size alone, so a matching If-None-Match short-circuits
@@ -1295,7 +1379,7 @@ const handleRequest = (req, res) => {
       body = refreshBoard(stats).json;
     } catch {
       // File vanished between statSync and readFileSync (or became unreadable).
-      json(res, 200, { tasks: [], error: 'doc/backlog.md not found' });
+      json(res, 200, missingBacklogBody());
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ETag: etag });
@@ -1432,7 +1516,7 @@ const handleRequest = (req, res) => {
       json(res, 403, { error: 'cross-origin request rejected' });
       return;
     }
-    // Only /answer and /profile carry a body; the others take none, and
+    // Only the BODY_ACTIONS carry a body; the others take none, and
     // demanding a Content-Type from a request that has nothing to declare would
     // break the callers they already have.
     if (BODY_ACTIONS.includes(actionMatch[2]) && !jsonContentType(res, req)) return;
@@ -1496,9 +1580,18 @@ function createBoardServer() {
   // Bad HTTP framing is rejected by Node's parser before the request handler
   // runs, and by default it just destroys the socket. Log it so a flood of
   // garbage requests is at least visible.
+  //
+  // The one thing that reaches this handler and is NOT garbage: a socket the
+  // peer opened and dropped, which Node reports here as `read ECONNRESET` on an
+  // already-destroyed socket (T-0248). Chrome's speculative preconnect does it
+  // on an ordinary visit, so the healthy log of a board someone merely looked at
+  // carried two of these and nothing else — alarming the reader and diluting the
+  // very signal the line exists to raise. Both halves are checked, so an
+  // ECONNRESET on a socket still worth answering would still be reported.
   board.on('clientError', (err, socket) => {
-    console.error(`clientError: ${err.message}`);
-    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+    const dropped = err.code === 'ECONNRESET' && !(socket && socket.writable);
+    if (!dropped) console.error(`clientError: ${err.message}`);
+    if (socket && socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
   });
   // Slowloris hardening. These bound how long a request may take to ARRIVE, so
   // they never cut off an already-accepted long-lived SSE response.

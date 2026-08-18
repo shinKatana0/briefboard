@@ -10,7 +10,6 @@ const { describe, it, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
 // hang the run (T-0124).
@@ -19,6 +18,7 @@ const { fetch } = require('./helpers/bounded.js');
 const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- fixture helpers ----------
 
@@ -27,7 +27,7 @@ const { removeTree } = require('./helpers/rm.js');
 // withBriefDir:false starts a project WITHOUT doc/brief/ — used to exercise the
 // lazy watch that must attach when the first brief appears at runtime (T-0047).
 function makeFixtureRoot({ backlog = '', briefFiles = {}, withBriefDir = true } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-server-test-'));
+  const root = tempDir('briefboard-server-test-');
   const docDir = path.join(root, 'doc');
   const briefDir = path.join(docDir, 'brief');
   if (withBriefDir || Object.keys(briefFiles).length) {
@@ -118,7 +118,7 @@ async function openSse(baseUrl) {
 // ui/index.html leaves the working copy dirty whenever the run dies before the
 // restoring finally (T-0111).
 function makeInstallCopy() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-install-'));
+  const dir = tempDir('briefboard-install-');
   fs.cpSync(path.join(__dirname, '..', 'server'), path.join(dir, 'server'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'ui'));
   fs.copyFileSync(path.join(__dirname, '..', 'ui', 'index.html'), path.join(dir, 'ui', 'index.html'));

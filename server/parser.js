@@ -30,7 +30,7 @@ const TRANSITIONS = {
 };
 
 // The fields this version understands; everything else field-shaped is unknown.
-const KNOWN_FIELDS = ['type', 'status', 'created', 'closed', 'briefs', 'depends', 'profile'];
+const KNOWN_FIELDS = ['type', 'status', 'created', 'closed', 'briefs', 'labels', 'depends', 'profile'];
 
 // An unknown "- key: value" line survives a read-write cycle verbatim (T-0095).
 // briefboard versions read each other's files, and before this rule an older
@@ -47,6 +47,81 @@ function extraFields(fields) {
     if (!KNOWN_FIELDS.includes(key)) extra[key] = value;
   }
   return extra;
+}
+
+// ---------- labels (T-0279) ----------
+// The set of labels is implicit: a label exists while some task carries it,
+// there is no registry, and creating one is typing a new name. So these rules
+// are the whole contract, and they live here once because the parser, the CLI
+// and POST /api/task/:id/labels all apply them - three copies of "trim, cap,
+// dedupe" is how the three would come to disagree about "UI ".
+const MAX_LABEL_LEN = 32;
+// Keeps a card's label row bounded: measured at the board's 220px column, eight
+// short names take three lines and push nothing off the card, while an
+// unbounded list is a card nobody can read - and a bad request could send one.
+const MAX_LABELS = 8;
+// The comma is the list separator; CR/LF would end the "- labels:" line itself,
+// exactly as a newline in a title ends the header line.
+const LABEL_FORBIDDEN_RE = /[,\r\n]/;
+
+// A list arrives either as the field's / the CLI argument's comma-separated
+// text or as the endpoint's JSON array; both mean the same list.
+function labelItems(value) {
+  if (Array.isArray(value)) return value;
+  return String(value == null ? '' : value).split(',');
+}
+
+// Lenient, for reading a file nobody validated: anything breaking the rules is
+// dropped rather than thrown, the way parseBacklog defaults an unknown status.
+// `validate` is what reports such a line to a human (server/validate.js).
+//
+// Names are compared as written, case-sensitively - `ui` and `UI` are two
+// labels. Folding case would need a canonical display spelling and a rule for
+// which of two spellings wins; the editor offering the set already in use is
+// what actually keeps them from diverging.
+function normalizeLabels(value) {
+  const out = [];
+  for (const item of labelItems(value)) {
+    if (typeof item !== 'string') continue;
+    const name = item.trim();
+    if (!name || name.length > MAX_LABEL_LEN || LABEL_FORBIDDEN_RE.test(name)) continue;
+    if (!out.includes(name)) out.push(name);
+    if (out.length === MAX_LABELS) break;
+  }
+  return out;
+}
+
+// Strict, for a caller who is about to write: it says what is wrong instead of
+// silently storing something else. Throws a plain Error on the first violation;
+// the CLI turns it into a refusal and the endpoint into a 400.
+//
+// Whitespace-only items are dropped rather than refused: they are what a
+// trailing comma produces, in the CLI argument and in the field alike, and the
+// duplicate rule is a collapse for the same reason.
+function checkLabels(value) {
+  if (value !== undefined && value !== null && !Array.isArray(value) && typeof value !== 'string') {
+    throw new Error('labels must be an array of strings');
+  }
+  const out = [];
+  for (const item of labelItems(value)) {
+    if (typeof item !== 'string') throw new Error('labels must be an array of strings');
+    const name = item.trim();
+    if (!name) continue;
+    if (LABEL_FORBIDDEN_RE.test(name)) {
+      throw new Error(
+        `"${name}" is not a label: a label may not contain a comma or a line break ` +
+          '(the comma separates the list)'
+      );
+    }
+    if (name.length > MAX_LABEL_LEN) {
+      throw new Error(`"${name}" is longer than ${MAX_LABEL_LEN} characters`);
+    }
+    if (!out.includes(name)) out.push(name);
+  }
+  if (out.length > MAX_LABELS) {
+    throw new Error(`a task carries at most ${MAX_LABELS} labels, got ${out.length}`);
+  }
+  return out;
 }
 
 const HEADER_RE = /^## (T-\d{4})\s*·\s*(Blocker|Critical|Major|Medium|Minor)\s*·\s*(.+)$/;
@@ -141,6 +216,7 @@ function parseBacklog(text) {
       .split(',')
       .map((s) => s.trim())
       .filter((s) => BRIEF_ID_RE.test(s)),
+    labels: normalizeLabels(t.fields.labels),
     depends: (t.fields.depends || '')
       .split(',')
       .map((s) => s.trim())
@@ -153,6 +229,23 @@ function parseBacklog(text) {
   }));
 }
 
+// What a FILE in doc/brief/ has to be called to be a brief: "<id>.md" or
+// "<id>-<slug>.md", capturing the task id and the two-digit number so that a
+// name yields the brief id it claims. The one definition of that notion in the
+// codebase - findBriefFile() below matches by it, validate.js imports it -
+// because two definitions answered differently: this one requires the .md
+// extension, the prefix match findBriefFile used until T-0283 did not, so a
+// T-0001-01-old.md.bak beside T-0001-01-real.md was served as the brief while
+// validate, correctly, had no opinion about it at all.
+//
+// Everything else in doc/brief/ is left alone deliberately:
+// tools/release-export.mjs stands a .gitkeep up in the emptied brief directory
+// and the suite recognises a public tree BY it (tests/helpers/public-tree.js),
+// so treating a file that is not a brief as one would break the release export.
+// Notes, drafts under a name of their own, a README, an editor backup: same
+// answer, none of them claim a brief id.
+const BRIEF_FILE_RE = /^(T-\d{4})-(\d{2})(?:-[^\\/]*)?\.md$/;
+
 // Resolve a brief id to its file in briefDir ("<id>.md" or "<id>-<slug>.md"),
 // or null. Shared by server.js (GET /api/brief/:id) and validate.js (dangling
 // brief-reference check) so both use identical lookup rules. The BRIEF_ID_RE
@@ -161,9 +254,23 @@ function parseBacklog(text) {
 function findBriefFile(briefDir, briefId) {
   if (!BRIEF_ID_RE.test(briefId)) return null;
   if (!briefDir || !fs.existsSync(briefDir)) return null;
+  // Sorted before the pick, so that when two files answer to one id the board's
+  // GET /api/brief/:id, `task.mjs link` and `validate` all name the SAME file
+  // instead of whichever readdir happened to return first - an order that can
+  // differ between two machines, and on one machine after a rename. Sorting
+  // PICKS a file; it does not resolve the ambiguity. Only a human can do that,
+  // and `validate` is what tells them the ambiguity exists (T-0275).
   const match = fs
     .readdirSync(briefDir)
-    .find((f) => f === briefId + '.md' || f.startsWith(briefId + '-'));
+    .sort()
+    .find((f) => {
+      // A candidate is a brief FILE claiming this id, not merely a name that
+      // starts with it. Without the extension test a backup or a reject file
+      // shadows the brief it was made from (T-0283), and since T-0275's sort it
+      // shadows it consistently rather than intermittently.
+      const m = BRIEF_FILE_RE.exec(f);
+      return m !== null && `${m[1]}-${m[2]}` === briefId;
+    });
   return match ? path.join(briefDir, match) : null;
 }
 
@@ -496,6 +603,9 @@ function serializeBacklog(tasks, preamble) {
         `- closed: ${t.closed || '—'}`,
         `- briefs: ${t.briefs.join(', ')}`,
       ];
+      // Optional for the same reason as `depends` below, and doubly so: most
+      // tasks carry no label at all.
+      if (t.labels && t.labels.length) lines.push(`- labels: ${t.labels.join(', ')}`);
       // Written only when there is something to write: an unconditional line
       // would add an empty "- depends:" to every task in a file people read by
       // eye, and would rewrite every existing backlog on the first save.
@@ -780,12 +890,38 @@ function archiveClosedTasks(backlogPath, { dryRun = false } = {}) {
 //
 // The id is computed inside updateBacklog()'s cross-process lock, on the freshest
 // snapshot of the file, so two concurrent creators can never hand out the same id.
-function addTask(backlogPath, { title, type, priority, description } = {}) {
+function addTask(backlogPath, { title, type, priority, description, labels } = {}) {
   const cleanTitle = String(title == null ? '' : title).trim();
   if (!cleanTitle) throw new Error('title is required');
-  const cleanType = TASK_TYPES.includes(type) ? type : DEFAULT_TASK_TYPE;
-  const cleanPriority = PRIORITIES.includes(priority) ? priority : 'Medium';
+  // Absent versus given, and only the second one is an error: no type at all is
+  // the ordinary call and still files a `feature`, but a value the caller typed
+  // and got wrong is refused instead of replaced - replacing it wrote a task
+  // under a type nobody asked for, exit 0, with `show` as the only sign (T-0286).
+  // An empty string is a typed value, hence `== null` and not a falsiness test:
+  // `--type ""` and a dangling `--type` are mistakes, not omissions.
+  //
+  // This is the same strict-writer/lenient-reader split as checkLabels() versus
+  // normalizeLabels(): parseBacklog() goes on defaulting an unknown `- type:` to
+  // `feature`, because reading a file someone else (or an older briefboard)
+  // wrote must not fail on one bad line.
+  //
+  // The wording is validateNewTask()'s, so the CLI and POST /api/task say the
+  // same thing about the same mistake.
+  const cleanType = type == null ? DEFAULT_TASK_TYPE : type;
+  if (!TASK_TYPES.includes(cleanType)) {
+    throw new Error(`type must be one of: ${TASK_TYPES.join(', ')}`);
+  }
+  const cleanPriority = priority == null ? 'Medium' : priority;
+  if (!PRIORITIES.includes(cleanPriority)) {
+    throw new Error(`priority must be one of: ${PRIORITIES.join(', ')}`);
+  }
   const cleanDescription = String(description == null ? '' : description).trim();
+  // Strict like the title, lenient like the rest is not an option here: an
+  // unwritable name must stop the creation instead of being quietly dropped, and
+  // both callers already refuse it earlier with a message of their own (T-0282).
+  // Absent stays the ordinary case — checkLabels(undefined) is the empty list,
+  // and a task with no labels is not a format error.
+  const cleanLabels = checkLabels(labels);
   return updateBacklog(backlogPath, (tasks) => {
     // Both files, or archiving would hand out T-0001 a second time: the ids of
     // the closed tasks are exactly the ones that left the backlog, and a
@@ -808,6 +944,7 @@ function addTask(backlogPath, { title, type, priority, description } = {}) {
       created: nowStamp(),
       closed: '',
       briefs: [],
+      labels: cleanLabels,
       depends: [],
       profile: '',
       extra: {},
@@ -830,10 +967,15 @@ module.exports = {
   TASK_TYPES,
   DEFAULT_TASK_TYPE,
   KNOWN_FIELDS,
+  MAX_LABEL_LEN,
+  MAX_LABELS,
+  normalizeLabels,
+  checkLabels,
   TRANSITIONS,
   HEADER_RE,
   FIELD_RE,
   BRIEF_ID_RE,
+  BRIEF_FILE_RE,
   TASK_ID_RE,
   DEPENDS_SATISFIED,
   SESSION_QUESTIONS_SECTION,

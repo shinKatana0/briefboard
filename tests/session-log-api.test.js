@@ -15,7 +15,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
 // hang the run (T-0124).
@@ -27,6 +26,7 @@ const { startBoard } = require('./helpers/board.js');
 // succeeds for a killed-but-unreaped process, so a test writing it itself reads
 // a zombie as a live session (T-0202, T-0209).
 const { isProcessAlive } = require('../server/sessions.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- fixture helpers ----------
 
@@ -79,7 +79,7 @@ const activeServers = [];
 const activeRoots = [];
 
 async function setup(extraEnv) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-session-log-test-'));
+  const root = tempDir('briefboard-session-log-test-');
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), sampleBacklog());
   activeRoots.push(root);

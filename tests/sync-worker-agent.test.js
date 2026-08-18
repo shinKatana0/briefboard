@@ -13,9 +13,9 @@ const { describe, it, before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+const { tempDir } = require('./helpers/tmp.js');
 
 const ROOT = path.join(__dirname, '..');
 const CLI = path.join(ROOT, 'tools', 'sync-worker-agent.mjs');
@@ -27,7 +27,7 @@ before(async () => {
 
 // A project tree with nothing in it but the two files the script cares about.
 function makeFixture(workerDoc, copy) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-sync-'));
+  const root = tempDir('briefboard-sync-');
   fs.mkdirSync(path.join(root, 'agents'), { recursive: true });
   fs.mkdirSync(path.join(root, '.claude', 'agents'), { recursive: true });
   fs.writeFileSync(path.join(root, 'agents', 'WORKER.md'), workerDoc);

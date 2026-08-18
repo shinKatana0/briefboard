@@ -14,6 +14,7 @@ Each task is a section that starts with a level-two header of strictly this form
 - created: 2026-07-23
 - closed: —
 - briefs: T-0007-01, T-0007-02
+- labels: ui, docs
 - depends: T-0005, T-0006
 
 Free-form task description in markdown. May be multi-line,
@@ -31,8 +32,36 @@ contain lists, code, etc. Ends at the next `## T-...`.
 | `created`  | Date and time of creation, `YYYY-MM-DD HH:MM:SS` (machine local time). Earlier versions wrote the date alone, so `YYYY-MM-DD` is accepted as well; anything else is an error. |
 | `closed`   | Date and time of completion/cancellation, same two shapes as `created`; while not closed — the `—` character. Set in exactly the closing statuses: `done` and `cancelled` carry a date, every other status carries `—`. `tools/task.mjs validate` checks both directions (T-0170). |
 | `briefs`   | Comma-separated list of brief IDs; if there are no briefs — empty.     |
+| `labels`   | Comma-separated list of the user's own labels, in the order written. **Optional line: written only when the list is non-empty**, so a task with no labels has no `labels` line at all. Set it with `tools/task.mjs labels` or from the card's dialog. The set of labels is **implicit**: there is no registry and nothing declares them — a label exists while some task carries it, and the last task dropping it is what makes it disappear. Names follow the rules below. |
 | `depends`  | Comma-separated list of task IDs this task cannot start before. **Optional line: it is written only when the list is non-empty**, so a task with no prerequisites has no `depends` line at all. Set it with `tools/task.mjs depends`. |
 | `profile`  | The run profile of this task's agent sessions — one value out of the list the USER declares in `BRIEFBOARD_PROFILES`. **Optional line: written only when non-empty**; empty means "as usual", i.e. the first declared profile. Set it with `tools/task.mjs profile`. briefboard never interprets the value: it checks that it is in the declared list and substitutes it into the command template as `{profile}`, exactly as it does `{id}`. What a profile *means* — a model, a reasoning level, another agent — belongs to whoever wrote that template. A value outside the list does not start a session at all. |
+
+### Label names (T-0279)
+
+A label is trimmed, and the empty string is not a label. It may not contain a comma — that is
+the list separator — nor CR/LF, which would end the `- labels:` line exactly as a newline in a
+title ends the header line. It is at most **32 characters**, and one task carries at most
+**8 labels**, which is what keeps a card's label row bounded — measured at the board's 220px
+column, eight short names take three lines and nothing on the card is pushed out of sight,
+while an unbounded list would be a card no longer readable, and a bad request could make one.
+A name repeated within one task is collapsed, keeping the first occurrence.
+
+Everything else is allowed — spaces inside a name, non-Latin letters, emoji. This is the
+user's own vocabulary and the format has no reason to have an opinion about it: the
+`product` / `internal` pair every task in briefboard's own backlog carries (T-0280) is that
+repository's own convention, not part of this format, and nothing in the tooling knows those
+two names.
+
+Names are compared **as written, case-sensitively**: `ui` and `UI` are two different labels.
+Folding case was considered and rejected — it needs a canonical display spelling and a rule
+for which of two spellings wins, and what actually keeps them from diverging is the card's
+editor offering the labels already in use, so typing a new one is a deliberate act.
+
+The reader is lenient and the writers are strict: `parseBacklog` drops a name breaking these
+rules rather than fail, while `tools/task.mjs labels` and the endpoint below refuse the call.
+`tools/task.mjs validate` reports a hand-written line that breaks them, and reports nothing
+else about labels — with an implicit set there is no such thing as an unknown label, and a
+"this one looks like that one" warning would fire on every genuinely new one.
 
 ### The shape of a field line (T-0097)
 
@@ -111,7 +140,7 @@ What follows from it, and is not negotiable:
 - **`depends` may cross the border**, and an archived prerequisite counts as satisfied like
   any other closed one.
 - **Every writing command refuses an archived task by name** — `status`, `note`, `depends`,
-  `profile`, `brief` — saying that it is archived, not that it does not exist. `note` on a
+  `labels`, `profile`, `brief`, `link` — saying that it is archived, not that it does not exist. `note` on a
   closed task is accepted while the task is still in the backlog; once archived it is not.
 - **`tools/task.mjs validate` checks both files** and reports an ID present in both, plus
   anything in the archive that is not `done`/`cancelled`.
@@ -210,10 +239,17 @@ Known, accepted trade-off: description text that literally begins with `\## ` or
 
 ## 2. The doc/brief/ folder
 
-- File name: `T-NNNN-MM-slug.md`, where `T-NNNN` is the task ID, `MM` is the sequential number
-  of the brief within the task (01, 02, ...), and `slug` is a short Latin-letter name with dashes.
+- File name: `T-NNNN-MM-slug.md`, where `T-NNNN` is the task ID, `MM` is the number of the
+  brief within the task (01, 02, ...), and `slug` is a short Latin-letter name with dashes.
+  `MM` only ever grows — `brief` takes one past the highest the task links — so a gap is
+  possible and harmless: the number is a label, not a position in the list.
 - One-to-many relationship: a task may have several briefs.
-- The brief ID (`T-NNNN-MM`) must be added to the task's `briefs` field.
+- The brief ID (`T-NNNN-MM`) must be added to the task's `briefs` field. For a file the tool
+  creates, `tools/task.mjs brief` does it. For a file that already exists — written by hand,
+  recovered, brought in from elsewhere — it is `tools/task.mjs link T-NNNN-MM`, which refuses
+  an id no file answers to. Neither the field nor the file is edited by hand to make the two
+  agree: a brief nobody links is invisible to the numbering, and that is how two finished
+  briefs were once overwritten (T-0264, T-0267).
 - The first line of the brief is the header `# T-NNNN-MM · Brief name`.
 
 Brief template:
@@ -277,7 +313,7 @@ What is in / what is out.
 5. Dates are always the actual current moment, written in the shape the field table gives —
    never a guessed or back-dated one.
 6. **The exceptions** — `ui/index.html` may reach `doc/backlog.md` directly, bypassing the
-   CLI/orchestrator, but only through these eleven narrow server endpoints (three of which
+   CLI/orchestrator, but only through these twelve narrow server endpoints (three of which
    write nothing to the backlog at all):
    - `POST /api/task/:id/cancel` (T-0017) — drag & drop a card onto the Cancelled row, and
      only for a single transition `backlog`/`open` → `cancelled`. The server itself verifies
@@ -318,8 +354,9 @@ What is in / what is out.
      own git worktree; a session that fails to start does not undo the transition.
    - `POST /api/task` (T-0074) — the "+" button on the board creates a task. The new task is
      **always** created in status `backlog` (this endpoint can set no other status) and with
-     no briefs; the server validates every field (title, type, priority, description) and is
-     the only side that assigns the ID.
+     no briefs; the server validates every field (title, type, priority, description, and the
+     optional `labels` array by the same rules as `/labels`, an absent or empty one meaning
+     none) and is the only side that assigns the ID.
    - `POST /api/task/:id/answer` (T-0085) — the answer form in the card's dialog, for a task
      whose description carries a `### Session questions` section and which is in one of the
      statuses a session can be stopped in: `open`, where the briefing session asks,
@@ -348,6 +385,16 @@ What is in / what is out.
      value the board would later refuse to run never reaches the file. A `done`/`cancelled`
      task is refused with 409 — its sessions are behind it. The board offers exactly the
      declared list and shows no control at all when nothing is declared.
+
+   - `POST /api/task/:id/labels` (T-0279) — the label editor in the card's dialog. It replaces
+     the whole `labels` list and nothing else: **no status changes and no session is started**.
+     The body is `{"labels": ["ui", "docs"]}`; an absent or empty list clears the field, and
+     anything failing the name rules above is refused with 400 naming the violation, so a name
+     the file could not carry never reaches it. Every status is accepted, which is the
+     deliberate difference from `/profile` — a run profile past `review` describes nothing that
+     will ever run, while a label is classification and a closed task is exactly what someone
+     filters by label in a report. An archived task is still a 404: the endpoint reads and
+     writes `doc/backlog.md` alone.
 
    - `POST /api/task/:id/review` (T-0122) — the "start the review session" button in the card's
      dialog. It is **not** a transition and it writes nothing: the task must ALREADY be in
@@ -390,7 +437,7 @@ What is in / what is out.
    `in_progress` has one only for the single step out of `ready`, and `done` only the one above,
    out of `review` and behind the merge check. `backlog` has one too, and it is the one step of
    the graph that runs in both directions (T-0141).
-   What that check reads is a twelfth route, `GET /api/git/:id`: the
+   What that check reads is a thirteenth route, `GET /api/git/:id`: the
    task's branch, whether HEAD contains it, its worktree and whether that tree is clean. It is
    a read, it is asked for when a card is opened or rechecked rather than on every board
    update, and it changes nothing at all.

@@ -28,6 +28,7 @@ const { SPAWN_WAIT_BUDGET_MS, waitFor } = require('./helpers/wait.js');
 // succeeds for a killed-but-unreaped process, so a test writing it itself reads
 // a zombie as a live session (T-0202, T-0209).
 const { isProcessAlive } = require('../server/sessions.js');
+const { tempDir } = require('./helpers/tmp.js');
 const SSE_CONNECT_TIMEOUT_MS = 10000;
 
 const cleanups = [];
@@ -41,7 +42,7 @@ function sleep(ms) {
 }
 
 function makeRoot() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-shutdown-test-'));
+  const root = tempDir('briefboard-shutdown-test-');
   cleanups.push(() => removeTree(root));
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), '# Backlog\n');

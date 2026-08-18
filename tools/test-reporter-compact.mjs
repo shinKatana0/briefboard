@@ -1,9 +1,14 @@
-// Default reporter for `npm test` (T-0105). Measured 2026-08-14: the spec
-// reporter printed 1061 lines / 75014 chars on a green run — ~18k tokens that an
-// agent re-reads three to six times per task, all of it lines saying a test
-// passed. Only that green noise is dropped: a failure still carries the file,
-// the full test path, the message, the diff, the stack and the file's own
-// stdout/stderr, and the tests/pass/fail totals are printed in both modes.
+// Default reporter for `npm test` (T-0105). A test that passed costs one
+// character here and a whole line under the spec reporter, so what an agent
+// re-reads three to six times per task shrinks by about two orders of
+// magnitude — that ratio is the reason this file exists and it does not go
+// stale. The absolute figures do, because they grow with the suite: measured
+// 2026-08-17 at 2024 tests, one green run each, 48 lines / 2478 chars (~620
+// tokens) compact against 2644 lines / 194853 chars (~48.7k) verbose, a token
+// counted as four characters.
+// Only that green noise is dropped: a failure still carries the file, the full
+// test path, the message, the diff, the stack and the file's own stdout/stderr,
+// and the tests/pass/fail totals are printed in both modes.
 // A skipped test is not green noise either — it is a test that verified nothing
 // — so each one is listed with the reason it gave (T-0244).
 // Full spec output: npm run test:verbose

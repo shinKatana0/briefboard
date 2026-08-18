@@ -26,6 +26,7 @@ const { readJson, answerOf } = require('./helpers/response.js');
 const { freePort, occupyPort, waitForBanner } = require('./helpers/board.js');
 const { AUTO_PORT_VALUE } = require('../server/listen.js');
 const { serializeBacklog, parseBacklog } = require('../server/parser.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const BIN_PATH = path.join(__dirname, '..', 'bin', 'briefboard-init.mjs');
 
@@ -34,7 +35,7 @@ function runInit(cwd) {
 }
 
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-init-test-'));
+  return tempDir('briefboard-init-test-');
 }
 
 function backlogPath(dir) {

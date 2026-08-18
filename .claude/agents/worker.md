@@ -176,6 +176,18 @@ the CSS is not the same check, and nobody after you can make up for it: the
 reviewer's permissions are narrower than yours, not wider, so a visual criterion
 you skip is a criterion nobody in the loop ever verifies (T-0143).
 
+A dialog, a popover, a form — anything that exists only after an interaction —
+is photographed by putting the interaction in front of the capture (T-0281):
+
+```
+node tools/screenshot.mjs --eval "openTask('T-0007')"
+node tools/screenshot.mjs --click "#label-filter-btn"
+```
+
+The snippet runs after the board has drawn, and the run fails with no picture
+kept if it throws or leaves the page unchanged — so a png you get back is a png
+of what you asked for, never of an undisturbed board.
+
 The script needs Chrome or Edge on the machine — the one thing in briefboard
 that needs anything installed. Without one it says so and exits non-zero; that
 is a fact about the machine, so report it, do not work around it.
@@ -210,6 +222,12 @@ and the example below is one of them, not the only allowed shape.
 What you must not do with a finding: fix it quietly (your task grows and nobody
 reviewed the extra), widen your own scope to swallow it, or leave it only in your
 report — a report is read once, a card stays.
+
+Label it in the same breath, if the project you are in labels its tasks: in
+briefboard's own backlog every task carries exactly one of `product` /
+`internal`, set with `node tools/task.mjs labels T-0110 product` right after the
+`add` that printed the id, and which of the two it is is decided in
+`agents/ORCHESTRATOR.md` §1 — do not re-derive the rule here.
 
 File it against the SHARED checkout, exactly as you write statuses. **A session
 the board started** — no prefix:

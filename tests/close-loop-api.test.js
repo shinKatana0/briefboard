@@ -14,7 +14,6 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 // Bounded, so no request here can hang the run (T-0124).
 const { fetch } = require('./helpers/bounded.js');
@@ -22,6 +21,7 @@ const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
 const { parseBacklog } = require('../server/parser.js');
 const { removeTree } = require('./helpers/rm.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 function git(args, cwd) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
@@ -67,7 +67,7 @@ const activeRoots = [];
 // A project that is also a git repository with one commit on `main`, and
 // .briefboard/ ignored exactly as in a real project.
 function makeProject() {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-close-loop-')));
+  const root = fs.realpathSync(tempDir('briefboard-close-loop-'));
   activeRoots.push(root);
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog());
@@ -195,7 +195,7 @@ describe('GET /api/git/:id', () => {
   });
 
   it('says the project is not a git working tree instead of failing', async () => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-close-loop-bare-')));
+    const root = fs.realpathSync(tempDir('briefboard-close-loop-bare-'));
     activeRoots.push(root);
     fs.mkdirSync(path.join(root, 'doc'), { recursive: true });
     fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog());

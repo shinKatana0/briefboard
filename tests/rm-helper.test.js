@@ -8,13 +8,13 @@ require('./helpers/env.js');
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const { removeTree, RM_POLL_MS } = require('./helpers/rm.js');
+const { removeTree, RM_POLL_MS, RM_BUDGET_MS } = require('./helpers/rm.js');
 const { waitFor } = require('./helpers/wait.js');
 const { stopProcess } = require('./helpers/bounded.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const WIN = process.platform === 'win32';
 
@@ -72,6 +72,29 @@ describe('removeTree waits out what still holds the directory (T-0195)', () => {
 
     assert.equal(calls.n, 1, 'retried an error that will never clear');
   });
+
+  // The budget was raised 10 s → 45 s against a fresh measurement (T-0238: what
+  // it bounds turned out to be a session tree still dying, not the cwd lag it
+  // was written for, and 10 s was under the p50 of that). What must survive the
+  // raise is the reason the budget is bounded at all: a directory nothing will
+  // ever release has to fail HERE, with the message above, while there is still
+  // room in the per-test backstop — otherwise the run reports a hang and says
+  // nothing about which directory or why. This is what a further raise would
+  // have to notice.
+  it('gives up well inside the per-test backstop, so a held directory fails and does not read as a hang', () => {
+    const runner = fs.readFileSync(path.join(__dirname, '..', 'tools', 'test-run.mjs'), 'utf8');
+    const backstop = Number((runner.match(/BRIEFBOARD_TEST_TIMEOUT_MS\s*\|\|\s*'(\d+)'/) || [])[1]);
+    assert.ok(
+      Number.isFinite(backstop),
+      'the per-test backstop could not be read out of tools/test-run.mjs — this test is what keeps ' +
+        'the removal budget under it, so it has to be told where the number now lives'
+    );
+    assert.ok(
+      RM_BUDGET_MS * 2 < backstop,
+      `a removal that spends ${RM_BUDGET_MS}ms leaves too little of the ${backstop}ms backstop for the ` +
+        'test itself: a genuinely held directory would time the test out instead of failing with a reason'
+    );
+  });
 });
 
 // The real thing, and the reason the helper exists. Elsewhere a directory can be
@@ -87,7 +110,7 @@ describe('a process whose cwd is the directory holds it, on Windows (T-0195)', (
     'is waited out: the removal returns once the holder is gone',
     { skip: !WIN && 'a cwd holds no directory on this platform' },
     async () => {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-rm-test-'));
+      const dir = tempDir('briefboard-rm-test-');
       const ready = path.join(dir, 'ready');
       const holder = spawn(
         process.execPath,

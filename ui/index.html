@@ -130,6 +130,33 @@
   .blocked-toggle:hover { border-color: #2E3945; color: var(--text); }
   .blocked-toggle.active { background: var(--prio-blocker); color: var(--chip-ink); border-color: var(--prio-blocker); }
 
+  /* Label filter (T-0279). A popover and not a row of buttons like
+     .priority-filter: that row is fixed at five and this set grows without
+     limit, while the header is already clipped below ~1000px (T-0143). Same
+     reason it is not a .tf-btn - the type filter's handler resets `active` on
+     every .tf-btn it finds. */
+  .label-filter { position: relative; }
+  .label-filter-btn {
+    font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 9px 2px; cursor: pointer; transition: background .12s, border-color .12s, color .12s;
+  }
+  .label-filter-btn:hover { border-color: #2E3945; color: var(--text); }
+  .label-filter-btn.active { background: var(--st-open); border-color: var(--st-open); color: var(--chip-ink); }
+  .label-filter-menu {
+    position: absolute; top: calc(100% + 4px); left: 0; z-index: 40;
+    min-width: 160px; max-height: 320px; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+  }
+  .label-filter-menu[hidden] { display: none; }
+  .label-filter-menu label {
+    display: flex; align-items: center; gap: 7px; cursor: pointer;
+    font: 12px var(--mono); color: var(--text); padding: 3px 4px; border-radius: 4px;
+  }
+  .label-filter-menu label:hover { background: var(--surface-2); }
+  .label-filter-menu input { width: auto; margin: 0; }
+
   /* Search box (T-0042): shares the .tf-btn look (mono font, theme surface/
      border/colors) with the type filter so both read as one "filtering"
      cluster, but needs its own overrides since it holds free-form typed text
@@ -259,6 +286,18 @@
      hue - a card must never leave "we are waiting on someone else" looking like
      a bug we could go and fix. */
   .tag-external { font: 600 10px var(--mono); color: var(--st-review); border: 1px solid color-mix(in srgb, var(--st-review) 50%, transparent); border-radius: 4px; padding: 1px 5px; }
+  /* Labels (T-0279) get a row of their own under the title, never the `.top`
+     row: that row carries exceptional state - blocked, awaiting an answer, a
+     session, the watchdog - and a label is ordinary classification that must not
+     read as an alarm. No colour of their own either (the board's rule from
+     T-0144 is "label and place, no colour spent"); a palette per label is a
+     separate decision nobody has asked for. */
+  .card .labels { display: flex; flex-wrap: wrap; gap: 4px 5px; margin-top: 6px; }
+  .label-chip {
+    font: 500 10px var(--mono); color: var(--muted);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px;
+    background: var(--surface-inset);
+  }
   .card .title { font-size: 13.5px; font-weight: 500; }
   .card.closed-task .title { color: var(--muted); }
   .card .foot { display: flex; gap: 10px; margin-top: 7px; font: 11px var(--mono); color: var(--muted); }
@@ -358,6 +397,19 @@
   .session-flag.interrupted { color: var(--p1); border-color: color-mix(in srgb, var(--p1) 50%, transparent); }
   @keyframes session-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
+  /* Card marker for a running session whose process tree the board has just
+     failed to read (T-0236, T-0242). Dashed and muted, alone among the markers:
+     the four above are properties of the task or of its session, while this one
+     is a hole in what the board knows about itself — a dashed outline says
+     "incomplete" without spending a hue, and a hue here would be read as a
+     status the task does not have. It only ever lands on a card that already
+     carries the live-session dot, so it must not compete with it either. */
+  .tree-flag {
+    font: 600 10px var(--mono); color: var(--muted);
+    border: 1px dashed var(--border); border-radius: 4px; padding: 1px 5px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
   /* The watchdog's mark (T-0159): the board's own observation that the status
      and what git shows do not agree. Filled where the other three markers are
      outlined — at 10px a fifth outline hue would just be a fourth shade of the
@@ -413,6 +465,8 @@
   }
   .card-action h3 { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
   .card-action-what { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-bottom: 10px; }
+  /* A block with nothing to press: what it says IS the whole of it (T-0242). */
+  .card-action-what:last-child { margin-bottom: 0; }
   .card-action-row button { font-size: 12px; text-transform: none; letter-spacing: normal; padding: 5px 14px 4px; }
   /* Said where the action would have been, not in place of the whole block: the
      board knows the session is impossible here and says which variable turns it
@@ -452,6 +506,25 @@
   /* A disabled action still says why, next to itself (T-0121, T-0144). */
   .closing-actions button[disabled] { opacity: .5; cursor: not-allowed; }
   .closing-why { font-size: 12px; color: var(--muted); }
+
+  /* ---- the board speaking about itself (T-0247) ---- */
+  /* Not a task and not a status, so it borrows the inset panel every card block
+     uses and spends no colour on itself: on this board colour means status, and
+     an empty board with no backlog behind it is not one of the five. It sits
+     above the columns because the columns are precisely what is misleading —
+     five empty ones read as "no tasks yet", which is a different fact. */
+  .board-note {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin: 0 0 16px; background: var(--surface-inset);
+    max-width: 760px;
+  }
+  .board-note h2 { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+  .board-note p { font-size: 13px; color: var(--text); line-height: 1.6; margin: 0 0 8px; }
+  .board-note p:last-child { margin-bottom: 0; }
+  .board-note code {
+    font: 12px var(--mono); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 5px; padding: 3px 7px; user-select: text; overflow-wrap: anywhere;
+  }
 
   /* ---- what the task cost (T-0116) ---- */
   /* Same inset panel as the closing block, and next to it: both are what the
@@ -507,6 +580,10 @@
     outline: none; border-color: var(--st-open);
   }
   .task-form .invalid { border-color: var(--p0); }
+  /* The label field is the card dialog's editor, dropped into a form whose
+     inputs are all full-width: without this it would take a row of its own
+     below the chips instead of sitting beside them (T-0282). */
+  .task-form .label-editor input { width: auto; }
   .form-error { min-height: 18px; margin-top: 10px; font: 12px var(--mono); color: var(--p0); }
   .form-actions { display: flex; gap: 8px; margin-top: 4px; }
   .form-actions button { padding: 5px 14px 4px; }
@@ -521,6 +598,20 @@
   /* The honest note under the selector (T-0121): the choice is stored either
      way, so the note explains, it does not disable. */
   .profile-note { font: 11px var(--mono); color: var(--muted); margin-top: 4px; max-width: 46em; }
+
+  /* ---- label editor (inside the task dialog, T-0279) ---- */
+  .label-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .label-editor .label-chip { display: inline-flex; align-items: center; gap: 5px; }
+  .label-editor .label-drop {
+    font: 500 11px var(--mono); line-height: 1; color: var(--muted);
+    background: none; border: none; padding: 0; cursor: pointer;
+  }
+  .label-editor .label-drop:hover { color: var(--p0); }
+  .label-editor input {
+    font: 12px var(--mono); color: var(--text); background: var(--surface-inset);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; min-width: 11em;
+  }
+  .label-editor input:focus { outline: none; border-color: var(--st-open); }
 
   /* ---- answer form (inside the task dialog, T-0085) ---- */
   .answer-form { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 12px; }
@@ -550,6 +641,10 @@
     <button class="prio-toggle" data-priority="Minor" title="Minor">▽</button>
   </div>
   <button id="blocked-filter" class="blocked-toggle" type="button" aria-pressed="false"></button>
+  <div class="label-filter" id="label-filter" hidden>
+    <button id="label-filter-btn" class="label-filter-btn" type="button" aria-expanded="false"></button>
+    <div id="label-filter-menu" class="label-filter-menu" hidden></div>
+  </div>
   <input type="search" id="search-filter" class="tf-btn search-input" placeholder="">
   <button id="export-excel" class="tf-btn" type="button">Export Excel</button>
   <select id="lang-toggle" class="tf-btn">
@@ -562,6 +657,7 @@
   <div id="live"><span class="dot"></span><span id="live-text">live</span></div>
 </header>
 <main>
+  <div class="board-note" id="board-note" hidden></div>
   <div class="board" id="board"></div>
   <details class="strip" id="strip-done"></details>
   <details class="strip" id="strip-cancelled"></details>
@@ -599,10 +695,11 @@ const I18N = {
     confirm_start: 'Start task {id} "{title}"?\n\nAn agent session will be started: it works in its own git branch and writes and commits code there.',
     confirm_start_no_session: 'Start task {id} "{title}"?\n\nNo worker command is configured (BRIEFBOARD_WORKER_CMD), so no session will be started — the task is only marked as taken into work.',
     start_failed: 'Failed to start the task',
-    search_placeholder: 'Search title/description…',
+    search_placeholder: 'Search title/description/labels…',
     theme_toggle_to_light: 'Switch to light theme', theme_toggle_to_dark: 'Switch to dark theme',
     new_task_button: 'New task', new_task_title: 'New task',
     field_title: 'Title', field_type: 'Type', field_priority: 'Priority',
+    field_labels: 'Labels',
     field_description: 'Description', create_button: 'Create', cancel_button: 'Cancel',
     title_required: 'A title is required', create_failed: 'Failed to create the task',
     busy_retry: 'The backlog is busy right now — try again',
@@ -712,6 +809,19 @@ const I18N = {
     watch_no_commits_note: '{branch} exists but carries no commits of its own, and the task is in review — there is nothing in it to read.',
     watch_unmerged_label: 'not merged',
     watch_unmerged_note: 'The task is done and {branch} is not merged into {head}. A branch that was squashed or rebased into {head} reads the same way here.',
+    board_missing_title: 'No backlog file yet',
+    board_missing_what: 'This board reads doc/backlog.md, and this project has none. briefboard does not bring one along — what would be in it belongs to you, not to briefboard — so the file is created by the first task you add, and the board picks it up without a restart.',
+    board_missing_how: 'Create it:',
+    board_error_title: 'The board could not be read',
+    tree_unknown_label: 'no process record',
+    tree_unknown_title: 'Processes not recorded',
+    tree_unknown_note: 'The board could not read the process table, so what this session started is not written down. Until it can be, a board that goes down leaves nothing here to clean up by, and the agents under this session go on running. It keeps retrying. ({reason})',
+    meta_labels: 'labels', empty_labels: 'none',
+    labels_add_placeholder: 'add a label…',
+    labels_remove: 'Remove the label {label}',
+    labels_failed: 'Failed to change the labels',
+    filter_labels: 'Labels', filter_labels_title: 'Show only tasks carrying one of the selected labels',
+    xlsx_col_labels: 'Labels',
   },
   ru: {
     filter_all: 'Все', filter_feature: 'Фича', filter_bug: 'Баг', tag_bug: 'баг',
@@ -738,10 +848,11 @@ const I18N = {
     confirm_start: 'Взять задачу {id} «{title}» в работу?\n\nБудет запущена агентская сессия: она работает в отдельной git-ветке, пишет код и коммитит его туда.',
     confirm_start_no_session: 'Взять задачу {id} «{title}» в работу?\n\nКоманда воркера не настроена (BRIEFBOARD_WORKER_CMD), сессия не запустится — задача просто пометится взятой в работу.',
     start_failed: 'Не удалось взять задачу в работу',
-    search_placeholder: 'Поиск по названию/описанию…',
+    search_placeholder: 'Поиск по названию/описанию/меткам…',
     theme_toggle_to_light: 'Переключить на светлую тему', theme_toggle_to_dark: 'Переключить на тёмную тему',
     new_task_button: 'Новая задача', new_task_title: 'Новая задача',
     field_title: 'Название', field_type: 'Тип', field_priority: 'Приоритет',
+    field_labels: 'Метки',
     field_description: 'Описание', create_button: 'Создать', cancel_button: 'Отмена',
     title_required: 'Нужно указать название', create_failed: 'Не удалось создать задачу',
     busy_retry: 'Бэклог сейчас занят — повторите попытку',
@@ -851,6 +962,19 @@ const I18N = {
     watch_no_commits_note: 'Ветка {branch} есть, но своих коммитов в ней нет, а задача на ревью — смотреть в ней нечего.',
     watch_unmerged_label: 'не влита',
     watch_unmerged_note: 'Задача завершена, а {branch} не влита в {head}. Ветка, попавшая в {head} squash-ом или ребейзом, выглядит здесь так же.',
+    board_missing_title: 'Файла бэклога ещё нет',
+    board_missing_what: 'Доска читает doc/backlog.md, а в этом проекте его нет. briefboard его с собой не приносит — то, что в нём будет, ваша работа, а не инструмента, — поэтому файл создаётся первой добавленной задачей, и доска подхватит его без перезапуска.',
+    board_missing_how: 'Создать:',
+    board_error_title: 'Доску не удалось прочитать',
+    tree_unknown_label: 'нет учёта процессов',
+    tree_unknown_title: 'Процессы не записаны',
+    tree_unknown_note: 'Доске не удалось прочитать таблицу процессов, поэтому то, что запустила эта сессия, не записано. Пока это так, упавшая доска не оставит здесь ничего, по чему можно прибрать, а агенты под этой сессией продолжат работать. Доска продолжает пытаться. ({reason})',
+    meta_labels: 'метки', empty_labels: 'нет',
+    labels_add_placeholder: 'добавить метку…',
+    labels_remove: 'Убрать метку {label}',
+    labels_failed: 'Не удалось изменить метки',
+    filter_labels: 'Метки', filter_labels_title: 'Показывать только задачи с одной из выбранных меток',
+    xlsx_col_labels: 'Метки',
   },
   ja: {
     filter_all: 'すべて', filter_feature: '機能', filter_bug: 'バグ', tag_bug: 'バグ',
@@ -877,10 +1001,11 @@ const I18N = {
     confirm_start: 'タスク {id}「{title}」に着手しますか?\n\nエージェントセッションが開始されます。専用の git ブランチでコードを書き、コミットします。',
     confirm_start_no_session: 'タスク {id}「{title}」に着手しますか?\n\nワーカーのコマンド（BRIEFBOARD_WORKER_CMD）が未設定のため、セッションは開始されません。タスクは作業中として記録されるだけです。',
     start_failed: 'タスクに着手できませんでした',
-    search_placeholder: 'タイトル・説明を検索…',
+    search_placeholder: 'タイトル・説明・ラベルを検索…',
     theme_toggle_to_light: 'ライトテーマに切り替え', theme_toggle_to_dark: 'ダークテーマに切り替え',
     new_task_button: '新規タスク', new_task_title: '新規タスク',
     field_title: 'タイトル', field_type: '種類', field_priority: '優先度',
+    field_labels: 'ラベル',
     field_description: '説明', create_button: '作成', cancel_button: 'キャンセル',
     title_required: 'タイトルは必須です', create_failed: 'タスクの作成に失敗しました',
     busy_retry: 'バックログが使用中です — もう一度お試しください',
@@ -990,6 +1115,19 @@ const I18N = {
     watch_no_commits_note: '{branch} はありますが、そのブランチ自身のコミットはありません。タスクはレビュー中ですが、中に見るものがありません。',
     watch_unmerged_label: '未マージ',
     watch_unmerged_note: 'タスクは完了ですが、{branch} は {head} にマージされていません。squash やリベースで {head} に取り込まれたブランチも、ここでは同じように見えます。',
+    board_missing_title: 'バックログファイルがまだありません',
+    board_missing_what: 'このボードは doc/backlog.md を読みますが、このプロジェクトにはありません。中身になるのはツールのものではなくあなたの作業なので、briefboard はこのファイルを同梱しません。最初のタスクを追加した時点で作成され、ボードは再起動なしでそれを読み込みます。',
+    board_missing_how: '作成するには:',
+    board_error_title: 'ボードを読み取れませんでした',
+    tree_unknown_label: 'プロセス未記録',
+    tree_unknown_title: 'プロセスが未記録です',
+    tree_unknown_note: 'ボードはプロセス一覧を読み取れなかったため、このセッションが起動したものは記録されていません。その間にボードが停止すると、後片付けの手がかりはここに残らず、このセッション配下のエージェントは動き続けます。ボードは再試行を続けます。({reason})',
+    meta_labels: 'ラベル', empty_labels: 'なし',
+    labels_add_placeholder: 'ラベルを追加…',
+    labels_remove: 'ラベル {label} を外す',
+    labels_failed: 'ラベルを変更できませんでした',
+    filter_labels: 'ラベル', filter_labels_title: '選択したラベルのいずれかを持つタスクだけを表示',
+    xlsx_col_labels: 'ラベル',
   },
 };
 // Default is always 'en' when nothing is stored - unlike the theme, language
@@ -1071,10 +1209,17 @@ let watchdogById = new Map();
 let watchdogHead = null;
 
 let tasks = [];
+// What the server said about the board itself, verbatim, or null when it said
+// nothing (T-0247). It belongs to no task — it is the reason there are none —
+// and until this existed the page threw it away and drew five empty columns.
+let boardError = null;
 let typeFilter = 'all'; // 'all' | 'feature' | 'bug' | 'external'
 let searchQuery = ''; // free-text filter (T-0042), combined with typeFilter by AND
 let priorityFilter = new Set(); // multi-select priority filter (T-0044); empty = inactive (all priorities shown)
 let blockedOnly = false; // "blocked only" toggle (T-0092), combined with the rest by AND
+// Multi-select label filter (T-0279); empty = inactive. OR within itself - a
+// task carrying ANY of the selected labels - and AND with everything above.
+let labelFilter = new Set();
 const modals = []; // stack for Esc handling
 // Set once the board process is gone for good (T-0082). It is what tells a
 // deliberate stop from a lost connection, so nothing but the shutdown path sets it.
@@ -1088,17 +1233,33 @@ function filteredTasks() {
   const byText = !searchQuery ? byType : byType.filter((task) =>
     String(task.title || '').toLowerCase().includes(q) ||
     String(task.description || '').toLowerCase().includes(q) ||
-    String(task.id || '').toLowerCase().includes(q)
+    String(task.id || '').toLowerCase().includes(q) ||
+    // Labels are searched like the title (T-0279), which is the whole answer to
+    // "sort by them": typing part of a label finds the tasks carrying it without
+    // opening the popover, and is why the board has no sorting control.
+    (task.labels || []).some((label) => String(label).toLowerCase().includes(q))
   );
   const byPriority = priorityFilter.size === 0
     ? byText
     : byText.filter((task) => priorityFilter.has(task.priority));
-  if (!blockedOnly) return byPriority;
-  // The server's `blockedBy` verbatim, not blockingIdsFor(): this filter answers
-  // "which tasks have an unfinished prerequisite", and a finished task that was
-  // closed while one of its prerequisites was still open is one of them, even
-  // though its card carries no marker.
-  return byPriority.filter((task) => (task.blockedBy || []).length > 0);
+  const byBlocked = !blockedOnly
+    ? byPriority
+    // The server's `blockedBy` verbatim, not blockingIdsFor(): this filter answers
+    // "which tasks have an unfinished prerequisite", and a finished task that was
+    // closed while one of its prerequisites was still open is one of them, even
+    // though its card carries no marker.
+    : byPriority.filter((task) => (task.blockedBy || []).length > 0);
+  if (labelFilter.size === 0) return byBlocked;
+  return byBlocked.filter((task) => (task.labels || []).some((label) => labelFilter.has(label)));
+}
+
+// Every label any task carries, sorted, so the filter and the card's editor
+// offer the same set. It spans the archive for free: the board merges both files
+// before it ever gets here (boardTasks in server/server.js).
+function labelsInUse() {
+  const seen = new Set();
+  for (const task of tasks) for (const label of task.labels || []) seen.add(label);
+  return [...seen].sort();
 }
 
 // ---------- tiny markdown renderer (safe: escapes HTML first) ----------
@@ -1220,6 +1381,45 @@ function sessionFlagHtml(task) {
     `<span class="dot" aria-hidden="true"></span>${esc(t('session_' + state))}</span>`;
 }
 
+// Why the board has nothing written down about this session's processes, or null
+// when it has (T-0242).
+//
+// The reason is the condition, not `treeUnknown` on its own. Every session is
+// marked from the moment it starts and stays marked until the first scan half a
+// minute later, which is the ordinary way a session begins and nothing anyone
+// can act on; a reason is set only where a read actually failed, which is the
+// case this marker exists for. The server's own start-up message draws the line
+// in the same place.
+//
+// The reason is the board's own diagnostic — `powershell: no answer within
+// 30000ms` — and is passed through untranslated, like a session's exit code:
+// inventing wordings for the failures of a command this board does not own is
+// how the interface would start lying about them.
+function sessionTreeReason(id) {
+  const record = sessionsById.get(id);
+  if (!record || !record.treeUnknown) return null;
+  const reason = String(record.treeReason || '');
+  return reason ? reason : null;
+}
+
+function treeFlagHtml(task) {
+  const reason = sessionTreeReason(task.id);
+  if (!reason) return '';
+  return `<span class="tree-flag" title="${esc(tFill('tree_unknown_note', { reason }))}">` +
+    `${esc(t('tree_unknown_label'))}</span>`;
+}
+
+// The same fact in the dialog, where there is room for what it costs. Built as a
+// card-action block with no row: the board has nothing to offer pressing here —
+// the failing read is its own, it retries on its own, and what the reader may
+// want to do about it (stop the session) is the block right below this one.
+function treeNoteHtml(task) {
+  const reason = sessionTreeReason(task.id);
+  if (!reason) return '';
+  return `<div class="card-action"><h3>${esc(t('tree_unknown_title'))}</h3>` +
+    `<div class="card-action-what">${esc(tFill('tree_unknown_note', { reason }))}</div></div>`;
+}
+
 // The watchdog's five findings (T-0159), each with a label short enough for a
 // card and the whole observation for the tooltip and the dialog. The server
 // sends the kind, never the text: the wording is interface, and it is translated
@@ -1276,6 +1476,18 @@ function typeTagHtml(task) {
   return key ? `<span class="tag-${task.type}">${esc(t(key))}</span>` : '';
 }
 
+// A row of its own under the title, and only when there is something to draw
+// (T-0279) - see the .card .labels rule for why not the `.top` row.
+function cardLabelsHtml(task) {
+  const labels = task.labels || [];
+  if (!labels.length) return '';
+  return (
+    '<div class="labels">' +
+    labels.map((label) => `<span class="label-chip">${esc(label)}</span>`).join('') +
+    '</div>'
+  );
+}
+
 function cardEl(task) {
   const div = document.createElement('div');
   div.className = 'card' + (task.status === 'done' || task.status === 'cancelled' ? ' closed-task' : '');
@@ -1291,9 +1503,11 @@ function cardEl(task) {
       ${badge ? `<span class="blocked-flag" title="${esc(badge.tooltip)}">${esc(badge.label)}</span>` : ''}
       ${task.awaitingAnswer ? `<span class="awaiting-flag" title="${esc(t('awaiting_hint'))}"><span aria-hidden="true">?</span> ${t('awaiting_label')}</span>` : ''}
       ${sessionFlagHtml(task)}
+      ${treeFlagHtml(task)}
       ${watchdogFlagHtml(task)}
     </div>
     <div class="title">${esc(task.title)}</div>
+    ${cardLabelsHtml(task)}
     <div class="foot">
       <span>${t('created_label')} ${task.created || '—'}</span>
       ${task.briefs.length ? `<span>${t('briefs_label')}: ${task.briefs.length}</span>` : ''}
@@ -1436,6 +1650,10 @@ function cardSig(task) {
   return [
     task.id, task.priority, task.type, task.status,
     task.created, task.closed, (task.briefs || []).length, task.title, lang,
+    // The labels themselves, not their count: a card re-labelled while the board
+    // is open moves nothing else about the task, so without this the chips would
+    // wait for a page reload (the T-0083/T-0087 lesson).
+    (task.labels || []).join('\u0002'),
     // The rendered marker text, not just the blocker ids: without it the marker
     // would outlive its own prerequisite being closed (T-0087), and renaming a
     // blocker would leave the old title on the card until something else about
@@ -1449,6 +1667,10 @@ function cardSig(task) {
     // on screen — a session dying is exactly the moment the card must be
     // repainted, and nothing in the task itself moves when it does (T-0077).
     sessionState(task.id) || '',
+    // And once more for the mark that says the board has not written this
+    // session's processes down (T-0242): it appears and goes away between scans,
+    // half a minute apart, while nothing in the task moves at all.
+    sessionTreeReason(task.id) || '',
     // Same reasoning again for the watchdog's mark (T-0159): it is decided
     // outside `task` entirely, and the moment it appears or goes away — a
     // session ending, a branch merged in a terminal — moves nothing in the task
@@ -1505,10 +1727,43 @@ function focusedCardId() {
   return card ? card.dataset.id : null;
 }
 
+// The command that ends the state the note describes. It is the same line in a
+// clone and in a project scaffolded by `briefboard init`, because both get
+// tools/task.mjs — so there is one command to name and no guessing about which
+// install the reader is looking at.
+const FIRST_TASK_CMD = 'node tools/task.mjs add --type feature --priority Major --title "..."';
+
+// What the board says about itself, above the columns (T-0247). /api/board has
+// answered `{"tasks":[],"error":"doc/backlog.md not found"}` since the endpoint
+// existed; five empty columns were all the page ever did with it, and they read
+// as "no tasks yet" — which is the one thing it does not mean. On the documented
+// clone path that empty board is the first screen there is.
+//
+// An error with no wording of its own is still shown, in the server's words:
+// silence is the bug being fixed here, and a future error the interface has
+// never heard of is exactly the case where silence costs most.
+function renderBoardNote() {
+  const note = document.getElementById('board-note');
+  if (!boardError) {
+    note.innerHTML = '';
+    note.hidden = true;
+    return;
+  }
+  note.innerHTML = boardError === 'doc/backlog.md not found'
+    ? `<h2>${esc(t('board_missing_title'))}</h2>` +
+      `<p>${esc(t('board_missing_what'))}</p>` +
+      `<p>${esc(t('board_missing_how'))} <code>${esc(FIRST_TASK_CMD)}</code></p>`
+    : `<h2>${esc(t('board_error_title'))}</h2><p>${esc(boardError)}</p>`;
+  note.hidden = false;
+}
+
 function render() {
   // Preserve card focus across the in-place reconcile (T-0048). Column scroll is
   // preserved for free now that the containers are never torn down (T-0068).
   const focusId = focusedCardId();
+  // Repainted from here rather than from load(), so switching the language
+  // retranslates it along with everything else.
+  renderBoardNote();
   let cardToFocus = null;
 
   const list = filteredTasks();
@@ -1534,6 +1789,10 @@ function render() {
   // Return focus to the same card if it still exists; preventScroll keeps the
   // preserved column scroll from being nudged by the focus call.
   if (cardToFocus) cardToFocus.focus({ preventScroll: true });
+  // The label set grows and shrinks with the tasks themselves, so both the
+  // header filter and an open card's editor are repainted from the same render.
+  renderLabelFilter();
+  refreshOpenTaskLabels();
 }
 
 // ---------- modals ----------
@@ -2057,6 +2316,7 @@ function openTask(id) {
           ? task.briefs.map((b) => `<span class="brief-link" data-brief="${b}">${b}</span>`).join('')
           : `<span class="empty">${t('empty_briefs')}</span>`
       }</dd>
+      <dt>${t('meta_labels')}</dt><dd data-label-area data-labels="${esc((task.labels || []).join(','))}">${labelEditorHtml(task.labels || [], 'label-options-' + task.id)}</dd>
       <dt>${t('meta_depends')}</dt><dd>${
         depends.length
           ? depends.map(depLinkHtml).join('')
@@ -2079,6 +2339,7 @@ function openTask(id) {
   overlay.querySelectorAll('[data-brief]').forEach((el) =>
     el.addEventListener('click', () => openBrief(el.dataset.brief))
   );
+  wireLabelEditor(overlay, task);
   wireSessionArea(overlay, task);
   if (hasProfiles) wireProfileSelect(overlay);
   wireDependencyLinks(overlay);
@@ -2204,7 +2465,7 @@ function sessionAreaHtml(task) {
     ? `<div class="session-row"><button type="button" class="tf-btn" data-session-log="${esc(task.id)}">` +
       `${esc(t('session_log_button'))}</button></div>`
     : '';
-  return log + stopActionHtml(task) + briefingActionHtml(task) + reviewActionHtml(task);
+  return log + treeNoteHtml(task) + stopActionHtml(task) + briefingActionHtml(task) + reviewActionHtml(task);
 }
 
 function wireSessionArea(overlay, task) {
@@ -2284,6 +2545,102 @@ function wireProfileSelect(overlay) {
   overlay.querySelectorAll('[data-profile-select]').forEach((el) =>
     el.addEventListener('change', () => setTaskProfile(el.dataset.profileSelect, String(el.value || '')))
   );
+}
+
+// ---------- labels (T-0279) ----------
+// The chips a card carries, each removable, plus an input that offers the labels
+// already in use. A <datalist> is the whole of that offer: typing a name nobody
+// has used is how a label is created, and the picker is what keeps `ui` and `UI`
+// from both appearing by accident (agents/PROTOCOL.md, "Label names").
+//
+// It takes the list and the datalist's id rather than a task, because the "+"
+// form has chips before it has a task (T-0282): the markup, the offer and the
+// gesture are one thing there and here, and only the write path differs.
+// `inputId` is optional and exists for the form, where the field is introduced
+// by a <label for="..."> like every other one; the card's dialog names its own
+// area through the <dt> beside it and passes nothing.
+function labelEditorHtml(labels, listId, inputId) {
+  const options = labelsInUse()
+    .filter((label) => !labels.includes(label))
+    .map((label) => `<option value="${esc(label)}"></option>`)
+    .join('');
+  const chips = labels
+    .map((label) => {
+      const drop = tFill('labels_remove', { label });
+      return (
+        `<span class="label-chip">${esc(label)}` +
+        `<button class="label-drop" type="button" data-label-drop="${esc(label)}"` +
+        ` title="${esc(drop)}" aria-label="${esc(drop)}">×</button></span>`
+      );
+    })
+    .join('');
+  return (
+    `<div class="label-editor">` +
+    (chips || `<span class="empty">${esc(t('empty_labels'))}</span>`) +
+    `<input type="text"${inputId ? ` id="${esc(inputId)}"` : ''} data-label-add list="${listId}"` +
+    ` placeholder="${esc(t('labels_add_placeholder'))}">` +
+    `<datalist id="${listId}">${options}</datalist></div>`
+  );
+}
+
+function wireLabelEditor(overlay, task) {
+  const labels = (task.labels || []).slice();
+  overlay.querySelectorAll('[data-label-drop]').forEach((el) =>
+    el.addEventListener('click', () =>
+      setTaskLabels(task.id, labels.filter((label) => label !== el.dataset.labelDrop))
+    )
+  );
+  const input = overlay.querySelector('[data-label-add]');
+  if (!input) return;
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (e.preventDefault) e.preventDefault();
+    const name = String(input.value || '').trim();
+    input.value = '';
+    // A name the task already carries is not a second label - the shared
+    // normalizer would collapse it anyway, and posting for nothing would repaint
+    // every open board.
+    if (!name || labels.includes(name)) return;
+    setTaskLabels(task.id, labels.concat([name]));
+  });
+}
+
+// The dialog's editor catches up with the board, the way its session area
+// already does (refreshOpenTaskSessions): the write posts the whole list and
+// patches nothing itself, so this is where a chip just added actually appears.
+//
+// Repainted only when the list really changed, because this runs on every board
+// update — an unconditional rewrite would throw away a name being typed at the
+// moment some unrelated task was written.
+function refreshOpenTaskLabels() {
+  for (const overlay of modals) {
+    if (!overlay._task) continue;
+    const fresh = tasks.find((x) => x.id === overlay._task.id);
+    if (!fresh) continue;
+    const area = overlay.querySelector('[data-label-area]');
+    if (!area) continue;
+    const drawn = (fresh.labels || []).join(',');
+    if (area.dataset.labels === drawn) continue;
+    area.dataset.labels = drawn;
+    area.innerHTML = labelEditorHtml(fresh.labels || [], 'label-options-' + fresh.id);
+    wireLabelEditor(overlay, fresh);
+  }
+}
+
+// One field, one request, and the whole list every time: replacing it is the
+// only shape the endpoint has, and there is nothing to merge on the client.
+// The board is repainted by the SSE "changed" event the write fires.
+async function setTaskLabels(id, labels) {
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(id) + '/labels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labels: labels }),
+    });
+    if (!r.ok) alert(t(writeErrorKey(r.status, 'labels_failed')));
+  } catch {
+    alert(t('labels_failed'));
+  }
 }
 
 // One field, one request: this endpoint changes no status and starts nothing.
@@ -2488,8 +2845,11 @@ async function openBrief(briefId) {
 // form is pure UX. Domain values (feature/bug/external, Blocker…Minor) are sent
 // verbatim and therefore never translated - only the visible labels go through t().
 const NEW_TASK_TYPES = ['feature', 'bug', 'external'];
+// The datalist of the form's label field. One id, not one per task, because
+// there is no task here yet — this dialog is only ever open once at a time.
+const NEW_TASK_LABEL_LIST = 'nt-label-options';
 
-function newTaskFormHtml() {
+function newTaskFormHtml(labels) {
   const priorityOptions = Object.keys(PRIO_ORDER)
     .map((p) => `<option value="${p}"${p === 'Medium' ? ' selected' : ''}>${p}</option>`)
     .join('');
@@ -2503,6 +2863,8 @@ function newTaskFormHtml() {
       <select id="nt-type">${typeOptions}</select>
       <label for="nt-priority">${t('field_priority')}</label>
       <select id="nt-priority">${priorityOptions}</select>
+      <label for="nt-labels">${t('field_labels')}</label>
+      <div data-nt-labels>${labelEditorHtml(labels || [], NEW_TASK_LABEL_LIST, 'nt-labels')}</div>
       <label for="nt-description">${t('field_description')}</label>
       <textarea id="nt-description" maxlength="4000"></textarea>
       <div class="form-error" id="nt-error" role="alert"></div>
@@ -2512,6 +2874,44 @@ function newTaskFormHtml() {
       </div>
     </form>
     <div class="hint">${t('hint_close')}</div>`;
+}
+
+// The form's own label chips (T-0282). The card's editor posts every change
+// because its task exists; here there is none yet, so the list lives on the
+// overlay and goes out once, inside the create request. setTaskLabels() is
+// deliberately not reused - there is no id to send it to.
+//
+// One delegated listener per gesture, on the container, rather than one per chip
+// as wireLabelEditor does: the area is rewritten on every add and remove, and
+// listeners bound to the chips would have to be re-bound after each repaint.
+function wireNewTaskLabels(overlay) {
+  const area = overlay.querySelector('[data-nt-labels]');
+  if (!area) return;
+  const repaint = () => {
+    area.innerHTML = labelEditorHtml(overlay._ntLabels, NEW_TASK_LABEL_LIST, 'nt-labels');
+  };
+  area.addEventListener('click', (e) => {
+    const drop = e.target && e.target.closest ? e.target.closest('.label-drop') : null;
+    if (!drop) return;
+    overlay._ntLabels = overlay._ntLabels.filter((label) => label !== drop.dataset.labelDrop);
+    repaint();
+  });
+  area.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const input = e.target;
+    if (!input || !input.dataset || input.dataset.labelAdd === undefined) return;
+    // Enter inside this field adds a chip; it must not submit the form, which is
+    // what Enter in a form's text input does by default.
+    if (e.preventDefault) e.preventDefault();
+    const name = String(input.value || '').trim();
+    input.value = '';
+    // A name already on the form is not a second chip - the shared rules would
+    // collapse it anyway (checkLabels), and a repaint for nothing loses nothing
+    // but is still a repaint.
+    if (!name || overlay._ntLabels.includes(name)) return;
+    overlay._ntLabels = overlay._ntLabels.concat([name]);
+    repaint();
+  });
 }
 
 // Which message a failed write earns. 503 is the server saying another writer
@@ -2543,6 +2943,10 @@ async function submitNewTask(overlay) {
     type: overlay.querySelector('#nt-type').value || 'feature',
     priority: overlay.querySelector('#nt-priority').value || 'Medium',
     description: String(overlay.querySelector('#nt-description').value || ''),
+    // Always sent, empty list included: the server takes [] as "no labels", and
+    // the request then says what the form held rather than leaving it to be
+    // inferred from an absent key.
+    labels: (overlay._ntLabels || []).slice(),
   };
   try {
     const r = await fetch('/api/task', {
@@ -2565,7 +2969,9 @@ async function submitNewTask(overlay) {
 }
 
 function openNewTask() {
-  const overlay = openModal(newTaskFormHtml());
+  const overlay = openModal(newTaskFormHtml([]));
+  overlay._ntLabels = [];
+  wireNewTaskLabels(overlay);
   const form = overlay.querySelector('#new-task-form');
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -2737,6 +3143,58 @@ blockedFilterBtn.addEventListener('click', () => {
   render();
 });
 
+// ---------- label filter (T-0279) ----------
+// A popover of checkboxes rather than a row of buttons like the priority filter:
+// that row is fixed at five and this set grows without limit, while the header
+// is already clipped below ~1000px (T-0143). Nothing at all is shown while no
+// task carries a label — a control whose menu would be empty is noise.
+const labelFilterBox = document.getElementById('label-filter');
+const labelFilterBtn = document.getElementById('label-filter-btn');
+const labelFilterMenu = document.getElementById('label-filter-menu');
+
+function renderLabelFilter() {
+  const inUse = labelsInUse();
+  // A selection nobody carries any more drops out, the way an empty set already
+  // means "inactive": the last task losing a label is what deletes it.
+  for (const label of [...labelFilter]) {
+    if (!inUse.includes(label)) labelFilter.delete(label);
+  }
+  labelFilterBox.hidden = inUse.length === 0;
+  if (!inUse.length) {
+    labelFilterMenu.hidden = true;
+    labelFilterBtn.setAttribute('aria-expanded', 'false');
+  }
+  labelFilterBtn.textContent = labelFilter.size
+    ? `${t('filter_labels')} (${labelFilter.size}) ▾`
+    : `${t('filter_labels')} ▾`;
+  labelFilterBtn.title = t('filter_labels_title');
+  labelFilterBtn.classList.toggle('active', labelFilter.size > 0);
+  labelFilterMenu.innerHTML = inUse
+    .map(
+      (label) =>
+        `<label><input type="checkbox" data-label-pick="${esc(label)}"` +
+        `${labelFilter.has(label) ? ' checked' : ''}><span>${esc(label)}</span></label>`
+    )
+    .join('');
+}
+
+labelFilterBtn.addEventListener('click', () => {
+  const open = labelFilterMenu.hidden;
+  labelFilterMenu.hidden = !open;
+  labelFilterBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+});
+
+// Multi-select, and OR within itself: a task carrying ANY of the ticked labels
+// passes, which is what makes ticking a second one widen rather than narrow.
+labelFilterMenu.addEventListener('change', (e) => {
+  const box = e.target;
+  const label = box && box.dataset ? box.dataset.labelPick : null;
+  if (!label) return;
+  if (labelFilter.has(label)) labelFilter.delete(label);
+  else labelFilter.add(label);
+  render();
+});
+
 // ---------- text search filter (T-0042) ----------
 // `input` (not `change`) so filtering happens on every keystroke, without
 // waiting for blur. No debounce: filtering an in-memory array is cheap.
@@ -2840,6 +3298,9 @@ function buildSheetXml() {
     ['xlsx_col_title', (task) => task.title],
     ['xlsx_col_description', (task) => task.description || ''],
     ['xlsx_col_brief', (task) => (task.briefs || []).join(', ')],
+    // The export is a full backlog dump, and a field it silently omits is a
+    // field its reader concludes is empty (T-0279).
+    ['xlsx_col_labels', (task) => (task.labels || []).join(', ')],
     ['xlsx_col_status', (task) => statusLabel(task.status)],
     ['xlsx_col_created', (task) => task.created || ''],
     ['xlsx_col_closed', (task) => task.closed || ''],
@@ -3200,6 +3661,7 @@ async function load() {
     // this snapshot; overwriting with it would be a step backwards.
     if (version >= 0 && version < boardVersion) return;
     tasks = data.tasks || [];
+    boardError = typeof data.error === 'string' && data.error ? data.error : null;
     boardVersion = version;
     sessionsConfigured =
       data.sessions || { enabled: false, worker: false, orchestrator: false, profiles: [], profileUsedBy: {} };

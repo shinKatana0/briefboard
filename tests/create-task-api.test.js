@@ -10,7 +10,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawn } = require('node:child_process');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
@@ -19,14 +18,15 @@ const { fetch } = require('./helpers/bounded.js');
 // A failing assertion here says what the board answered — code and body (T-0134).
 const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
-const { parseBacklog } = require('../server/parser.js');
+const { parseBacklog, MAX_LABEL_LEN, MAX_LABELS } = require('../server/parser.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
 // ---------- fixture helpers ----------
 
 function makeFixtureRoot(backlog = '# Backlog\n') {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-create-test-'));
+  const root = tempDir('briefboard-create-test-');
   const docDir = path.join(root, 'doc');
   fs.mkdirSync(path.join(docDir, 'brief'), { recursive: true });
   fs.writeFileSync(path.join(docDir, 'backlog.md'), backlog);
@@ -333,6 +333,147 @@ describe('POST /api/task — field validation', () => {
     assert.match((await readJson(tooLong)).error, /description/, answerOf(tooLong));
     const notAString = await postTask(server, { title: 'Wordy', description: { text: 'nope' } });
     assert.strictEqual(notAString.status, 400);
+  });
+});
+
+// ---------- the two doors, one sentence (T-0286) ----------
+
+// The endpoint has refused a bad type/priority since it existed; addTask()
+// replaced it with the default until T-0286, so `add --type nonsense` filed a
+// feature and said nothing. Making the helper strict must leave this door
+// exactly as it was — same 400, same wording — and the two must now agree,
+// which is the criterion T-0282 introduced for labels.
+describe('POST /api/task — a bad type/priority says what the CLI says (T-0286)', () => {
+  it('the endpoint answers the same sentence the CLI prints, for both fields', async () => {
+    const { root, server } = await setup();
+
+    const badType = await readJson(await postTask(server, { title: 'Typed', type: 'chore' }));
+    const badPriority = await readJson(await postTask(server, { title: 'Typed', priority: 'Extreme' }));
+    assert.strictEqual(badType.error, 'type must be one of: feature, bug, external', answerOf(badType));
+    assert.strictEqual(
+      badPriority.error,
+      'priority must be one of: Blocker, Critical, Major, Medium, Minor',
+      answerOf(badPriority)
+    );
+
+    const cliType = await runCliAsync(root, ['add', '--title', 'Typed', '--type', 'chore']);
+    const cliPriority = await runCliAsync(root, ['add', '--title', 'Typed', '--priority', 'Extreme']);
+    assert.notStrictEqual(cliType.code, 0, `CLI accepted it: ${cliType.stdout}`);
+    assert.notStrictEqual(cliPriority.code, 0, `CLI accepted it: ${cliPriority.stdout}`);
+    assert.match(cliType.stderr, new RegExp(`ERROR: ${badType.error}$`, 'm'));
+    assert.match(cliPriority.stderr, new RegExp(`ERROR: ${badPriority.error}$`, 'm'));
+
+    assert.deepStrictEqual(readTasks(root), [], 'neither door filed anything');
+  });
+
+  // The endpoint reaches addTask() only with a value it has already checked, so
+  // the helper's new throw must never turn one of its 201s into a 500: null and
+  // an absent field are the two shapes that arrive as "no value given".
+  it('an absent or null type/priority is still a 201 filing feature/Medium', async () => {
+    const { root, server } = await setup();
+    for (const body of [
+      { title: 'Absent' },
+      { title: 'Null', type: null, priority: null },
+    ]) {
+      const res = await postTask(server, body);
+      assert.strictEqual(res.status, 201, answerOf(await readJson(res)));
+    }
+    assert.deepStrictEqual(
+      readTasks(root).map((t) => [t.type, t.priority]),
+      [
+        ['feature', 'Medium'],
+        ['feature', 'Medium'],
+      ]
+    );
+  });
+});
+
+// ---------- a label at creation (T-0282) ----------
+
+describe('POST /api/task — the optional labels list', () => {
+  it('creates a task already carrying them, in one request', async () => {
+    const { root, server } = await setup();
+    const res = await postTask(server, { title: 'Labelled from the board', labels: ['ui', 'docs'] });
+    const data = await readJson(res);
+    assert.strictEqual(res.status, 201, answerOf(data));
+
+    const [task] = readTasks(root);
+    assert.strictEqual(task.id, data.id);
+    assert.deepStrictEqual(task.labels, ['ui', 'docs']);
+    assert.match(fs.readFileSync(backlogPath(root), 'utf8'), /^- labels: ui, docs$/m);
+  });
+
+  // The non-goal that must survive (T-0280): a task with no labels is not an
+  // error, so all three ways of saying "none" create the task.
+  it('absent, null and [] all create an unlabelled task rather than a 400', async () => {
+    const { root, server } = await setup();
+    for (const body of [{ title: 'No key' }, { title: 'Null' , labels: null }, { title: 'Empty', labels: [] }]) {
+      const res = await postTask(server, body);
+      assert.strictEqual(res.status, 201, `expected 201 for ${JSON.stringify(body)}`);
+    }
+    const tasks = readTasks(root);
+    assert.strictEqual(tasks.length, 3);
+    for (const task of tasks) assert.deepStrictEqual(task.labels, [], task.title);
+    assert.ok(!fs.readFileSync(backlogPath(root), 'utf8').includes('- labels:'));
+  });
+
+  it('trims, drops the blanks and collapses a repeat, keeping the order sent', async () => {
+    const { root, server } = await setup();
+    const res = await postTask(server, { title: 'Messy', labels: [' ui ', '', 'docs', 'ui'] });
+    assert.strictEqual(res.status, 201);
+    assert.deepStrictEqual(readTasks(root)[0].labels, ['ui', 'docs']);
+  });
+
+  // Each refusal says which violation it is - the message the board puts in
+  // front of the user has to name what to change.
+  const REFUSED = {
+    'a name over the length cap': [['y'.repeat(MAX_LABEL_LEN + 1)], new RegExp(String(MAX_LABEL_LEN))],
+    'a comma inside a name': [['ui,docs'], /comma/],
+    'a line break inside a name': [['ui\ndocs'], /line break/],
+    'more names than a task may carry': [
+      Array.from({ length: MAX_LABELS + 1 }, (_, i) => 'l' + i),
+      new RegExp(String(MAX_LABELS)),
+    ],
+    'a member that is not a string': [['ui', 7], /array of strings/],
+    'a bare string instead of the array': ['ui,docs', /array of strings/],
+  };
+
+  for (const [name, [labels, message]] of Object.entries(REFUSED)) {
+    it(`400 on ${name}, and nothing is created`, async () => {
+      const { root, server } = await setup();
+      const res = await postTask(server, { title: 'Never filed', labels });
+      const data = await readJson(res);
+      assert.strictEqual(res.status, 400, answerOf(data));
+      assert.match(data.error, message, answerOf(data));
+      assert.deepStrictEqual(readTasks(root), [], 'the task must not exist after a refused list');
+    });
+  }
+
+  // Both endpoints refuse through the same checkLabels(), and this is what says
+  // so: the two answers to the same bad value are compared with each other, not
+  // with a string copied into this file.
+  it('refuses in the same words as POST /api/task/:id/labels', async () => {
+    const { server } = await setup();
+    const created = await readJson(await postTask(server, { title: 'A task to relabel' }));
+    const tooLong = ['y'.repeat(MAX_LABEL_LEN + 1)];
+
+    const viaCreate = await readJson(await postTask(server, { title: 'Never filed', labels: tooLong }));
+    const viaLabels = await readJson(
+      await fetch(server.baseUrl + '/api/task/' + created.id + '/labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labels: tooLong }),
+      })
+    );
+    assert.strictEqual(viaCreate.error, viaLabels.error, answerOf(viaCreate));
+  });
+
+  it('a label is written as a field, not into the description', async () => {
+    const { root, server } = await setup();
+    await postTask(server, { title: 'Both', description: 'The body.', labels: ['ui'] });
+    const [task] = readTasks(root);
+    assert.strictEqual(task.description, 'The body.');
+    assert.deepStrictEqual(task.labels, ['ui']);
   });
 });
 

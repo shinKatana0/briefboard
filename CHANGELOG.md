@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-18
+
+A task can now carry labels of your own, and the board can be read by them: chips
+on the card, an editor in the task's dialog, a `Labels ▾` filter in the header,
+the same search box that finds titles finding labels too, and a column of them in
+the Excel export — with the label settable in the very command that files the
+card. Around that, the CLI stops answering silently where it used to: a wrong
+`--type` is refused instead of defaulted, a refusal about a wrong call prints the
+usage line that fixes it, `validate` reports a brief file nobody links and two
+files answering to one id, and a brief written by hand can be attached with `link`
+instead of by editing the backlog.
+
+### Added
+
+- **Labels: your own classification of a task.** They appear as chips on the card
+  under its title, are added and removed in the card's dialog, and a `Labels ▾`
+  multi-select filter in the header keeps the tasks carrying any of them. The
+  free-text search matches them alongside the title and the description, so typing
+  `docs` finds the labelled tasks without opening the filter, and the Excel export
+  gets a column of its own. From the command line it is
+  `node tools/task.mjs labels T-0007 ui,docs` (the whole list in ONE
+  comma-separated argument, replacing the previous one, like `depends`) and
+  `--clear` to empty it; over HTTP it is `POST /api/task/:id/labels`. Nothing
+  declares a label: it exists while some task carries it, creating one is typing a
+  name nobody has used yet, and the last task dropping it is what makes it
+  disappear. A name is trimmed, at most 32 characters, and may hold anything but a
+  comma; a task carries at most 8, and names are compared as written, so `ui` and
+  `UI` are two labels (T-0279).
+- A task can be filed already carrying its labels, in one command instead of two:
+  `add --labels "ui, docs"`, a `labels` key on `POST /api/task`, and a field in the
+  board's **+** form beside the title and the priority. That is for the project
+  whose convention is that every task carries a label — a rule kept by a second
+  command is a rule that drifts (T-0282).
+- `node tools/task.mjs link T-0007-01` puts a brief file that **already exists**
+  onto its task's `briefs` field — one written by hand, recovered, or brought in
+  from elsewhere. It refuses an id no file in `doc/brief/` answers to, so it cannot
+  point at nothing, and a second run adds no duplicate. This is the way out of "the
+  file is on disk and the task does not know it" without editing `doc/backlog.md`
+  by hand — which is what the CLI exists to make unnecessary, and what an agent in
+  an isolated worktree cannot do at all (T-0267).
+- `tools/screenshot.mjs` can photograph what exists only after an interaction:
+  `--eval "openTask('T-0007')"` runs a snippet in the page once the board has
+  drawn, and `--click "#label-filter-btn"` does the same for the common case of one
+  click, so a task dialog, the label popover or the new-task form can be captured
+  too. A snippet that throws, matches nothing, or leaves the page unchanged fails
+  the run and keeps no png — the picture you get back is never of an undisturbed
+  board (T-0281).
+
+### Changed
+
+- **`add` refuses a `--type` or `--priority` outside its list instead of writing
+  the default.** `add --title X --type nonsense` used to exit `0` and file a
+  `feature`; it now exits `1` naming the legal values, and nothing is written — no
+  id is allocated and the backlog is untouched. If a script of yours relied on a
+  wrong value being quietly corrected, it will now fail where it used to succeed;
+  omitting the flag altogether still defaults to `feature` / `Medium` and is not an
+  error anywhere (T-0286).
+- A refusal about a wrong call prints the usage line for that subcommand, so the
+  message that stops you also carries the call that works (T-0273, T-0284).
+- A brief file is resolved only under `.md`. `T-0001-01-old.md.bak` no longer
+  shadows `T-0001-01-real.md`, which is how the board and the CLI could disagree
+  about what a brief said (T-0283).
+
+### Fixed
+
+- **`brief` no longer overwrites an existing brief file.** When the name it
+  computed landed on a file somebody had already written, the template silently
+  replaced its content — no backup, no prompt, no message, and two written briefs
+  were lost that way. It now refuses and writes nothing at all; `link` above is how
+  that file gets onto its task (T-0264).
+- `validate` reports a brief file that no task links, and two files answering to
+  one brief id — the second is what used to leave the board showing whichever of
+  them the directory listing happened to return first (T-0268, T-0275).
+- `brief` with no arguments names the missing argument instead of reporting
+  `task undefined not found` (T-0269).
+- `tools/screenshot.mjs` refuses in one line when the browser cannot be started,
+  instead of failing with an unhandled error and a stack (T-0288).
+- A session whose process tree the board could not record now says so on its card.
+  Until now that reached the session log only, so the card of a session whose
+  leftovers nothing can clean up for you looked exactly like any other (T-0242).
+- The tools stop leaving temporary directories in `%TEMP%`: `tools/test-run.mjs`
+  creates none at all any more, so no kill can leave one behind, and
+  `tools/screenshot.mjs` removes its Chrome profile on every exit path a process
+  can act on — a hard kill remains the one case it cannot cover, and the code says
+  so (T-0265, T-0276).
+
+### Backlog format
+
+A task may now carry a `- labels:` line, written only while its list is non-empty.
+The line is a new field, and `agents/PROTOCOL.md` requires unknown fields to be
+preserved, so a backlog written by 0.3.0 is still read by 0.2.0 — the labels are
+simply not shown there. Going back further than that carries the warnings the
+0.2.0 entry already gives about `- depends:` and `- profile:`.
+
+### Upgrading an existing project
+
+Installing the new package is not enough: `briefboard init` copied `server/`,
+`tools/`, `ui/` and `agents/` into your project, and the board runs that copy. Run
+`briefboard update` to see what would change and `briefboard update --apply` to
+receive it.
+
 ## [0.2.0] - 2026-08-17
 
 The board stops being read-only: a task can now be created, opened, handed to an

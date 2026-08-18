@@ -17,13 +17,13 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawn, spawnSync } = require('node:child_process');
 
 const { fetch, waitForExit } = require('./helpers/bounded.js');
 const { readJson } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
 const { REGISTRY_FILE, REGISTRY_VERSION } = require('../server/sessions.js');
+const { tempDir } = require('./helpers/tmp.js');
 const {
   TRACE_SINCE,
   traceDirFor,
@@ -59,7 +59,7 @@ function closedTask(id) {
 }
 
 function makeProject(tasks = []) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-trace-test-'));
+  const root = tempDir('briefboard-trace-test-');
   cleanups.push(async () => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), '# Backlog\n\n' + tasks.join(''));

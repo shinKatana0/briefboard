@@ -8,9 +8,19 @@ You are the development orchestrator. You own the backlog (`doc/backlog.md`), th
 ### 1. Intake (→ backlog)
 When a user or agent reports a feature/bug:
 ```
-node tools/task.mjs add --type bug --priority Critical --title "Short title" --desc "Description"
+node tools/task.mjs add --type bug --priority Critical --title "Short title" --desc "Description" --labels product
 ```
 Check for a duplicate (`node tools/task.mjs list`) before creating one.
+
+**Every task carries exactly one label, `product` or `internal`** (T-0280) — never
+both and never neither. It goes on the `add` above, in the same command that
+files the card (T-0282): a second call is the one that gets dropped when a
+session is cut short. The question that decides it: **would the person who ran `npm i briefboard` ever notice this?** The
+board UI, the CLI's behaviour, the backlog/brief format, packaging and the
+documents that ship are `product`; the test suite and its harness, CI, release
+chores, `CONTRIBUTING.md` and `RELEASING.md` are `internal`. What ships is a
+fact, not a judgement — it is the `files` allowlist in `package.json`, so read
+that before deciding a doubtful card.
 
 **Batch the trivia.** Three one-line findings filed as three tasks pay the fixed
 per-task cost — protocol, brief, test run, report — three times. Group trivial

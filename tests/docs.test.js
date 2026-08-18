@@ -1012,3 +1012,155 @@ describe('the shipped session prompts are the same English text everywhere (T-02
     }
   }
 });
+
+// T-0254: `agentboard` is this project's earlier name. Left in the docs as a bare
+// alias it stopped reading as history and became a claim about the present — the
+// guides told a reader "the repository is also called `agentboard`" while it
+// clones as `briefboard`, which is a plain untruth in the first paragraph a
+// visitor reads. The old name may still be written down, and should be, so that
+// whoever knew it finds the project; what it may not do is appear unmarked. So
+// the assertion is on that shape and not on a list of allowed lines: a rewrap or
+// a new sentence goes on passing, an unmarked alias does not, in any of the three
+// languages.
+describe('the old name appears only as a former name (T-0254)', () => {
+  // T-0255: CONTRIBUTING.md was outside T-0254's list and kept the same unmarked
+  // alias through that sweep, with nothing left watching it. The export carries
+  // the file to GitHub, so it lives under the same rule as the six above.
+  const PUBLIC_DOCS = [
+    'README.md',
+    'README.ru.md',
+    'README.ja.md',
+    'doc/guide/guide.en.md',
+    'doc/guide/guide.ru.md',
+    'doc/guide/guide.ja.md',
+    'CONTRIBUTING.md',
+  ];
+
+  // Enough of each language to say "this used to be its name". A translation pass
+  // that reaches for a word missing from here fails loudly and adds it, which is
+  // the right way round: the alternative is a guard that cannot see the Japanese.
+  const FORMER_NAME_MARKERS = [
+    /formerly|earlier name|previously|used to be/i,
+    // `\w` is ASCII-only in a JavaScript regexp, so the Cyrillic ranges are spelled out.
+    /прежн[а-яё]+ (название|имя)|называл[а-яё]+ раньше|раньше/i,
+    /旧名|旧称|以前/,
+  ];
+
+  // Paragraphs, not lines: the marker and the name land in one sentence, and a
+  // later rewrap moves the line break without moving the sentence.
+  const paragraphs = (text) => text.split(/\n\s*\n/);
+
+  for (const file of PUBLIC_DOCS) {
+    it(`${file}: every \`agentboard\` is marked as the name that used to be`, () => {
+      // Case-sensitive on purpose. `AGENTBOARD_ROOT` is the live variable name,
+      // documented in these same files and not renamed by this task (T-0249).
+      const unmarked = paragraphs(read(file))
+        .filter((paragraph) => paragraph.includes('agentboard'))
+        .filter((paragraph) => !FORMER_NAME_MARKERS.some((marker) => marker.test(paragraph)));
+
+      assert.deepEqual(
+        unmarked,
+        [],
+        `${file} carries \`agentboard\` without saying it is the former name — ` +
+          'either mark it as the old name or write `briefboard`'
+      );
+    });
+  }
+});
+
+// T-0256: CONTRIBUTING.md said `test:verbose` passed `--test-timeout` itself,
+// and that stopped being true an hour after it was written — T-0250 routed both
+// scripts through `tools/test-run.mjs`, so the limit is now defined there once.
+// A document's claim about an npm script is checkable against package.json, so
+// it is checked here rather than reread: which scripts get the wrapper's
+// protection, that none of them carries a limit of its own, and what the wrapper
+// protects them from.
+describe('CONTRIBUTING.md describes the test wrapper that exists (T-0256)', () => {
+  const WRAPPER = 'tools/test-run.mjs';
+  const running = () => section('CONTRIBUTING.md', /^## Running the tests/m);
+
+  const wrappedScripts = () => {
+    const pkg = JSON.parse(read('package.json'));
+    const scripts = Object.entries(pkg.scripts).filter(([, command]) => command.includes(WRAPPER));
+    assert.ok(scripts.length > 1, `package.json must keep more than one script on ${WRAPPER}`);
+    return scripts;
+  };
+
+  it('every script that runs the suite is named where the wrapper is described', () => {
+    const text = running();
+    assert.ok(text.includes(WRAPPER), `the section must name ${WRAPPER} as what the scripts run`);
+    for (const [name] of wrappedScripts()) {
+      assert.ok(text.includes(name), `\`${name}\` runs the suite and the section never shows it`);
+    }
+  });
+
+  // The sentence the section now rests on is "the limit is defined in one place":
+  // a script that grew a copy of the flag would make it false again, in exactly
+  // the way it was false before, and the doc alone cannot notice.
+  it('no npm script carries a per-test limit of its own', () => {
+    for (const [name, command] of wrappedScripts()) {
+      assert.doesNotMatch(
+        command,
+        /--test-timeout/,
+        `\`${name}\` sets its own limit — CONTRIBUTING.md says ${WRAPPER} defines it once`
+      );
+    }
+    assert.match(read(WRAPPER), /--test-timeout=/, `${WRAPPER} is where the limit is set`);
+  });
+
+  it('names all three runs the wrapper refuses', () => {
+    const text = running();
+
+    assert.match(text, /git status --porcelain/, 'the working copy a run has to give back (T-0111)');
+    // The kill reaches the grandchild running the test file, not just the runner
+    // — the half that makes the guard work on Windows (T-0244).
+    assert.match(text, /process \*{0,2}tree/, 'the silent run, and how far the kill reaches');
+    assert.match(text, /executed nothing|executed no tests/, 'and the run that ran nothing (T-0250)');
+  });
+});
+
+// T-0254: this file is read once per release, by someone about to publish, and
+// three of its facts had gone false. The npm token one cost a release attempt:
+// RELEASING.md said a classic Automation token bypasses 2FA, and the registry
+// answered `403 ... granular access token with bypass 2fa enabled is required`.
+// A checklist is worth exactly what its statements are worth, so the corrections
+// get a guard rather than a reader's memory.
+describe('RELEASING.md tells the truth about publishing (T-0254)', () => {
+  // Same reasoning as the translation-step check above: the export drops this
+  // file, so the public tree has nothing to read (T-0252).
+  const skip = skipOutsideExport('RELEASING.md');
+
+  it('names the token type the registry actually accepts', { skip }, () => {
+    const text = read('RELEASING.md');
+    assert.match(text, /granular access token/i, 'the token type that publishes');
+    assert.match(text, /bypass/i, 'and the option on it that has to be enabled explicitly');
+    assert.match(text, /Read and write/i, 'and the permission it needs on the package');
+  });
+
+  it('leaves no Automation token standing as the way to publish', { skip }, () => {
+    // The word itself may stay — a reader who set one up needs to be told it
+    // stopped working — but only inside the paragraph that says so.
+    const stale = read('RELEASING.md')
+      .split(/\n\s*\n/)
+      .filter((paragraph) => /Automation/.test(paragraph))
+      .filter((paragraph) => !/no longer/i.test(paragraph));
+
+    assert.deepEqual(stale, [], 'an Automation token is named without saying it no longer publishes');
+  });
+
+  it('warns that the token cannot be checked before the publish', { skip }, () => {
+    const text = read('RELEASING.md');
+    assert.match(text, /npm whoami/, 'the command that passes with a token that cannot publish');
+    assert.match(text, /atomic/, 'and why a refusal at publish is survivable: the version stays free');
+  });
+
+  it('the Status section reads the version off the registry instead of naming it', { skip }, () => {
+    const status = section('RELEASING.md', /^## Status/im);
+    assert.match(status, /npm view briefboard versions?/, 'the command that cannot go stale');
+    assert.doesNotMatch(
+      status,
+      /latest[^\n]*\d+\.\d+\.\d+/i,
+      'a latest version written here is wrong one release later — this section named 0.1.1 while npm served 0.2.0'
+    );
+  });
+});

@@ -14,7 +14,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
 // hang the run (T-0124).
@@ -27,6 +26,7 @@ const { removeTree } = require('./helpers/rm.js');
 // succeeds for a killed-but-unreaped process, so a test writing it itself reads
 // a zombie as a live session (T-0202, T-0209).
 const { isProcessAlive } = require('../server/sessions.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- fixture helpers ----------
 
@@ -51,7 +51,7 @@ function sampleBacklog() {
 }
 
 function makeFixtureRoot(backlog = sampleBacklog()) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-session-api-test-'));
+  const root = tempDir('briefboard-session-api-test-');
   fs.mkdirSync(path.join(root, 'doc', 'brief'), { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog);
   return root;

@@ -13,7 +13,6 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawn } = require('node:child_process');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
@@ -24,6 +23,7 @@ const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
 const { removeTree } = require('./helpers/rm.js');
 const { parseBacklog } = require('../server/parser.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
@@ -107,7 +107,7 @@ function sampleBacklog() {
 }
 
 function makeFixtureRoot(backlog = sampleBacklog()) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-answer-test-'));
+  const root = tempDir('briefboard-answer-test-');
   const briefDir = path.join(root, 'doc', 'brief');
   fs.mkdirSync(briefDir, { recursive: true });
   fs.writeFileSync(path.join(root, 'doc', 'backlog.md'), backlog);

@@ -431,6 +431,59 @@ describe('a teardown does not wear a budget it never spends (T-0200)', () => {
   }
 });
 
+// T-0261. Counted from the sources rather than from the debris: 56 mkdtempSync
+// call sites across 42 test files, and the eight files that removed nothing had
+// left 114k of the 118766 `briefboard-*` directories then standing in %TEMP% —
+// the same %TEMP% this repository measures teardown and spawn latency in
+// (T-0238, T-0258). Five other files had each invented the same list-and-after()
+// idiom for themselves.
+//
+// Banned by shape and with no exemption list, which is what makes it hold for
+// next year's copy (T-0189): a directory that is not made here is not written
+// down anywhere, and only what is written down can be removed. Any receiver
+// counts — a destructured `mkdtempSync`, an `fsp.mkdtemp` — because the mistake
+// is the call, not the spelling of the module it came from.
+const RAW_MKDTEMP = /(?<![\w$])mkdtemp(?:Sync)?\(/;
+// The one file that may: it IS the writing-down, and tests/temp-dirs.test.js
+// holds it to removing what it wrote down.
+const OWNS_THE_TEMP_DIRECTORIES = 'tests/helpers/tmp.js';
+
+describe('a temporary directory is one the suite can remove again (T-0261)', () => {
+  it('the raw call is caught, whichever module it is taken from', () => {
+    assert.match(stripProse('const d = fs.mkdtempSync(path.join(os.tmpdir(), p));'), RAW_MKDTEMP);
+    assert.match(stripProse('const d = await fsp.mkdtemp(prefix);'), RAW_MKDTEMP);
+    assert.match(stripProse('const d = mkdtempSync(prefix);'), RAW_MKDTEMP);
+  });
+
+  it('and named in prose it is not the call', () => {
+    assert.doesNotMatch(stripProse('// fs.mkdtempSync(prefix) leaves the directory behind\n'), RAW_MKDTEMP);
+    assert.doesNotMatch(
+      stripProse("throw new Error('take it from tmp.js, not fs.mkdtempSync(prefix)');", { emptyStrings: true }),
+      RAW_MKDTEMP
+    );
+  });
+
+  it('the helper it points at is really there', () => {
+    // Or the rule below names a way out that does not exist, and every file it
+    // reports is a file with nothing to do about it.
+    assert.ok(fs.existsSync(path.join(TESTS_DIR, '..', OWNS_THE_TEMP_DIRECTORIES)));
+  });
+
+  for (const { name, text } of sources().filter(
+    (f) => f.name !== OWNS_THE_TEMP_DIRECTORIES && f.name !== SCANNER
+  )) {
+    it(`${name} takes its temporary directory from helpers/tmp.js`, () => {
+      assert.doesNotMatch(
+        stripProse(text, { emptyStrings: true }),
+        RAW_MKDTEMP,
+        `${name} makes a temporary directory nothing has written down, so nothing removes it: the ` +
+          'run leaves it in %TEMP% for good, and a failed or timed-out test leaves it there too. Take ' +
+          'tempDir from tests/helpers/tmp.js, whose teardown removes what it made'
+      );
+    });
+  }
+});
+
 describe('a test asks the product what is still alive (T-0202, T-0209)', () => {
   it('the hand-written check is caught', () => {
     assert.match(stripProse('if (process.kill(pid, 0)) return;'), RAW_LIVENESS);

@@ -15,7 +15,6 @@ const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
 const path = require('node:path');
-const os = require('node:os');
 
 // `fetch` shadows the global one on purpose: bounded, so no request here can
 // hang the run (T-0124).
@@ -23,11 +22,12 @@ const { fetch } = require('./helpers/bounded.js');
 // A failing assertion here says what the board answered — code and body (T-0134).
 const { readJson, answerOf } = require('./helpers/response.js');
 const { startBoard } = require('./helpers/board.js');
+const { tempDir } = require('./helpers/tmp.js');
 
 // ---------- fixture helpers ----------
 
 function makeFixtureRoot(backlog) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briefboard-sec-test-'));
+  const root = tempDir('briefboard-sec-test-');
   const docDir = path.join(root, 'doc');
   fs.mkdirSync(path.join(docDir, 'brief'), { recursive: true });
   fs.writeFileSync(path.join(docDir, 'backlog.md'), backlog);
