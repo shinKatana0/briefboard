@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-22
+
+Connecting the board to a project that **already exists** now works. `init` fills
+a directory it collides with file by file instead of skipping it whole, so a
+project with its own `tools/` finally gets `tools/task.mjs` instead of a success
+message and no CLI. A `CLAUDE.md` or `AGENTS.md` that is already there is enriched
+with a block between `<!-- briefboard:start -->` and `<!-- briefboard:end -->`
+rather than skipped or replaced. And what was already yours stays yours: `update`
+no longer replaces a file it cannot show it installed, and `serve` no longer runs
+one of them as the board.
+
+### Added
+
+- **`init` merges into a directory it collides with, instead of skipping it
+  whole.** A project with its own `tools/` or `agents/` used to get
+  `skip existing: tools`, no `tools/task.mjs`, and a run that called that a
+  success — the CLI the whole protocol is written around was never installed.
+  Every file is now considered on its own: what is missing is created, what is
+  already there is kept and named, and the summary says which of the two happened
+  to each. When the file that got kept is genuinely yours, the next-steps block
+  stops printing the command that would run it — `node tools/task.mjs ...`,
+  `node server/server.js` — and says why (T-0294).
+- **An existing `CLAUDE.md` / `AGENTS.md` is enriched, not skipped and not
+  replaced.** briefboard appends its protocol between `<!-- briefboard:start -->`
+  and `<!-- briefboard:end -->` — HTML comments, so nothing renders — and writes
+  only between them — not with `--apply`, not with `--force`, not ever. Everything
+  above and below stays byte for byte what you wrote, `init` inserts the block once
+  and never rewrites it, and `update` refreshes the inside of it and nothing else
+  (T-0294).
+- `update` gained two categories for that block. `block removed` is a file whose
+  block you deleted: it is **not** re-added unless you pass `--force`.
+  `markers malformed` is a start with no end, or two starts — and that one is
+  **never touched, `--force` included**, because where the block ends cannot be
+  guessed without risking your own text (T-0294).
+
+### Changed
+
+- **`update --apply` no longer replaces a file the manifest does not list.** Such
+  a file is reported as `unknown provenance` and now needs `--force`; until now
+  `--apply` replaced it after a backup. That is how the only documented repair for
+  a half-installed project could overwrite a `CLAUDE.md` briefboard had never
+  written. Nothing else moved: a file the manifest does list behaves exactly as
+  before, `MODIFIED LOCALLY` still needs `--force` as it always did, and a project
+  with no manifest at all is still `no manifest` and still replaced after a backup
+  (T-0294).
+- **`briefboard serve` no longer runs a `server/server.js` it cannot vouch for.**
+  It used to load the project's copy whenever the file merely existed, announce it
+  as `(this project's copy)` and execute it — and now that `init` merges per file,
+  that path can hold somebody else's script, run as the board without a word. It
+  runs the project's file when the manifest lists it or it is byte-identical to the
+  package; when a manifest is there and does not list it, the packaged board starts
+  instead and the declined file is named with the reason. A project with no
+  manifest at all is unaffected — with no record briefboard can neither vouch nor
+  condemn, and a pre-0.2.0 install has been running that copy all along (T-0295,
+  T-0299).
+
+### Fixed
+
+- A marker inside a fenced code block is not a marker. A `CLAUDE.md` that merely
+  *showed* what the block looks like — the snippet this project's own guide prints,
+  copied into your notes — was read as a file that already had one: `init` reported
+  the briefboard block as already there, skipped the file, and the protocol text
+  never arrived (T-0298).
+- A second `init` on a healthy install no longer reports every briefboard file as
+  yours. The rerun listed every runtime file under "briefboard did NOT install its
+  own versions of them" and told you the task CLI was not installed, on a project
+  where briefboard had installed all of it: a file briefboard itself wrote is not a
+  collision (T-0299).
+- `update --apply` no longer writes over a damaged `.briefboard/installed.json`.
+  Installing any file that was new in the package rewrote the record as a side
+  effect, destroying the very file the warning tells you to repair and replacing
+  the install history with one written from a run that could read none of it. The
+  new file is still installed; nothing is recorded, and the run says so (T-0297).
+
+### Upgrading an existing project
+
+Installing the new package is not enough: `briefboard init` copied `server/`,
+`tools/`, `ui/` and `agents/` into your project, and the board runs that copy. Run
+`briefboard update` to see what would change and `briefboard update --apply` to
+receive it.
+
+This release is the one that most needs it, and least reaches you without it: if
+the old `init` left your project half-installed and you finished the job by hand,
+read the plan before applying it. The files you placed yourself are not in the
+manifest, so they now come up as `unknown provenance` and are left alone rather
+than replaced.
+
 ## [0.3.0] - 2026-08-18
 
 A task can now carry labels of your own, and the board can be read by them: chips

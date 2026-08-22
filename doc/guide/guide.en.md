@@ -100,9 +100,98 @@ npx briefboard init
 The `init` command copies the board's runtime files — `server/`, `tools/`,
 `ui/`, `agents/`, `AGENTS.md`, `CLAUDE.md` — from the package into the current
 directory, and scaffolds an empty `doc/backlog.md` plus an empty `doc/brief/`
-directory for that project. It is idempotent: existing files and directories at
-the destination are never overwritten, so a rerun only fills in whatever is
-still missing (it prints `skip existing: ...` for anything already there).
+directory for that project.
+
+**Nothing at the destination is ever overwritten, and that decision is made file
+by file.** A project of your own very likely has a `tools/` or an `agents/`
+directory already — those are ordinary names in any repository — and briefboard
+fills such a directory in instead of stepping around it: every file it ships that
+you do not have is copied, and every file you do have is left exactly as it is.
+So a rerun is idempotent, and so is the first run into a project that was there
+before briefboard.
+
+Here is a real run in a project that had its own `tools/build.mjs`, its own
+`agents/WORKER.md`, and its own `CLAUDE.md` and `AGENTS.md`:
+
+```text
+briefboard init - installing into /home/me/my-project
+created: server
+created: tools
+created: ui
+merged: agents (2 added, 1 kept)
+  kept yours: agents/WORKER.md
+merged: AGENTS.md (briefboard block added, your text untouched)
+merged: CLAUDE.md (briefboard block added, your text untouched)
+created: doc/brief
+created: doc/backlog.md
+created: .briefboard/installed.json
+
+These files were already here, so briefboard did NOT install its own versions of
+them - this project runs on yours:
+  agents/WORKER.md
+Nothing was overwritten. To take briefboard's version of one, move yours aside and
+run "briefboard init" again; "briefboard update" shows how the two differ.
+```
+
+Line by line: `created: <entry>` means everything briefboard ships under that name
+was installed — note `created: tools`, even though `tools/` already existed, because
+the only file in it was yours and nothing collided. `merged: <entry> (N added, M
+kept)` means part of the entry collided, and every collision is named on its own
+`kept yours:` line. `skip existing: <entry>` (on stderr) means nothing was
+installed there at all.
+
+The closing block is the part to read, because every other line reads as success:
+it names each file briefboard did **not** install, and those are the files your
+project now runs on. If `tools/task.mjs` is one of them, briefboard's task CLI is
+not installed — the `node tools/task.mjs ...` lines are then left out of the next
+steps on purpose, since that path holds your script rather than briefboard's, and
+the run says so in as many words.
+
+#### Your `CLAUDE.md` and `AGENTS.md` are added to, never replaced
+
+Those two are the instructions your agent reads, and a project that has them has
+them because somebody wrote them. briefboard treats them differently from every
+other file: with no such file it writes its own whole, as it always did; with one
+already there it appends a block delimited by two HTML comments — so they do not
+render — and touches nothing outside them:
+
+```markdown
+# My project
+
+My own rules.
+
+<!-- briefboard:start -->
+## briefboard task protocol
+
+Project rules are in `AGENTS.md`. Read it in full before you start working.
+...
+<!-- briefboard:end -->
+```
+
+Four things are true of that block, and they are what make it safe:
+
+- **briefboard writes only between the markers.** Not with `--apply`, not with
+  `--force`, not ever. Everything above `<!-- briefboard:start -->` and below
+  `<!-- briefboard:end -->` stays byte for byte what you wrote.
+- **`init` inserts it once and never rewrites it.** Refreshing is `update`'s job;
+  an `init` that quietly rewrote the block would be the whole-file overwrite again
+  in a smaller box. A second `init` changes the file not at all.
+- **`update` refreshes the inside of it, and only the inside.** When a newer
+  package ships different instructions the entry is `outdated`, and `--apply`
+  rewrites the text between the markers.
+- **A marker inside a code block is not a marker.** The example above is itself a
+  fenced code block, and briefboard reads it as one — so a document that merely
+  *shows* what the block looks like, whether this guide or your own notes with
+  that snippet copied into them, is never mistaken for one that already has a
+  block.
+
+Edit something **inside** the block and it becomes `MODIFIED LOCALLY`: `--apply`
+keeps your version, and `--force` replaces it after a backup, exactly as anywhere
+else. Delete the block and `update` reports it as `block removed` and does not
+reinstate it — `--force` re-appends it. Damage the markers — a start with no end,
+or two starts — and briefboard reports the file as `markers malformed` and refuses
+to touch it under every flag, `--force` included: where the block ends cannot be
+guessed without risking your own text.
 
 ### (b) `git clone` and work inside the repository
 
@@ -119,8 +208,17 @@ the recommended path for contributors and local development.
 
 Because `init` copies the runtime files into your project, and `briefboard serve`
 deliberately prefers that copy, installing a newer `briefboard` from npm does not
-change anything in a project that is already set up. The copy is what runs. The
-command that moves it forward is `briefboard update`:
+change anything in a project that is already set up. The copy is what runs — as
+long as it is briefboard's copy. `serve` runs the project's `server/server.js`
+when the manifest lists it or it is byte-identical to the package. When a
+readable manifest exists and does not list that file, the packaged one starts
+instead, naming the file it declined and why. When there is no readable manifest
+at all, the project's copy runs anyway — with no record briefboard can neither
+vouch for it nor condemn it — and `serve` says out loud that its provenance is
+unrecorded. That last case is the one to know about, because `init` keeps a
+`server/server.js` that was already there, so that path can hold your own script,
+and loading it is briefboard running somebody else's code as the board. The
+command that moves the copy forward is `briefboard update`:
 
 ```bash
 npm install -g briefboard@latest   # or use npx briefboard@latest below
@@ -137,22 +235,41 @@ hunch. The categories are:
 
 | category | meaning | `--apply` |
 | --- | --- | --- |
-| `up to date` | identical to the package | left alone |
-| `outdated` | differs from the package but matches the hash recorded at install, i.e. untouched since | replaced |
+| `up to date` | identical to the package — for a `CLAUDE.md` / `AGENTS.md` that carries the block, the block matches the package's | left alone |
+| `outdated` | differs from the package but matches the hash recorded at install, i.e. untouched since | replaced — for a block, its inner text is rewritten |
 | `MODIFIED LOCALLY` | differs from both the package and the recorded hash — you edited it | **skipped** unless `--force` |
 | `new in package` | the new version ships a file your project does not have | added |
 | `no manifest` | the project has no install manifest at all (see below) — it was installed before 0.2.0, so there is nothing to compare against | replaced, after a backup |
-| `unknown provenance` | there is a manifest, but it does not list this file, so its origin cannot be established | replaced, after a backup |
+| `unknown provenance` | there **is** a manifest and it does not list this file: briefboard is saying it did not install it, so the file is somebody else's | **skipped** unless `--force` |
+| `block removed` | briefboard added its block to this `CLAUDE.md` / `AGENTS.md` and the block is no longer there | **not re-added** unless `--force` |
+| `markers malformed` | the block's markers in this file are damaged — a start with no end, or two starts | **never touched**, `--force` included |
+
+The last two rows only ever apply to `CLAUDE.md` and `AGENTS.md`, the two files
+briefboard merges into rather than copies over.
+
+The difference between `no manifest` and `unknown provenance` is worth reading
+twice, because it decides whether a file is replaced. `no manifest` says only that
+the install is old — nothing was recorded, about any file, so nothing can be
+compared, and `--apply` goes ahead with a backup. `unknown provenance` says the
+record exists and this file is not in it, which is briefboard stating that it did
+not put the file there; replacing it would be replacing somebody else's work, so
+it is left alone unless you insist with `--force`.
 
 **`doc/` is never written to.** Not with `--apply`, not with `--force`. Your
 backlog and your briefs are your data; the updater only ever touches `server/`,
 `tools/`, `ui/`, `agents/`, `AGENTS.md` and `CLAUDE.md`.
 
-**Files you edited are kept by default.** `agents/*.md`, `AGENTS.md` and
-`CLAUDE.md` are process documents, and tuning them to your own process is a
-normal thing to do — so `--apply` lists them as skipped and leaves them as they
-are. If you do want the package's versions, add `--force`; the backup is still
-made in that case.
+**Files are kept for two different reasons, and the categories say which.**
+`agents/*.md` — and an `AGENTS.md` or `CLAUDE.md` that briefboard installed
+itself — are process documents, and tuning them to your own process is a normal
+thing to do; once you have, they are `MODIFIED LOCALLY` and `--apply` leaves them
+as they are. A document that was **yours from the start** is a different case
+altogether: briefboard never installed it, the manifest does not list it, and it
+is `unknown provenance` — also kept, but because it was never briefboard's to
+replace rather than because you changed it. For `CLAUDE.md` and `AGENTS.md` the
+usual case is neither of those, because briefboard owns only its own block there
+and refreshes just that. If you do want the package's version of a kept file, add
+`--force`; the backup is still made in that case.
 
 **Everything replaced is backed up first**, into
 `.briefboard/backup/<timestamp>/`, with the original relative paths
@@ -183,10 +300,30 @@ A manifest that **is** there and cannot be read is a different situation, and is
 reported as one: `update`, `briefboard --version` and `briefboard serve` print a
 warning naming the file and the reason it would not parse. Provenance ends up
 unknown either way, but the cause is not a version that never wrote a manifest —
-something damaged yours, which is worth a look. Nothing repairs or deletes it for
-you: repair the JSON to get the exact categories back, or run
-`briefboard update --apply`, which reinstalls the runtime files (with a backup)
-and writes the manifest anew.
+something damaged yours, which is worth a look.
+
+The consequence is stricter than for a missing manifest, and deliberately so: with
+the record unreadable every file lands in `unknown provenance`, so `--apply`
+replaces **nothing** and the manifest is not rewritten either. A damaged record is
+no evidence about any particular file, and the safe reading of "I cannot vouch for
+this" is to touch none of them.
+
+Nothing repairs or deletes that file for you, and no run writes over it either —
+not even one that does install something. A file that is new in the package stays
+replaceable, so `--apply` installs it, records nothing, and says as much. The copy
+you set out to repair is the copy you will find. Two ways out, in this order:
+
+1. **Repair the JSON.** The exact categories come back and the project carries on
+   with the history it had.
+2. **Delete `.briefboard/installed.json` and run `briefboard update --apply`.**
+   Without a manifest the project is a `no manifest` install — every differing file
+   is replaced, backed up first, and a fresh manifest is written. You lose the
+   record of what you had edited, which is the price of the shortcut.
+
+`briefboard update --apply --force` also replaces those files without deleting
+anything, but it is the blunt instrument: `--force` overrides every category at
+once, including the `AGENTS.md` and `CLAUDE.md` that are yours. Reach for it only
+when you know none of them matter.
 
 **Which version am I on?** `briefboard --version` prints the installed package's
 version and the version of this project's copy, and adds a line pointing at
@@ -208,8 +345,13 @@ browser and you will see the kanban board.
 
 - **`briefboard serve`** — start the board for the current directory (no
   `AGENTBOARD_ROOT` to remember). It runs that project's own `server/server.js`
-  if there is one and the installed package's copy otherwise, printing which of
-  the two it chose. `--port N` pins the port.
+  when that file is briefboard's — the manifest lists it, or it is byte-identical
+  to the package. A readable manifest that does not list it is briefboard saying
+  it did not put the file there: the installed package's copy starts instead, and
+  the declined file is named with the reason. With no readable manifest at all
+  there is nothing to decline it on, so the project's copy runs and `serve`
+  reports that its provenance is unrecorded. Either way it prints which of the
+  two it started. `--port N` pins the port.
 - **A taken default port is not fatal.** If `4571` is busy the board takes the
   next free port (up to `4590`) and prints the URL it actually bound — several
   projects' boards can run side by side without juggling ports by hand.

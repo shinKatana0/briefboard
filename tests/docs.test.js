@@ -1164,3 +1164,146 @@ describe('RELEASING.md tells the truth about publishing (T-0254)', () => {
     );
   });
 });
+
+// T-0296: `update`'s category table is written five times — `CATEGORIES` in
+// bin/briefboard-init.mjs, a table in each of the three guides, and a prose list
+// in README.md — and until now nothing counted them against each other. T-0294
+// added two categories at once and changed a third's behaviour; the review that
+// caught the stale rows was a person reading five lists side by side, which is
+// exactly the check that should not be a human's job.
+//
+// The names are read out of the code, never carried here as an array of our own:
+// a copy would go stale the way the documents did and would then assert that two
+// stale lists agree, which is worse than no test at all. Same reasoning, and the
+// same technique, as the route list of T-0229 above.
+describe('the documented update categories are the ones the code produces (T-0296)', () => {
+  const INIT = 'bin/briefboard-init.mjs';
+  const GUIDES = ['doc/guide/guide.en.md', 'doc/guide/guide.ru.md', 'doc/guide/guide.ja.md'];
+  const README = 'README.md';
+
+  // Parsed rather than imported. bin/briefboard-init.mjs is ESM against a CJS
+  // suite, so `require` is out — but `await import()` is out too, and for a worse
+  // reason than the module system: the file dispatches on `process.argv` at the
+  // top level, so importing it under the test runner reads the runner's own argv,
+  // falls through to `usageError` and takes the process down.
+  function categories() {
+    const source = read(INIT);
+    const list = /const CATEGORIES = \[([^\]]*)\]/.exec(source);
+    assert.ok(list, `${INIT} must keep CATEGORIES as a literal array — it is what this test reads`);
+
+    const names = list[1]
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean);
+    assert.ok(names.length > 1, `only ${names.length} name(s) were read out of CATEGORIES in ${INIT}`);
+
+    return names.map((name) => {
+      // The name is spliced into a pattern below, so it has to be a plain
+      // identifier — an entry this cannot resolve fails here rather than quietly
+      // matching nothing.
+      assert.match(name, /^[A-Za-z_$][\w$]*$/, `CATEGORIES holds \`${name}\`, which is not a constant this can resolve`);
+      const assigned = new RegExp(String.raw`^const ${name} = '([^']*)';`, 'm').exec(source);
+      assert.ok(assigned, `CATEGORIES names ${name}, and ${INIT} has no \`const ${name} = '...'\` to resolve it to`);
+      return assigned[1];
+    });
+  }
+
+  // The one table in a guide whose header row names `--apply`. That flag and the
+  // category strings themselves are untranslated in all three files — which is
+  // the only reason the Russian and Japanese tables can be counted at all.
+  function tableRows(file) {
+    const lines = read(file).split('\n');
+    const headers = lines.map((line, i) => [line, i]).filter(([line]) => /^\|/.test(line) && /`--apply`/.test(line));
+    assert.strictEqual(
+      headers.length,
+      1,
+      `${file} must carry exactly one \`--apply\` category table, and ${headers.length} were found`
+    );
+
+    const rows = [];
+    for (let i = headers[0][1] + 1; i < lines.length && lines[i].startsWith('|'); i++) {
+      const first = lines[i].split('|')[1].trim();
+      if (/^:?-+:?$/.test(first)) continue; // the header separator
+      const name = /^`(.+)`$/.exec(first);
+      assert.ok(
+        name,
+        `${file}: the category table row \`${lines[i].slice(0, 60)}\` has no backticked category in its first column`
+      );
+      rows.push(name[1]);
+    }
+    assert.ok(rows.length, `${file}: the \`--apply\` category table has no rows`);
+    return rows;
+  }
+
+  // README's list is prose, not a table, so it is read as the backticked tokens
+  // of the bullet that carries it, minus the three kinds of token that plainly
+  // are not categories: a flag, a file name, and the command itself.
+  function readmeNames() {
+    const bullet = section(README, /^## Updating an installed project/im)
+      .split(/\n- /)
+      .find((item) => /The plan comes first/.test(item));
+    assert.ok(bullet, `${README}: the update section must keep the bullet that lists the categories`);
+
+    const tokens = [...bullet.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    return tokens.filter((t) => !t.startsWith('-') && !t.endsWith('.md') && !t.startsWith('briefboard '));
+  }
+
+  for (const file of GUIDES) {
+    it(`${file}: every category the code produces has a row`, () => {
+      const rows = tableRows(file);
+      for (const category of categories()) {
+        assert.ok(
+          rows.includes(category),
+          `${file}: \`${category}\` is a category \`update\` prints and the table has no row for it`
+        );
+      }
+    });
+
+    it(`${file}: every row names a category the code produces`, () => {
+      const produced = categories();
+      for (const row of tableRows(file)) {
+        assert.ok(
+          produced.includes(row),
+          `${file}: the table has a row for \`${row}\`, which \`update\` does not print`
+        );
+      }
+    });
+  }
+
+  // Order, not only membership: the three tables are read side by side whenever a
+  // translation is checked, and a row that moved is the same drift as a row that
+  // went missing — one document explaining the categories in another sequence.
+  for (const file of GUIDES.slice(1)) {
+    it(`${file}: the table carries the same rows in the same order as guide.en.md`, () => {
+      const english = tableRows(GUIDES[0]);
+      const rows = tableRows(file);
+      for (let i = 0; i < Math.max(english.length, rows.length); i++) {
+        assert.strictEqual(
+          rows[i],
+          english[i],
+          `${file}: row ${i + 1} is \`${rows[i] ?? '(missing)'}\` where guide.en.md has \`${english[i] ?? '(missing)'}\``
+        );
+      }
+    });
+  }
+
+  it(`${README}: the prose list names every category the code produces`, () => {
+    const named = readmeNames();
+    for (const category of categories()) {
+      assert.ok(
+        named.includes(category),
+        `${README}: \`${category}\` is a category \`update\` prints and the prose list never names it`
+      );
+    }
+  });
+
+  it(`${README}: the prose list names no category the code does not produce`, () => {
+    const produced = categories();
+    for (const name of readmeNames()) {
+      assert.ok(
+        produced.includes(name),
+        `${README}: the prose list names \`${name}\`, which \`update\` does not print`
+      );
+    }
+  });
+});

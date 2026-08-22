@@ -61,7 +61,10 @@ troubleshooting) see the
 
 Deploy it into any project with `npx briefboard init`. It copies `server/`,
 `tools/`, `ui/`, `agents/`, `AGENTS.md`, `CLAUDE.md` into the current directory
-and creates an empty `doc/backlog.md` + `doc/brief/`:
+and creates an empty `doc/backlog.md` + `doc/brief/`. Into a project that already
+exists it fills in what is missing file by file, keeps every file that is already
+there, and adds its instructions to an existing `CLAUDE.md` / `AGENTS.md` as a
+marked block instead of replacing them:
 
 ```bash
 npx briefboard init
@@ -978,8 +981,12 @@ cd ~/code/mobile-app  && briefboard serve
   `BRIEFBOARD_NAME` says: `BRIEFBOARD_NAME="Payments API" briefboard serve`.
 - **`briefboard serve`** starts the board for the current directory, so there is
   no `AGENTBOARD_ROOT` to remember. It prefers that project's own
-  `server/server.js` and falls back to the installed package's copy, printing
-  which of the two it runs.
+  `server/server.js` when that file is briefboard's own — the manifest lists it,
+  or it is byte-identical to the package. A `server/server.js` that a readable
+  manifest does not list is named and not run, and the installed package's copy
+  starts instead; with no readable manifest at all the project's copy runs
+  anyway, and `serve` says that its provenance is unrecorded. Either way it
+  prints which of the two it ran.
 
 ## Updating an installed project
 
@@ -997,15 +1004,26 @@ briefboard update --apply          # actually replaces the files
   prints one line per file: `up to date`, `outdated` (unchanged since install —
   safe to replace), `MODIFIED LOCALLY` (you edited it), `new in package`,
   `no manifest` (the project was installed by a briefboard before 0.2.0, which
-  wrote none, so there is nothing to compare this file against) or
+  wrote none, so there is nothing to compare this file against),
   `unknown provenance` (there is a manifest and it does not list this file, so
-  its origin cannot be told). The last two are still replaced by `--apply`, after
-  a backup.
+  briefboard did not install it), `block removed` or `markers malformed` (the
+  briefboard block in your `CLAUDE.md` / `AGENTS.md` is gone, or its markers are
+  damaged). `--apply` adds every `new in package` file and replaces every
+  `outdated` one — that is what the update is. Of the five it cannot vouch for,
+  only `no manifest` is still replaced, after a backup; `MODIFIED LOCALLY`,
+  `unknown provenance` and `block removed` are kept unless you add `--force`, and
+  `markers malformed` is not touched even then.
 - **`doc/` is never touched** — not by `--apply`, not by `--force`. Your backlog
   and briefs are yours.
-- **Files you edited are kept.** `agents/*.md`, `AGENTS.md` and `CLAUDE.md` are
-  process documents people tune; `--apply` lists them as skipped and leaves them
-  alone. `briefboard update --apply --force` replaces them too.
+- **`CLAUDE.md` and `AGENTS.md` are added to, not replaced.** With no such file
+  briefboard writes its own; with one already there it appends a block between
+  `<!-- briefboard:start -->` and `<!-- briefboard:end -->` and writes nothing
+  outside it, under any flag. `update` refreshes the inside of that block only.
+- **Files are kept for two different reasons.** A file briefboard installed and
+  you then edited is `MODIFIED LOCALLY`. A file that was yours from the start —
+  the `CLAUDE.md` of a project that already had one — is `unknown provenance`,
+  because the manifest does not list it and briefboard did not put it there. Both
+  are left alone by `--apply`; `--force` replaces either, with a backup.
 - **Everything replaced is backed up** into
   `.briefboard/backup/<timestamp>/`, keeping the original paths; the command
   prints that directory on its last line. Keeping the project under git is still

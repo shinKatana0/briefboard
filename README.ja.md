@@ -66,7 +66,10 @@ CLI リファレンス、ボード UI、トラブルシューティングまで�
 
 `npx briefboard init` で任意のプロジェクトに展開できます。これは `server/`、
 `tools/`、`ui/`、`agents/`、`AGENTS.md`、`CLAUDE.md` をカレントディレクトリに
-コピーし、空の `doc/backlog.md` と `doc/brief/` を作成します。
+コピーし、空の `doc/backlog.md` と `doc/brief/` を作成します。すでに存在する
+プロジェクトに対しては、足りないものをファイル単位で埋め、すでにあるファイルは
+そのまま残し、既存の `CLAUDE.md` / `AGENTS.md` には置き換える代わりに、マーカーで
+囲んだブロックとして自分の指示をマージします。
 
 ```bash
 npx briefboard init
@@ -983,9 +986,13 @@ cd ~/code/mobile-app  && briefboard serve
   のタイトルにプロジェクト名が入ります。既定はフォルダ名で、`BRIEFBOARD_NAME`
   で上書きできます: `BRIEFBOARD_NAME="Payments API" briefboard serve`。
 - **`briefboard serve`** はカレントディレクトリのボードを起動します（`AGENTBOARD_ROOT`
-  を覚えておく必要はありません）。そのプロジェクト自身の `server/server.js` を
-  優先し、無ければインストール済みパッケージのコピーを使い、どちらを起動したか
-  を表示します。
+  を覚えておく必要はありません）。そのプロジェクト自身の `server/server.js` が
+  briefboard のものであれば — マニフェストに載っているか、パッケージのものとバイト
+  単位で同一であれば — それを優先します。読めるマニフェストに載っていない
+  `server/server.js` は、名前を挙げたうえで起動せず、インストール済みパッケージの
+  コピーを使います。読めるマニフェストがまったくない場合は、プロジェクトのコピーを
+  そのまま起動し、その出所が記録されていないことを表示します。そして、どちらを
+  起動したかを表示します。
 
 ## インストール済みプロジェクトの更新
 
@@ -1004,15 +1011,28 @@ briefboard update --apply          # 実際にファイルを置き換える
   ＝置き換えて安全）、`MODIFIED LOCALLY`（あなたが編集した）、`new in package`、
   `no manifest`（マニフェストを書かなかった 0.2.0 より前の briefboard で
   インストールされたので、このファイルと比較する対象が無い）、
-  `unknown provenance`（マニフェストはあるがこのファイルが載っておらず、由来を
-  判定できない）のいずれかを表示します。最後の2つも、バックアップを取ったうえで
-  `--apply` の対象になります。
+  `unknown provenance`（マニフェストはあり、そこにこのファイルが載っていない
+  ＝ briefboard がインストールしたものではない）、`block removed` または
+  `markers malformed`（あなたの `CLAUDE.md` / `AGENTS.md` にあった briefboard の
+  ブロックが無くなっている、またはそのマーカーが壊れている）のいずれかを表示し
+  ます。`--apply` は `new in package` のファイルをすべて追加し、`outdated` の
+  ファイルをすべて置き換えます — 更新とはそういうものです。保証できない 5 つの
+  うち、置き換えるのは `no manifest` だけで、それもバックアップを取ってからです。
+  `MODIFIED LOCALLY`、`unknown provenance`、`block removed` は `--force` を
+  付けないかぎり残り、`markers malformed` は付けても触りません。
 - **`doc/` には触れません。** `--apply` でも `--force` でも同じです。バックログ
   とブリーフはあなたのデータです。
-- **編集したファイルは残ります。** `agents/*.md`、`AGENTS.md`、`CLAUDE.md` は
-  プロセスの文書で、各自の運用に合わせて調整されがちです。`--apply` はそれらを
-  スキップした一覧として表示し、中身は変更しません。まとめて置き換えるには
-  `briefboard update --apply --force` を使います。
+- **`CLAUDE.md` と `AGENTS.md` は置き換えではなくマージされます。** その名前の
+  ファイルが無ければ briefboard は自分のものを書き、すでにあれば
+  `<!-- briefboard:start -->` と `<!-- briefboard:end -->` の間にブロックを追記
+  し、どのフラグを付けてもその外側には何も書きません。`update` が更新するのは
+  そのブロックの中だけです。
+- **ファイルが残る理由は 2 つあります。** briefboard がインストールし、その後
+  あなたが編集したファイルは `MODIFIED LOCALLY` です。最初からあなたのもので
+  あったファイル — もともと `CLAUDE.md` を持っていたプロジェクトのそれ — は
+  `unknown provenance` です。マニフェストに載っておらず、briefboard が置いた
+  ものでもないからです。どちらも `--apply` は触れず、`--force` はバックアップの
+  上でどちらも置き換えます。
 - **置き換えたファイルはすべてバックアップされます。**
   `.briefboard/backup/<timestamp>/` に相対パスを保ったまま保存され、その場所が
   最終行に表示されます。とはいえプロジェクトを git 管理下に置くほうが安全で、
