@@ -95,6 +95,22 @@
  *       # as it was asked: `labels` is one array per --label occurrence (names
  *       # inside a set are alternatives, the sets are ANDed) and `labelQuery`
  *       # is that same query rendered for a human.
+ *   node tools/task.mjs start T-0007 [--json]
+ *       # takes a `ready` task into `in_progress` and starts the worker session,
+ *       # by POSTing the board's own /api/task/T-0007/start - the action the drag
+ *       # into In Progress performs. It is a CLIENT and checks nothing itself:
+ *       # the status gate, the dependency gate and the worktree are the server's
+ *       # (T-0319). A board must therefore be RUNNING, because a session does not
+ *       # outlive the board process; with none, this refuses and writes nothing.
+ *   node tools/task.mjs review-start T-0007 [--json]
+ *       # the same client against /api/task/T-0007/review: the review session the
+ *       # card's button starts. Requires status `review` and changes NO status -
+ *       # the session reads the branch's diff, runs the tests and appends a
+ *       # verdict section; it never sets `done` and there is no merge route at
+ *       # all (T-0117, T-0320).
+ *       # Both refuse before posting when the board runs no such session, and
+ *       # both map every outcome through ONE table to an exit code and, under
+ *       # --json, to the `reason` of the document they print (see the guide).
  *   node tools/task.mjs archive [--dry-run]
  *       # moves every done/cancelled task to doc/backlog-archive.md, same format.
  *       # The archive is read-only afterwards; the board keeps showing those
@@ -112,6 +128,7 @@
  */
 
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -140,6 +157,7 @@ const {
   readArchivedTasks,
   archivePathFor,
   findBriefFile,
+  resolveLockTimeout,
 } = require('../server/parser.js');
 
 const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -498,6 +516,19 @@ const SPECS = {
     usage: 'node tools/task.mjs summary [--label ui,docs] [--json]',
     hint: (positional) => `the label is a flag, not a position: --label ${positional[0]}`,
   },
+  // The two commands that act through a running board (T-0319, T-0320). One task
+  // and one optional flag each: there is deliberately no --force here, because the
+  // override of the dependency gate stays where it warns loudly - `status T-0007
+  // in_progress --force` - and a board must never begin blocked work.
+  start: { args: ['T-0007'], flags: { json: 'bool' }, usage: 'node tools/task.mjs start T-0007 [--json]' },
+  // `review-start` and not plain `review`: the latter would sit beside `status
+  // T-0007 review` meaning the opposite thing - one asks for a session, the other
+  // moves the card (T-0320).
+  'review-start': {
+    args: ['T-0007'],
+    flags: { json: 'bool' },
+    usage: 'node tools/task.mjs review-start T-0007 [--json]',
+  },
   archive: { args: [], flags: { 'dry-run': 'bool' }, usage: 'node tools/task.mjs archive [--dry-run]' },
   board: { args: [], flags: {}, usage: 'node tools/task.mjs board' },
   sessions: { args: [], flags: {}, usage: 'node tools/task.mjs sessions' },
@@ -696,6 +727,346 @@ function warnArchived(f, archived) {
 // (T-0171).
 function runnableTasks(tasks, known) {
   return tasks.filter((t) => t.status === 'ready' && blockingDependencies(t, known).length === 0);
+}
+
+// ---------- acting through a running board (T-0319, T-0320) ----------
+//
+// `start` and `review-start` are CLIENTS of actions the board already performs,
+// and they implement none of what they appear to check. POST /api/task/:id/start
+// applies the `ready` gate, the dependency gate (against live AND archived
+// tasks), the transition and the worktree-isolated worker session;
+// POST /api/task/:id/review requires `review`, starts the review session, and
+// writes nothing at all - no status, no merge, nothing past the verdict section
+// the session itself appends (T-0117, T-0122). None of that lives in the browser,
+// so a second implementation here would be a second set of rules to keep in step
+// - the one thing this pair exists not to be. The two differ in one field of the
+// table below and in nothing else.
+//
+// Why a board is REQUIRED rather than convenient: a session does not outlive the
+// board process (server/sessions.js marks what it finds at start-up as
+// `interrupted`). A CLI that spawned one itself would orphan it, so with no board
+// running these commands refuse and write nothing.
+
+// Every outcome, mapped ONCE to the exit code a shell reads and to the `reason`
+// a --json consumer reads, so `$?` and the document can never say different
+// things. 0 is success; 1 stays what it is for every other subcommand - a usage
+// or argument error, refused before a board is even looked for.
+//
+// The first three are the CLI's own (it is the side that knows where boards are);
+// `not-configured` is the CLI's too, read from the board's meta before posting.
+// The rest are the server's answer, translated.
+const DISPATCH_EXITS = {
+  'no-board': 2,
+  'board-unreachable': 3,
+  'ambiguous-board': 4,
+  'not-configured': 5,
+  'no-task': 6,
+  'bad-status': 7,
+  blocked: 8,
+  'already-running': 9,
+  'session-failed': 10,
+  'board-error': 11,
+};
+
+// What each command posts to, what the board's meta calls the session it would
+// start, and whether the action moves the card. This table IS the difference
+// between the two: everything below it is shared.
+//
+// `orchestrator` is not a slip for the review command. T-0305 renamed the
+// VARIABLE to BRIEFBOARD_REVIEW_CMD and deliberately left the session KIND alone,
+// because the kind is written into the registry, into log file names and into
+// what `sessions` prints - and the meta reports kinds. Do not "fix" that here.
+const DISPATCH = {
+  start: { action: 'start', metaKey: 'worker', what: 'worker session', moves: true },
+  'review-start': { action: 'review', metaKey: 'orchestrator', what: 'review session', moves: false },
+};
+
+// The variable a refusal has to name. sessions.js owns ENV_NAMES and does not
+// export it, and server/sessions.js is not these cards' to change, so the worker
+// one is written out; the review pair IS exported, and both names are given
+// because either of them configures it (T-0305).
+function envNameOf(name) {
+  if (name === 'start') return 'BRIEFBOARD_WORKER_CMD';
+  const { REVIEW_ENV, LEGACY_REVIEW_ENV } = require('../server/sessions.js');
+  return `${REVIEW_ENV} (or ${LEGACY_REVIEW_ENV})`;
+}
+
+// The address to dial, from the address the board bound. A board that bound every
+// interface holds the loopback addresses itself since T-0133, so loopback is both
+// reachable and what the board's own Host check accepts under a loopback bind.
+function boardOrigin(board) {
+  const raw = board.host;
+  let host;
+  if (!raw || raw === '0.0.0.0') host = '127.0.0.1';
+  else if (raw === '::' || raw === '::0') host = '[::1]';
+  else host = raw.includes(':') ? `[${raw}]` : raw;
+  return `http://${host}:${board.port}`;
+}
+
+// The one board to post to, or the refusal that there is not exactly one. It
+// reads openBoards() - the same reading `board` prints and the archive warning
+// makes - and never a second one. Picking between two boards is exactly the
+// decision these commands exist to make explicit, so it refuses instead.
+function dispatchBoard(name) {
+  const { traced, untraced, dir, registry, since } = openBoards();
+  const found = traced.length + untraced.length;
+  if (found === 0) {
+    return {
+      reason: 'no-board',
+      error: `no board is running for this project: no live entry in ${rel(dir)}, and no session running either`,
+      hint:
+        `${name} posts to a running board, and a session cannot outlive the board that started it — ` +
+        `start one in ${ROOT} (briefboard serve) and run this again. Nothing was written.`,
+    };
+  }
+  if (found > 1) {
+    const listed = traced
+      .map((b) => `pid ${b.pid}${b.port ? ` on ${b.host}:${b.port}` : ' (address unknown)'}`)
+      .concat(untraced.map((pid) => `pid ${pid} (address unknown)`))
+      .join(', ');
+    return {
+      reason: 'ambiguous-board',
+      error: `${found} boards are running for this project: ${listed}`,
+      hint: `${name} will not guess which of them this dispatch belongs to; stop the ones you do not mean. Nothing was written.`,
+      boards: traced
+        .map((b) => ({ pid: b.pid, url: b.port ? boardOrigin(b) : null }))
+        .concat(untraced.map((pid) => ({ pid, url: null }))),
+    };
+  }
+  const [board] = traced;
+  if (!board || !board.port) {
+    const pid = board ? board.pid : untraced[0];
+    return {
+      reason: 'board-unreachable',
+      error: `a board is running for this project (pid ${pid}) but its trace records no address`,
+      hint:
+        board
+          ? `${rel(board.file)} carries no port, so there is nothing to post to; restart the board. Nothing was written.`
+          : `${rel(registry)} has a session it started still running, and it left no ${rel(dir)} entry — ` +
+            `it predates briefboard ${since}, and such a board cannot say where it listens. Restart it. Nothing was written.`,
+    };
+  }
+  return { board: { pid: board.pid, url: boardOrigin(board) } };
+}
+
+// How long the board may take to answer, and not a number of its own: /start
+// takes the backlog lock, then runs `git worktree add`, then the project's setup
+// command, and answers only once all three are done. So the bound is the sum of
+// the three the SERVER itself allows (LOCK + WORKTREE_ADD + SETUP). A CLI that
+// gave up sooner would report a failure while the board was still doing exactly
+// what it is meant to do — that is the whole reason this is derived and not
+// chosen.
+function boardTimeoutMs() {
+  const { SETUP_TIMEOUT_MS, WORKTREE_ADD_TIMEOUT_MS } = require('../server/sessions.js');
+  return (
+    resolveLockTimeout(process.env.BRIEFBOARD_LOCK_TIMEOUT_MS) + WORKTREE_ADD_TIMEOUT_MS + SETUP_TIMEOUT_MS
+  );
+}
+
+// node:http rather than fetch, for two reasons measured here. `agent: false`
+// opens a connection that is closed with the answer, so this process has nothing
+// left to keep its event loop alive and exits on its own - and it must exit on
+// its own: calling process.exit() while fetch's pooled socket was still being
+// torn down aborted node itself on Windows (`!(handle->flags & UV_HANDLE_CLOSING)`
+// in libuv's win/async.c), which turned a SUCCESSFUL start into exit code
+// 0xC0000409. Second, the timeout below is an INACTIVITY one on the socket,
+// which is exactly the shape of this wait: the board sends nothing at all while
+// it writes a worktree, so a total deadline would have to be guessed while this
+// one is the thing it bounds.
+function boardRequest(url, { method }) {
+  return new Promise((resolve, reject) => {
+    const budget = boardTimeoutMs();
+    const req = http.request(url, { method, agent: false, timeout: budget }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => (text += chunk));
+      res.on('end', () => {
+        let body = null;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          /* a body that is not JSON is reported as the text it was */
+        }
+        resolve({ status: res.statusCode, body, text });
+      });
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error(`no answer, and none for ${budget} ms`)));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Which refusal the server just made. Both endpoints answer a refusal with
+// `error` and nothing else — unlike /done and /remove-worktree they carry no
+// `reason` field — so the two 409s /start can give are told apart by the server's
+// own words. Inventing a reason string the endpoints do not use was the other
+// option, and a machine consumer cannot tell an invented one from a real one; the
+// missing field is filed as its own card instead (T-0323). /review has only one
+// 409 ("task is not in review"), so it never reaches the branch below.
+function classifyRefusal(res) {
+  if (res.status === 404) return 'no-task';
+  if (res.status === 409) {
+    const message = String((res.body && res.body.error) || res.text);
+    return /unfinished dependencies/i.test(message) ? 'blocked' : 'bad-status';
+  }
+  return 'board-error';
+}
+
+// The end of every path through this command: one document under --json, one
+// line otherwise, and the exit code the table gives the reason.
+//
+// `process.exitCode`, never process.exit(): the request above has just closed a
+// socket, and exiting on top of that teardown is what aborted node on Windows.
+// Nothing here holds the loop open, so the process leaves with this code by
+// itself, and everything already written to stdout is flushed on the way.
+function dispatchEnd(doc, human, wantJson) {
+  if (wantJson) console.log(JSON.stringify(doc, null, 2));
+  else if (doc.ok) console.log(human);
+  else {
+    console.error('ERROR: ' + human);
+    if (doc.hint) console.error('  ' + doc.hint);
+  }
+  process.exitCode = doc.exit;
+}
+
+function dispatchRefusal(name, id, refusal, board, wantJson) {
+  dispatchEnd(
+    {
+      ok: false,
+      command: name,
+      id,
+      reason: refusal.reason,
+      exit: DISPATCH_EXITS[refusal.reason],
+      error: refusal.error,
+      ...(refusal.hint ? { hint: refusal.hint } : {}),
+      ...(refusal.http ? { http: refusal.http } : {}),
+      ...(refusal.boards ? { boards: refusal.boards } : {}),
+      ...(board ? { board } : {}),
+    },
+    refusal.error,
+    wantJson
+  );
+}
+
+async function runDispatch(name, id, wantJson) {
+  const spec = DISPATCH[name];
+  const found = dispatchBoard(name);
+  if (found.reason) {
+    dispatchRefusal(name, id, found, null, wantJson);
+    return;
+  }
+  const { board } = found;
+
+  // Before posting, never after: with no command configured the board's own drag
+  // still moves the card and starts nothing, deliberately, so a person can take a
+  // task and work by hand (T-0084). The CLI's contract is stricter by declining
+  // sooner rather than by behaving differently — the shared endpoint is untouched.
+  let meta;
+  try {
+    meta = await boardRequest(`${board.url}/api/board`, { method: 'GET' });
+  } catch (e) {
+    dispatchRefusal(
+      name,
+      id,
+      { reason: 'board-error', error: `board pid ${board.pid} at ${board.url} did not answer: ${e.message}` },
+      board,
+      wantJson
+    );
+    return;
+  }
+  const sessions = (meta.body && meta.body.sessions) || {};
+  if (meta.status !== 200 || sessions[spec.metaKey] !== true) {
+    if (meta.status !== 200) {
+      dispatchRefusal(
+        name,
+        id,
+        {
+          reason: 'board-error',
+          error: `board pid ${board.pid} answered ${meta.status} for /api/board`,
+          http: meta.status,
+        },
+        board,
+        wantJson
+      );
+      return;
+    }
+    dispatchRefusal(
+      name,
+      id,
+      {
+        reason: 'not-configured',
+        error: `this board starts no ${spec.what}: it reports sessions.${spec.metaKey} as not configured`,
+        hint: `set ${envNameOf(name)} for the board and restart it. Nothing was written.`,
+      },
+      board,
+      wantJson
+    );
+    return;
+  }
+
+  let res;
+  try {
+    res = await boardRequest(`${board.url}/api/task/${id}/${spec.action}`, { method: 'POST' });
+  } catch (e) {
+    dispatchRefusal(
+      name,
+      id,
+      { reason: 'board-error', error: `board pid ${board.pid} at ${board.url} did not answer: ${e.message}` },
+      board,
+      wantJson
+    );
+    return;
+  }
+  if (res.status !== 200) {
+    dispatchRefusal(
+      name,
+      id,
+      {
+        reason: classifyRefusal(res),
+        error: String((res.body && res.body.error) || res.text || `board answered ${res.status}`),
+        http: res.status,
+      },
+      board,
+      wantJson
+    );
+    return;
+  }
+
+  // A 200 means the ACTION was performed — for `start` that includes the
+  // transition, for `review-start` it never does — and `session` says separately
+  // whether an agent is running. They are reported apart because they can differ,
+  // and a dispatcher that read exit 0 while nothing was started would believe work
+  // is under way that is not.
+  const answer = res.body || {};
+  const session = String(answer.session || '');
+  const doc = {
+    ok: session === 'started',
+    command: name,
+    id,
+    status: answer.status,
+    ...(answer.profile === undefined ? {} : { profile: answer.profile }),
+    session,
+    board,
+  };
+  const where = `board pid ${board.pid} at ${board.url}`;
+  // The one sentence the two actions cannot share, because the fact differs: an
+  // arrow says the card moved, and `review-start` must never draw one — the whole
+  // promise of the review session is that it leaves the status alone (T-0122).
+  const moved = spec.moves ? `${id} -> ${answer.status}` : `${id} still ${answer.status}`;
+  if (session === 'started') {
+    doc.exit = 0;
+    dispatchEnd(doc, `${moved}, ${spec.what} started (${where})`, wantJson);
+    return;
+  }
+  const reason = session === 'already-running' ? 'already-running' : 'session-failed';
+  doc.reason = reason;
+  doc.exit = DISPATCH_EXITS[reason];
+  // What the board DID do is said in the same breath as what it did not: after
+  // `start` the status has changed, and a refusal-looking line that hid that would
+  // send the reader looking for a card which has already moved.
+  doc.error = `${moved}, but no ${spec.what} started: ${session}`;
+  dispatchEnd(doc, doc.error, wantJson);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -1266,6 +1637,21 @@ switch (cmd) {
     break;
   }
 
+  // The two clients of the board's own actions (T-0319, T-0320). Everything they
+  // do beyond checking how they were CALLED is in runDispatch() above, shared
+  // whole: one board lookup, one exit table, one document.
+  case 'start':
+  case 'review-start': {
+    const { flags: f, positional } = parseArgs(cmd, rest);
+    const [id] = positional;
+    if (!id) dieUsage(cmd, `${cmd} needs the task to ${cmd === 'start' ? 'start' : 'review'}`);
+    // Refused here rather than by the board's route regex: a malformed id is a
+    // wrong CALL, and those exit 1 without a board being looked for at all.
+    if (!TASK_ID_RE.test(id)) dieUsage(cmd, `"${id}" is not a task id (expected T-NNNN)`);
+    await runDispatch(cmd, id, 'json' in f);
+    break;
+  }
+
   case 'archive': {
     const { flags: f } = parseArgs(cmd, rest);
     const dryRun = 'dry-run' in f;
@@ -1373,7 +1759,7 @@ switch (cmd) {
     // a single word — `task.mjs stauts T-0007 review` printed this same list and
     // exited 0, which in a script reads as the status having been set (T-0220).
     const help =
-      'commands: add | status | priority | depends | labels | profile | brief | link | note | show | list | runnable | summary | archive | board | sessions | validate  (see the file header)';
+      'commands: add | status | priority | depends | labels | profile | brief | link | note | show | list | runnable | summary | start | review-start | archive | board | sessions | validate  (see the file header)';
     // `help` and its flag spellings are the same question as no command at all,
     // and refusing the one word every CLI answers would be a refusal of the kind
     // this task exists to remove. It is deliberately not in the list it prints:

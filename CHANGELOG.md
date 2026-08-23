@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-23
+
+0.5.0 gave an external orchestrator a way to read briefboard; this release gives
+it a way to act. `start` takes a `ready` task to `in_progress` and puts an agent
+on it, and `review-start` asks for the review session on a card already in
+`review` — the two board gestures that had no command behind them. Both are
+clients of endpoints the board already exposed, so the rules about what may be
+started stay in one place, on the server, and both give every class of refusal an
+exit code of its own.
+
+**No call that was correct in 0.5.0 behaves differently in 0.6.0.** Everything
+below is either a new subcommand or a bound on how long an endpoint may take, and
+every refusal introduced is on a subcommand that did not exist before this
+release.
+
+### Added
+
+- **`start` — put an agent on a `ready` task from the command line.** The command
+  form of the drag from Ready into In Progress: it moves the task to
+  `in_progress` and starts the worker session in its own git worktree, through
+  the same `POST /api/task/:id/start` the drop uses. It checks nothing itself —
+  the `ready` gate, the dependency gate and the worktree all stay on the server,
+  because a CLI that repeated those rules would be a second set of them to keep
+  in step, and the two would eventually disagree about which task may be started.
+  **It requires a running board**, which is a fact about your deployment rather
+  than an implementation detail: a session does not outlive the board process
+  that started it, so a CLI that spawned one itself would orphan it. With no
+  board running `start` refuses and writes nothing; with more than one it names
+  them and refuses rather than guessing. Without `BRIEFBOARD_WORKER_CMD` it
+  declines *before* posting, so the task stays `ready`. There is deliberately no
+  `--force`: overriding the dependency gate stays with `status … --force`, which
+  warns loudly (T-0319).
+- **`review-start` — ask for the review session on a card already in `review`.**
+  The command form of the card's button, the same client pointed at
+  `POST /api/task/:id/review`. It **changes no status and merges nothing** — not
+  as a promise this command makes, but because that is what the review session
+  is: it reads the branch's diff and the briefs, runs the tests, and appends a
+  `### Review verdict` section. It is named `review-start` and not `review`
+  because `status T-0007 review` is a different act with the opposite effect: one
+  asks for a session, the other moves the card (T-0320).
+- **One exit-code table for both, and `--json` carries the same number as `$?`.**
+  Every class of refusal has a code of its own — `2` `no-board`, `3`
+  `board-unreachable`, `4` `ambiguous-board`, `5` `not-configured`, `6`
+  `no-task`, `7` `bad-status`, `8` `blocked`, `9` `already-running`, `10`
+  `session-failed`, `11` `board-error` — so a script can tell "that task is
+  blocked" from "no board is running" without reading the message. `--json`'s
+  `reason` is that same table's other column, so a shell reading `$?` and a
+  parser reading the document can never tell you different things. `1` goes on
+  meaning what it means everywhere else in this CLI: the call itself was wrong.
+  `2` through `5` happen before anything is posted, so nothing has changed; `9`
+  and `10` are the two where the action DID happen and only the agent is missing,
+  and after `start` that means the status has moved (T-0319, T-0320).
+- **`start` is usable without `review-start`.** On its own it closes the loop —
+  `runnable --json` to find what may be started, `start` to dispatch it,
+  `sessions` to watch it — and the pair only adds the last step that still needed
+  a mouse. An integrator can begin with one command (T-0319, T-0320).
+
+### Fixed
+
+- **An endpoint could spend exactly as long as its client waits, so the refusal
+  naming the stuck git call was the one thing lost.** `GET /api/git/:id` had a
+  worst case of 20s — two sequential git calls at `GIT_TIMEOUT_MS`, 10s each —
+  against a client that gives up at 20s, so on a machine slow enough to reach
+  either, the board's useful answer (which git call did not come back) lost the
+  race to "no response within 20000ms". The endpoint now owns a total budget of
+  its own, derived from measurement rather than picked round, with the per-call
+  bound kept as a backstop; the calls themselves are bounded, so no git process
+  outlives the answer. A first call that timed out was also being reported as
+  `not-a-repo` — the same defect one level down, a true condition replaced by a
+  misleading one — and that is fixed with it (T-0312).
+- **The same fix one level up, where composing two bounded operations left the
+  whole unbounded again.** `POST /api/task/:id/remove-worktree` inspects and then
+  removes, so its worst case was the inspect budget *plus* a removal — still past
+  the client's wait, and its refusal is the one that names which rule stopped the
+  removal (`not-merged`, `dirty`, `ambiguous-branch`, `session-running`). The
+  composed operation now has a ceiling of its own, and each phase gets the
+  smaller of its own budget and what the ceiling has left, rather than either
+  phase being shrunk to make room. Every site that awaits the inspection was
+  enumerated and has a verdict, because a fix covering two of three is a fix that
+  gets re-filed (T-0316).
+
+### Upgrading an existing project
+
+Installing the new package is not enough: `briefboard init` copied `server/`,
+`tools/`, `ui/` and `agents/` into your project, and the board runs that copy. Run
+`briefboard update` to see what would change and `briefboard update --apply` to
+receive it.
+
 ## [0.5.0] - 2026-08-23
 
 briefboard can now be driven by something above it. A scope of work can be

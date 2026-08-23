@@ -54,9 +54,16 @@ describe('waitForExit still fails a process that does not exit (T-0271)', () => 
 
   it('a process that has already gone is not waited for at all', async () => {
     const proc = spawn(process.execPath, ['-e', 'process.exit(7)'], { stdio: 'ignore' });
-    assert.strictEqual(await waitForExit(proc, SHORT_MS), 7);
-    // Asked a second time, when the exit is behind us, it answers from the
-    // process rather than arming a listener nothing will ever fire.
+    // The two waits below carry different numbers on purpose, and tidying them
+    // into one is what made this test fail on `main` (T-0314). The first is a
+    // spawn-lifetime wait — node booting, running `-e`, exiting — which T-0271
+    // measured at p50 213ms quiet and max 1.47s quiet, so SHORT_MS was under the
+    // p50 of its own population as soon as the machine was busy. It gets the
+    // budget this suite measured for that population.
+    assert.strictEqual(await waitForExit(proc, SPAWNED_LIFETIME_BUDGET_MS), 7);
+    // The second is the test's subject and keeps the short bound: the exit is
+    // behind us, so it must answer from the process rather than arm a listener
+    // nothing will ever fire, and only a tight number proves that.
     assert.strictEqual(await waitForExit(proc, SHORT_MS), 7);
   });
 });

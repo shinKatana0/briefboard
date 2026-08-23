@@ -1151,6 +1151,29 @@ node tools/task.mjs summary [--label ui,docs] [--json]
                                   # `scope` echoes the query: `labels` is one array per
                                   # --label occurrence (names in a set are alternatives, the
                                   # sets are ANDed) beside `labelQuery` rendering it
+node tools/task.mjs start T-0007 [--json]
+                                  # the command form of the drag from Ready into In Progress:
+                                  # takes the task to in_progress and starts the worker
+                                  # session in its own worktree. It is a CLIENT of the board's
+                                  # POST /api/task/:id/start — the ready gate, the dependency
+                                  # gate and the worktree are the server's, never a second
+                                  # copy of those rules here
+                                  # a board must be RUNNING (a session does not outlive one),
+                                  # and without BRIEFBOARD_WORKER_CMD it refuses BEFORE
+                                  # posting, so the task stays ready. No --force: overriding
+                                  # the dependency gate stays with `status … --force`
+                                  # every refusal class has its own exit code, and --json's
+                                  # `reason` is that same table — see the guide
+node tools/task.mjs review-start T-0007 [--json]
+                                  # the command form of the card's "start the review session"
+                                  # button: the same client, pointed at
+                                  # POST /api/task/:id/review. The task must ALREADY be in
+                                  # `review`, and this CHANGES NO STATUS and merges nothing —
+                                  # the session reads the diff, runs the tests and appends a
+                                  # "### Review verdict" section, which is all it has ever done
+                                  # refuses before posting without BRIEFBOARD_REVIEW_CMD (the
+                                  # older BRIEFBOARD_ORCHESTRATOR_CMD configures it too), and
+                                  # shares `start`'s exit-code table rather than adding one
 node tools/task.mjs archive [--dry-run]
                                   # move every done/cancelled task to doc/backlog-archive.md
 node tools/task.mjs board        # is a board running for this project, and on which port —

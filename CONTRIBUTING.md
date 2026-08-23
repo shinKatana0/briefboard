@@ -170,12 +170,23 @@ habits caused it, and five rules keep it impossible:
   results from that file's own process, so an uninterrupted run of SYNCHRONOUS
   tests prints nothing until it ends. Measured on three two-second tests, three
   `await`ed ones print their marks at 2.3s / 4.3s / 6.3s while three blocking
-  ones print all four at 6.4s. Across this suite the longest silent stretch is
-  168s quiet and 249-260s under four concurrent suites, against a budget of 360s
-  (2026-08-23, 2502 tests) — so the budget is nearly half spent before any load,
-  and by one file (T-0311). Raising it is not the answer: it is the only guard
-  against a test that holds the event loop open after its own end, which no
-  per-test limit can catch.
+  ones print all four at 6.4s. Raising the budget is not the answer to a stretch
+  that grows: it is the only guard against a test that holds the event loop open
+  after its own end, which no per-test limit can catch.
+
+  **A file whose tests block yields between them.** One `await` of a macrotask
+  in a root `beforeEach` is the whole of it, and it lets each mark out as it
+  happens instead of at the end of the stretch. `tests/task-cli.test.js` drives
+  the CLI with `spawnSync` and was the whole of this suite's silence: measured
+  quiet on 2514 tests (2026-08-23, Windows 11, node v24.18.0, 24 cores), the
+  longest stretch with no mark printed was **176.6s before that hook and 8.1s
+  after it** — 47% of the 360s budget against 2.3%, and 249-260s of it under
+  four concurrent suites in the round before — with the run itself taking
+  383s and 387s, the same time either way (T-0311). What is left is bounded by
+  the slowest single test rather than by a whole `describe`, which is the bound
+  such a file can have; the ten longest stretches after it sit within 7.0-8.1s
+  of each other and no one file owns them. If you add a file of blocking tests,
+  add the hook with it.
 
   Silence is counted from the run's first output, not from its spawn, and the
   span before that has a budget of its own (`BRIEFBOARD_STARTUP_MS`, against

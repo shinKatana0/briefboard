@@ -574,7 +574,7 @@ Step by step:
 All task changes go through `node tools/task.mjs`. It guarantees the file
 format, sequential IDs, and atomic writes. The subcommands documented below are
 `add`, `status`, `priority`, `depends`, `labels`, `brief`, `link`, `note`, `show`, `list`,
-`runnable`, `summary`, `archive`,
+`runnable`, `summary`, `start`, `review-start`, `archive`,
 `board`, `sessions` and `validate`; `profile` is one too, and lives with the feature it
 belongs to — [The run profile](#the-run-profile-which-mode-an-agent-runs-in).
 For the list as the tool itself knows it, run `node tools/task.mjs` with no
@@ -592,6 +592,14 @@ prerequisite still unfinished, no run profiles declared — prints the reason
 alone: the call was well formed, and a usage line would answer nothing. Either
 way nothing is written; the backlog is only ever touched by a call that got all
 the way through.
+
+Two subcommands exit with more than `1`, and only above it:
+[`start`](#start--take-a-ready-task-and-put-an-agent-on-it) and
+[`review-start`](#review-start--ask-for-the-review-session-on-a-card-in-review)
+give each of their refusal classes a code of its own, so a script can tell "that
+task is blocked" from "no board is running" without reading the message. They
+share one table, not two. `1` still means there what it means everywhere else —
+the call itself was wrong.
 
 ### `add` — create a new task
 
@@ -1103,6 +1111,145 @@ Neither command ever writes: not the backlog, not the archive, not a session
 record. Both make the same promise `list --json` does — a field that exists keeps
 its name, its type and its meaning; new fields may appear in any release; a
 consumer ignores what it does not recognise.
+
+### `start` — take a `ready` task and put an agent on it
+
+```bash
+node tools/task.mjs start T-0007
+node tools/task.mjs start T-0007 --json
+```
+
+The command form of the drag from Ready into In Progress. It moves the task to
+`in_progress` and starts the worker session in its own git worktree — the same
+act, through the same code, as the drop on the board.
+
+**It is a client, and it checks nothing itself.** The `ready` gate, the
+dependency gate (against the archive as well) and the worktree all live in
+`POST /api/task/:id/start`, on the server. That is the point: a CLI that repeated
+those rules would be a second set of them to keep in step with the board's, and
+the two would eventually disagree about which task may be started.
+
+**A board must be running.** A session does not outlive the board process — the
+board marks what it finds at start-up as `interrupted` — so a CLI that spawned
+one itself would orphan it. With no board running, `start` refuses and writes
+nothing. If you drive briefboard from an external orchestrator, this is a fact
+about your deployment: keep `briefboard serve` alive for as long as you want to
+dispatch work. If more than one board is running for the project, `start` names
+them and refuses rather than guessing which one the dispatch belongs to.
+
+**The session command is checked before anything is posted.** The board reports
+whether it has one; without `BRIEFBOARD_WORKER_CMD` the CLI declines and the task
+stays `ready`. The board's own drag still behaves as it always did — it moves the
+card and starts nothing, deliberately, so a person can take a task and work by
+hand. The CLI is stricter by declining *sooner*, not by doing something else.
+
+There is deliberately no `--force`. Overriding the dependency gate stays with
+`status T-0007 in_progress --force`, which warns loudly; nothing that goes through
+a board may begin blocked work quietly.
+
+**Exit codes.** One table — shared with
+[`review-start`](#review-start--ask-for-the-review-session-on-a-card-in-review)
+below, which is the same client pointed at a different action — and `--json`'s
+`reason` is that table's other column, so `$?` and a parsed document can never
+tell you different things:
+
+| exit | `reason` | what happened |
+|------|----------|----------------|
+| `0` | — | the action was performed and the session started |
+| `1` | — | the call was wrong (no task id, a malformed one, an unknown flag) |
+| `2` | `no-board` | no board is running for this project |
+| `3` | `board-unreachable` | a board is running but its trace records no address (it predates briefboard 0.2.0, or the trace has no port) |
+| `4` | `ambiguous-board` | more than one board is running; the command will not choose |
+| `5` | `not-configured` | this board starts no session of that kind (`BRIEFBOARD_WORKER_CMD`; `BRIEFBOARD_REVIEW_CMD` for `review-start`) |
+| `6` | `no-task` | the board has no such task |
+| `7` | `bad-status` | the task is not in the status the action requires — `ready` for `start`, `review` for `review-start` |
+| `8` | `blocked` | a prerequisite in `depends` is still unfinished (`start` only) |
+| `9` | `already-running` | a session for this task was already running |
+| `10` | `session-failed` | the session could not start (no git repository, `git worktree add` failed, the setup command failed, the session limit was reached) |
+| `11` | `board-error` | the board did not answer, or answered something the command cannot read |
+
+`2` through `5` happen **before** anything is posted; `6`, `7` and `8` are the
+board's own refusals. Nothing is written in any of them, and the task is exactly
+where it was. `9` and `10` are the two where the action DID happen and only the
+agent is missing — after `start` that means the **status has changed**, and the
+message says so in the same breath, because a card that has already moved is not
+something to leave a reader to discover. (After `review-start` nothing has
+changed even then: that action never writes.) Exit `0` means both halves
+happened.
+
+`--json` prints one document on stdout and nothing else:
+
+```json
+{
+  "ok": true,
+  "command": "start",
+  "id": "T-0007",
+  "status": "in_progress",
+  "profile": "",
+  "session": "started",
+  "board": { "pid": 24192, "url": "http://127.0.0.1:4571" },
+  "exit": 0
+}
+```
+
+`status`, `profile` and `session` are the board's own answer, under the board's
+own names. A refusal replaces `status` and `session` with `reason` and `error`
+(and, for the classes that have one, `hint`) — except `9` and `10`, which carry
+both, because both halves are true at once. The same promise as `list --json`
+holds: a field that exists keeps its name, its type and its meaning; new fields
+may appear in any release; ignore what you do not recognise.
+
+**On scheduling.** `start` is an explicit command and briefboard schedules
+nothing. It is worth being honest about the other half of that: `runnable --json`
+piped into `start` is a scheduler, and one you can write in five minutes. That is
+yours to write and not ours to prevent — but the philosophy guarantees only that
+*we* do not decide what runs next.
+
+### `review-start` — ask for the review session on a card in `review`
+
+```bash
+node tools/task.mjs review-start T-0007
+node tools/task.mjs review-start T-0007 --json
+```
+
+The command form of the **Start the review session** button in a card's dialog.
+The task must ALREADY be in `review` — the worker's own `in_progress → review` is
+what put it there — and the session reads the branch's diff and the briefs, runs
+the tests, and appends a `### Review verdict` section to the description.
+
+**It changes no status, and it does not merge.** Not as a promise this command
+makes, but because that is what the review session *is*: it sets nothing, `done`
+least of all, and there is no merge route in the board at all (T-0117). A verdict
+prepares a human's decision; it is not one. Running `review-start` on a card in
+`review` leaves it in `review`, and leaves `doc/backlog.md` untouched until the
+session itself writes its verdict.
+
+It is the same client as [`start`](#start--take-a-ready-task-and-put-an-agent-on-it)
+pointed at a different action, so everything above holds here unchanged: a board
+must be running and exactly one of them; the session command is checked against
+the board's meta **before** anything is posted (this one under
+`BRIEFBOARD_REVIEW_CMD`, or the older `BRIEFBOARD_ORCHESTRATOR_CMD`, either of
+which configures it); and the exit codes are the one table above, not a second
+one. Only two rows read differently: `7` here means the task is not in `review`,
+and `8` cannot happen — dependencies gate the start of work, not the review of
+it.
+
+The name is `review-start` and not `review` because `status T-0007 review` is a
+different act with the opposite effect: one asks for a session, the other moves
+the card. `--json` prints the same document, with `command` reading
+`review-start` and `status` reading `review` both before and after:
+
+```json
+{
+  "ok": true,
+  "command": "review-start",
+  "id": "T-0007",
+  "status": "review",
+  "session": "started",
+  "board": { "pid": 24192, "url": "http://127.0.0.1:4571" },
+  "exit": 0
+}
+```
 
 ### `archive` — move the closed tasks out of the backlog
 

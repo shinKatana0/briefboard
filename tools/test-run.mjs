@@ -42,33 +42,46 @@ const TIMEOUT_ARG = `--test-timeout=${TEST_TIMEOUT_MS}`;
 // Three times the per-test limit. The reasoning that number was chosen by — a
 // `before` hook and the first test under it, each bounded by the limit, so
 // twice the limit is the theoretical worst and the budget must be above it —
-// is arithmetically fine and describes the wrong thing, which T-0272 measured
-// (`--timing-dir`, 2026-08-23, Windows 11 / node v24.18.0 / 24 cores):
+// is arithmetically fine and describes the wrong thing, which T-0272 measured.
 //
-//   longest stretch with no mark printed   quiet 168.3s   four concurrent suites 249-260s
+// What it describes wrongly is which run holds the budget. It is not a slow
+// test: node:test reports a file's results from that file's own process, so a
+// test that blocks its event loop cannot report, and neither can the tests
+// before it in the same uninterrupted stretch — measured on three 2s tests,
+// three `await`ed ones print their marks at 2.3s / 4.3s / 6.3s and three
+// blocking ones print all four at 6.4s. A file whose tests drive the CLI with
+// spawnSync therefore prints nothing for the length of a whole describe, with no
+// test in it anywhere near the per-test limit. No per-test limit can bound that,
+// and this budget is the only thing that does.
 //
-// Against a budget of 360s that is 47% spent before any load, and 72% under the
-// rig this suite is argued about on. The old note said "the real numbers are far
-// lower: 17.5s for the slowest test and 71s for the slowest whole file", and
-// both are still true — they are simply not what bounds the silence.
+// What it costs, re-measured after T-0311 (`--timing-dir`, 2026-08-23, quiet,
+// Windows 11 / node v24.18.0 / 24 cores, 2514 tests):
 //
-// What bounds it is a run of SYNCHRONOUS tests. node:test reports a file's
-// results from that file's own process, so a test that blocks its event loop
-// cannot report, and neither can the tests before it in the same uninterrupted
-// stretch: measured on three 2s tests, three `await`ed ones print their marks at
-// 2.3s / 4.3s / 6.3s and three blocking ones print all four at 6.4s. So
-// tests/task-cli.test.js, whose tests drive the CLI with spawnSync, prints
-// nothing for the length of a whole describe — 168.3s for `task.mjs list
-// --json` alone, with no test in it anywhere near the per-test limit. No
-// per-test limit can bound that, and this budget is the only thing that does.
+//   longest stretch with no mark printed   quiet 8.1s   loaded: not measured, see below
 //
-// Two consequences, and neither is a reason to raise the number (T-0259, and
-// what would stop being caught is in the message below):
-//   * the pressure on it comes from the SUITE growing, not from the machine —
-//     under four concurrent suites the stretch grew x1.53 while the suite grew
-//     x2.41, so a file that gains synchronous tests spends this budget faster
-//     than any load does;
-//   * the margin is 1.39x, not the ~5x the "slowest test" reading suggests.
+// 2.3% of the 360s budget, a margin of about 44x. T-0272 read 168.3s here and
+// tests/task-cli.test.js owned it — `task.mjs list --json` alone was that whole
+// stretch. T-0311 gave that file one `await` of a macrotask in a root
+// `beforeEach`, its marks come out as they happen, and the pressure went with
+// them: the ten longest stretches now sit within 7.0-8.1s of each other and no
+// one file owns them.
+//
+// THE LOADED FIGURE HAS NOT BEEN RE-MEASURED SINCE T-0311, and the 249-260s the
+// old round read under four concurrent suites is deliberately not carried here:
+// it described the file T-0311 fixed, so quoting it would argue this budget from
+// a pressure that no longer exists — which is the whole reason this block was
+// rewritten (T-0315). The rig is four concurrent
+// `node tools/test-run.mjs --timing-dir=<a directory outside the repository>`,
+// documented in CONTRIBUTING.md; whoever next runs it fills the figure in.
+//
+// None of that is a reason to raise the number (T-0259, and what would stop
+// being caught is in the message below). A 44x quiet margin says the suite is
+// far from this budget today, not that the budget is idle: it is the only guard
+// against a test that holds the event loop open past its own end, and no
+// per-test limit can see one. What spends it is a file gaining synchronous
+// tests, since an uninterrupted run of those is what a stretch is made of — so
+// the answer to a stretch that has grown is the hook above, or a fresh
+// measurement, and not this constant.
 const SILENCE_LIMIT_MS = Number(process.env.BRIEFBOARD_SILENCE_MS || Number(TEST_TIMEOUT_MS) * 3);
 
 // Silence begins when the run first speaks. Before that the run is not silent,

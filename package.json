@@ -1,6 +1,6 @@
 {
   "name": "briefboard",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Lightweight kanban board + CLI for coding agents: backlog, briefs, and a review/merge workflow they must follow.",
   "license": "MIT",
   "author": "briefboard contributors",

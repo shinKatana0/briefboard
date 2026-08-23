@@ -1156,6 +1156,28 @@ node tools/task.mjs summary [--label ui,docs] [--json]
                                   # `scope` は問い合わせをそのまま返す。`labels` は --label の
                                   # 指定1回につき1つの配列（集合の中の名前は選択肢、集合どうしは
                                   # AND）で、その隣に文字列にした `labelQuery` が並ぶ
+node tools/task.mjs start T-0007 [--json]
+                                  # Ready から In Progress へのドロップのコマンド版。タスクを
+                                  # in_progress にして、ワーカーセッションをそれ専用の worktree
+                                  # で開始する。これはボードの POST /api/task/:id/start の
+                                  # クライアントであり、`ready` のゲートも依存のゲートも
+                                  # worktree もサーバーのもの。ここに規則の2つ目の写しは無い
+                                  # ボードが動いている必要がある（セッションはボードより長く
+                                  # 生きない）。BRIEFBOARD_WORKER_CMD が無ければ POST する前に
+                                  # 拒否するので、タスクは ready のまま。--force は無い。依存の
+                                  # ゲートを越えるのは `status … --force` の役目のまま
+                                  # 拒否の種類ごとに専用の終了コードがあり、--json の `reason`
+                                  # はその同じ表。ガイドを参照
+node tools/task.mjs review-start T-0007 [--json]
+                                  # カードの *レビューセッションを開始* ボタンのコマンド版。
+                                  # 同じクライアントを POST /api/task/:id/review に向けたもの。
+                                  # タスクはすでに `review` にある必要があり、これはステータスを
+                                  # 変えず、マージもしない — セッションは差分を読み、チェックを
+                                  # 走らせ、「### Review verdict」セクションを追記する。それが
+                                  # 最初から変わらない仕事
+                                  # BRIEFBOARD_REVIEW_CMD（以前の名前 BRIEFBOARD_ORCHESTRATOR_CMD
+                                  # でも設定できる）が無ければ POST する前に拒否し、終了コードの
+                                  # 表は `start` と共有して自前のものを増やさない
 node tools/task.mjs archive [--dry-run]
                                   # done/cancelled のタスクをすべて doc/backlog-archive.md へ移す
 node tools/task.mjs board        # このプロジェクトでボードが動いているか、どのポートか — pid、
