@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-24
+
+0.6.0 gave an orchestrator a way to act. This release makes acting honest, and
+closes the loop that one left open. Two of the three ways to put a worker on a
+card did not exist: a card sent back from review could be moved but not
+dispatched, and a card whose session had died could not be re-dispatched at all
+without inventing a question nobody had asked. Both are commands now — `rework`
+and `resume` — and the third, `start`, stops claiming an agent it failed to
+start.
+
+**No call that was correct in 0.6.0 behaves differently in 0.7.0.** Everything
+below is either a new subcommand, a new environment variable or a new board
+action, and every refusal introduced is on a subcommand that did not exist before
+this release.
+
+### Added
+
+- **`rework` — send a card in `review` back for another round, and put somebody
+  on it.** `review → in_progress` **was always a legal transition, and never
+  needed `--force`**; what did not exist was a dispatch. Moving the card is all
+  `status … in_progress` ever did, and `start` could not help, because that
+  command is bound to `ready` by the transition it performs — so a returned card
+  sat in In Progress with no session behind it until somebody noticed. `rework`
+  is the missing half: the transition **and** the worker session, on the branch
+  the previous round is already on, through `POST /api/task/:id/rework` and the
+  card's **Send back for rework** button. A missing `task/T-0007` branch is
+  refused with an exit code of its own (`12`, `no-branch`), because recreating it
+  would begin the correction from `HEAD` and silently discard the round being
+  corrected; a missing *worktree* is recreated instead. `--json` carries the
+  `round` being started, derived from the verdicts the description already holds
+  and stored nowhere (T-0329).
+- **`resume` — put a worker back on a card already `in_progress` whose session
+  died.** A session does not outlive the board that started it, and a machine can
+  be rebooted mid-task; what is left is a card whose status says an agent is on it
+  and whose registry entry says otherwise. `resume` starts the worker session
+  again on the branch the task is already on and **writes no status at all** — the
+  card is already where it belongs, so nothing moves and nothing has to be put
+  back. It refuses while a session is *genuinely* running, read from the board's
+  session registry rather than guessed from the status, which says an agent is on
+  the task either way. Until this existed, the only control that reached a worker
+  from a card in In Progress was the answer form's restart box, and that form
+  appears only for a task carrying a `### Session questions` section — so getting a
+  worker back meant writing that a session had asked a question when none had,
+  into the description this project keeps as its audit trail (T-0333).
+- **`BRIEFBOARD_SETUP_TIMEOUT_MS` — how long `BRIEFBOARD_SETUP_CMD` may take.** In
+  milliseconds, default `600000`. That default is a ceiling rather than a
+  measurement: briefboard has never run your install command and cannot size it.
+  A project that knows its own install can never honestly take ten minutes can say
+  so, and a hung resolver is then refused in seconds instead of holding the drop —
+  and the card — for ten. Empty, or anything that is not a positive number, falls
+  back to the default rather than turning the limit off, the same rule
+  `BRIEFBOARD_SESSION_MAX` already followed: a typo must not leave the board with
+  no bound at all (T-0328).
+- **The board has a tab icon.** Every tab used to show a blank-page glyph, and the
+  page asked for a favicon that answered `404` (T-0330).
+
+### Fixed
+
+- **A dispatch that never reached a session left the task `in_progress` with
+  nothing running.** `in_progress` means an agent is on the task, not that
+  somebody tried to put one there — so when the worktree cannot be created, the
+  setup command fails or runs past its limit, or the worker command cannot be
+  spawned, the board now restores `ready`: the card returns to the column you
+  dragged it out of, the answer still names the reason, the setup output is still
+  in the session log, and the retry is the same drop again. Two answers keep the
+  card where it is, because in neither of them is the status a lie:
+  `already-running`, where pulling the task back would take it out from under a
+  live agent, and `disabled`, where no worker command is configured at all and the
+  drop is a person taking the task by hand. The restore is conditional on the card
+  not having moved in the meantime — setup can run for minutes, and a repair does
+  not overrule whatever decision moved it during them (T-0325).
+- **The board said nothing when a dispatch failed and the card came back.** The
+  drop simply appeared not to have worked. It now says why, so a card that returns
+  to Ready explains itself instead of looking like a bug (T-0327).
+
+### Changed
+
+- **The documents that ship with the product know about all four dispatches.**
+  `briefboard init` copies `agents/` into your project, so those files are part of
+  what you receive: `agents/PROTOCOL.md` §3.6 now describes `/rework` and
+  `/resume` and counts what it lists correctly — fourteen narrow writing
+  endpoints, with `GET /api/git/:id` the fifteenth route — and
+  `agents/ORCHESTRATOR.md` names `resume`. The guide gained the reason
+  `in_progress → ready` is missing from the lifecycle, which is the edge people
+  reach for when a session dies, and what to do instead (T-0334).
+
+### Upgrading an existing project
+
+Installing the new package is not enough: `briefboard init` copied `server/`,
+`tools/`, `ui/` and `agents/` into your project, and the board runs that copy. Run
+`briefboard update` to see what would change and `briefboard update --apply` to
+receive it.
+
 ## [0.6.0] - 2026-08-23
 
 0.5.0 gave an external orchestrator a way to read briefboard; this release gives

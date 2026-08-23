@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>briefboard · doc/backlog.md</title>
+<!-- The tab icon is an inline data URI because ui/ ships exactly one file and
+     the server routes nothing: a separate .ico would cost a second file, a
+     second route and a binary no release audit can read (T-0330). The drawing
+     is the board itself - three columns, the middle one lit - in --muted and
+     --st-ready, two colours that read against a light tab strip and a dark one
+     alike. The colours are written %23 because a raw # would start a URL
+     fragment and cut the data URI short. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='6' width='3' height='8' rx='1' fill='%237D8894'/><rect x='6.5' y='3' width='3' height='11' rx='1' fill='%2384CC16'/><rect x='11' y='8' width='3' height='6' rx='1' fill='%237D8894'/></svg>">
 <script>
   // Resolve the theme as early as possible (before first paint) to avoid a
   // flash of the wrong theme: explicit user choice from localStorage wins,
@@ -695,6 +703,7 @@ const I18N = {
     confirm_start: 'Start task {id} "{title}"?\n\nAn agent session will be started: it works in its own git branch and writes and commits code there.',
     confirm_start_no_session: 'Start task {id} "{title}"?\n\nNo worker command is configured (BRIEFBOARD_WORKER_CMD), so no session will be started — the task is only marked as taken into work.',
     start_failed: 'Failed to start the task',
+    start_rolled_back: 'The session for {id} did not start: {reason}.\n\nThe task has been put back to Ready — nothing is running on it, and you can drop it again once the reason is fixed. The session log has the detail.',
     search_placeholder: 'Search title/description/labels…',
     theme_toggle_to_light: 'Switch to light theme', theme_toggle_to_dark: 'Switch to dark theme',
     new_task_button: 'New task', new_task_title: 'New task',
@@ -765,10 +774,18 @@ const I18N = {
     closing_remove_confirm: 'Remove the worktree of {id}?\n\nOnly the directory goes; the branch and every commit on it stay.',
     closing_remove_failed: 'Failed to remove the worktree',
     closing_remove_refused: 'The worktree was not removed: {reason}',
+    closing_rework: 'Send back for rework',
+    closing_rework_confirm: 'Send {id} "{title}" back for rework?\n\nThe task goes back to In Progress and an agent session is started on the branch the previous round is on: it works and commits there.',
+    closing_rework_confirm_no_session: 'Send {id} "{title}" back for rework?\n\nNo worker command is configured (BRIEFBOARD_WORKER_CMD), so no session will be started — the task is only moved back to In Progress.',
+    closing_rework_failed: 'Failed to send the task back for rework',
+    closing_rework_refused: 'The task was not sent back: {reason}',
+    rework_rolled_back: 'The session for {id} did not start: {reason}.\n\nThe task has been put back to Review — nothing is running on it, and you can send it back again once the reason is fixed. The session log has the detail.',
     closing_why_not_merged: 'the branch is not merged',
     closing_why_dirty: 'the worktree has uncommitted changes',
     closing_why_ambiguous: 'the board cannot tell which branch belongs to this task',
     closing_why_session: 'an agent session is running in it',
+    closing_why_no_branch: 'this task has no branch, and a rework would start from HEAD and lose the previous round',
+    closing_why_running: 'an agent session is already running on this task',
     closing_why_git: 'the board cannot read git here',
     profile_unused: 'No session command uses {profile}, so this choice changes nothing yet — add {profile} to BRIEFBOARD_SESSION_CMD, BRIEFBOARD_WORKER_CMD or BRIEFBOARD_REVIEW_CMD',
     profile_some_only: '{profile} reaches only these sessions: {kinds} — the others ignore this choice',
@@ -798,6 +815,14 @@ const I18N = {
     review_session_confirm: 'Start the review session for {id} "{title}"?\n\nAn agent reads the diff of the branch and the briefs, runs the tests and appends its verdict to the task description. It sets no status, done least of all, and it merges nothing — the decision stays yours.',
     review_session_failed: 'Failed to start the review session',
     review_session_refused: 'The review session did not start: {reason}',
+    resume_session_title: 'Worker session',
+    resume_session_what: 'Puts a worker session back on this task, on the branch it is already on \u2014 for a session that is over without the task having moved: a board that was interrupted, a worker that crashed, a machine that rebooted. The task stays In Progress; no status is written.',
+    resume_session_unconfigured: 'Not configured on this board: set BRIEFBOARD_WORKER_CMD to start it from here.',
+    resume_session_button: 'Resume the work',
+    resume_session_confirm: 'Resume work on {id} "{title}"?\n\nA worker session starts on the branch this task is already on: it works and commits there. The task stays In Progress \u2014 nothing moves, and nothing has to be put back if the session does not start.',
+    resume_session_failed: 'Failed to resume the work',
+    resume_session_refused: 'The worker session did not start: {reason}',
+    resume_why_no_branch: 'this task has no branch, so a resume would start from HEAD without the work it is meant to carry on',
     watch_title: 'The board noticed',
     watch_unrecorded_label: 'work not recorded',
     watch_unrecorded_note: 'The session the board started on this task has ended, {branch} carries commits, and the task is still in progress. The commits are there; the status was not changed.',
@@ -848,6 +873,7 @@ const I18N = {
     confirm_start: 'Взять задачу {id} «{title}» в работу?\n\nБудет запущена агентская сессия: она работает в отдельной git-ветке, пишет код и коммитит его туда.',
     confirm_start_no_session: 'Взять задачу {id} «{title}» в работу?\n\nКоманда воркера не настроена (BRIEFBOARD_WORKER_CMD), сессия не запустится — задача просто пометится взятой в работу.',
     start_failed: 'Не удалось взять задачу в работу',
+    start_rolled_back: 'Сессия по задаче {id} не запустилась: {reason}.\n\nЗадача возвращена в Ready — над ней ничего не работает, и её можно перетащить снова, когда причина устранена. Подробности — в логе сессии.',
     search_placeholder: 'Поиск по названию/описанию/меткам…',
     theme_toggle_to_light: 'Переключить на светлую тему', theme_toggle_to_dark: 'Переключить на тёмную тему',
     new_task_button: 'Новая задача', new_task_title: 'Новая задача',
@@ -918,10 +944,18 @@ const I18N = {
     closing_remove_confirm: 'Убрать worktree задачи {id}?\n\nУдаляется только каталог; ветка и все коммиты на ней остаются.',
     closing_remove_failed: 'Не удалось убрать worktree',
     closing_remove_refused: 'Worktree не убран: {reason}',
+    closing_rework: 'Вернуть на доработку',
+    closing_rework_confirm: 'Вернуть {id} «{title}» на доработку?\n\nЗадача вернётся в In Progress, и на ветке предыдущего круга будет запущена агентская сессия: она работает и коммитит там.',
+    closing_rework_confirm_no_session: 'Вернуть {id} «{title}» на доработку?\n\nКоманда воркера не настроена (BRIEFBOARD_WORKER_CMD), сессия не запустится — задача просто вернётся в In Progress.',
+    closing_rework_failed: 'Не удалось вернуть задачу на доработку',
+    closing_rework_refused: 'Задача не возвращена на доработку: {reason}',
+    rework_rolled_back: 'Сессия по задаче {id} не запустилась: {reason}.\n\nЗадача возвращена в Review — над ней ничего не работает, и её можно вернуть на доработку снова, когда причина устранена. Подробности — в логе сессии.',
     closing_why_not_merged: 'ветка не влита',
     closing_why_dirty: 'в worktree есть незакоммиченные изменения',
     closing_why_ambiguous: 'доска не может определить, какая ветка принадлежит этой задаче',
     closing_why_session: 'в нём работает агентская сессия',
+    closing_why_no_branch: 'у задачи нет ветки, и доработка началась бы от HEAD, потеряв предыдущий круг',
+    closing_why_running: 'по задаче уже работает агентская сессия',
     closing_why_git: 'доска не может прочитать git',
     profile_unused: 'Ни одна команда сессии не использует {profile}, поэтому пока этот выбор ничего не меняет — добавьте {profile} в BRIEFBOARD_SESSION_CMD, BRIEFBOARD_WORKER_CMD или BRIEFBOARD_REVIEW_CMD',
     profile_some_only: '{profile} доходит только до этих сессий: {kinds} — остальные этот выбор игнорируют',
@@ -951,6 +985,14 @@ const I18N = {
     review_session_confirm: 'Запустить ревью-сессию по задаче {id} «{title}»?\n\nАгент прочитает диф ветки и брифы, прогонит тесты и допишет вердикт в описание задачи. Он не ставит никакой статус, тем более done, и ничего не мержит — решение остаётся за вами.',
     review_session_failed: 'Не удалось запустить ревью-сессию',
     review_session_refused: 'Ревью-сессия не запустилась: {reason}',
+    resume_session_title: 'Воркер-сессия',
+    resume_session_what: 'Снова ставит на задачу воркер-сессию — на той же ветке, где уже лежит работа. Это для случая, когда сессия закончилась, а задача никуда не сдвинулась: прерванная доска, упавший воркер, перезагрузка машины. Задача остаётся в In Progress, статус не пишется.',
+    resume_session_unconfigured: 'На этой доске не настроена: чтобы запускать её отсюда, задайте BRIEFBOARD_WORKER_CMD.',
+    resume_session_button: 'Продолжить работу',
+    resume_session_confirm: 'Продолжить работу по задаче {id} «{title}»?\n\nНа ветке, где уже лежит работа, запустится воркер-сессия: она работает и коммитит там же. Задача остаётся в In Progress — ничего не двигается, и возвращать назад нечего, если сессия не запустится.',
+    resume_session_failed: 'Не удалось продолжить работу',
+    resume_session_refused: 'Воркер-сессия не запустилась: {reason}',
+    resume_why_no_branch: 'у задачи нет ветки, и продолжение началось бы от HEAD — без той работы, ради которой всё затевается',
     watch_title: 'Доска заметила',
     watch_unrecorded_label: 'работа не записана',
     watch_unrecorded_note: 'Сессия, запущенная доской по этой задаче, завершилась, в {branch} есть коммиты, а задача всё ещё в работе. Коммиты на месте, статус не менялся.',
@@ -1001,6 +1043,7 @@ const I18N = {
     confirm_start: 'タスク {id}「{title}」に着手しますか?\n\nエージェントセッションが開始されます。専用の git ブランチでコードを書き、コミットします。',
     confirm_start_no_session: 'タスク {id}「{title}」に着手しますか?\n\nワーカーのコマンド（BRIEFBOARD_WORKER_CMD）が未設定のため、セッションは開始されません。タスクは作業中として記録されるだけです。',
     start_failed: 'タスクに着手できませんでした',
+    start_rolled_back: 'タスク {id} のセッションは開始されませんでした: {reason}。\n\nタスクは Ready に戻されました。実行中のものはありません。原因を解消してから、もう一度ドロップできます。詳細はセッションログにあります。',
     search_placeholder: 'タイトル・説明・ラベルを検索…',
     theme_toggle_to_light: 'ライトテーマに切り替え', theme_toggle_to_dark: 'ダークテーマに切り替え',
     new_task_button: '新規タスク', new_task_title: '新規タスク',
@@ -1071,10 +1114,18 @@ const I18N = {
     closing_remove_confirm: '{id} のワークツリーを削除しますか?\n\n削除されるのはディレクトリだけです。ブランチとそのコミットは残ります。',
     closing_remove_failed: 'ワークツリーを削除できませんでした',
     closing_remove_refused: 'ワークツリーは削除されませんでした: {reason}',
+    closing_rework: '差し戻す',
+    closing_rework_confirm: '{id}「{title}」を差し戻しますか?\n\nタスクは In Progress に戻り、前回のブランチでエージェントセッションが開始されます。そこでコードを書き、コミットします。',
+    closing_rework_confirm_no_session: '{id}「{title}」を差し戻しますか?\n\nワーカーのコマンド（BRIEFBOARD_WORKER_CMD）が未設定のため、セッションは開始されません。タスクは In Progress に戻るだけです。',
+    closing_rework_failed: 'タスクを差し戻せませんでした',
+    closing_rework_refused: 'タスクは差し戻されませんでした: {reason}',
+    rework_rolled_back: 'タスク {id} のセッションは開始されませんでした: {reason}。\n\nタスクは Review に戻されました。実行中のものはありません。原因を解消してから、もう一度差し戻せます。詳細はセッションログにあります。',
     closing_why_not_merged: 'ブランチが未マージです',
     closing_why_dirty: 'ワークツリーにコミットされていない変更があります',
     closing_why_ambiguous: 'どのブランチがこのタスクのものかをボードは判別できません',
     closing_why_session: 'その中でエージェントセッションが動いています',
+    closing_why_no_branch: 'このタスクのブランチがなく、差し戻すと HEAD から始まって前回の作業が失われます',
+    closing_why_running: 'このタスクではすでにエージェントセッションが動いています',
     closing_why_git: 'ボードはここで git を読めません',
     profile_unused: 'どのセッションコマンドも {profile} を使っていないため、この選択はまだ何も変えません — BRIEFBOARD_SESSION_CMD、BRIEFBOARD_WORKER_CMD、BRIEFBOARD_REVIEW_CMD のいずれかに {profile} を追加してください',
     profile_some_only: '{profile} が届くのは次のセッションだけです: {kinds} — ほかのセッションはこの選択を無視します',
@@ -1104,6 +1155,14 @@ const I18N = {
     review_session_confirm: 'タスク {id}「{title}」のレビューセッションを開始しますか?\n\nエージェントがブランチの差分とブリーフを読み、テストを実行し、判定をタスクの説明に追記します。ステータスは変更せず、done にもせず、マージも行いません — 判断はあなたのものです。',
     review_session_failed: 'レビューセッションを開始できませんでした',
     review_session_refused: 'レビューセッションは開始されませんでした: {reason}',
+    resume_session_title: 'ワーカーセッション',
+    resume_session_what: 'このタスクにワーカーセッションを再び割り当てます。既に作業があるブランチで再開します — ボードの中断、ワーカーのクラッシュ、マシンの再起動などで、タスクが動かないままセッションだけが終わった場合用です。タスクは In Progress のままで、ステータスは書き換えません。',
+    resume_session_unconfigured: 'このボードでは未設定です。ここから開始するには BRIEFBOARD_WORKER_CMD を設定してください。',
+    resume_session_button: '作業を再開',
+    resume_session_confirm: 'タスク {id}「{title}」の作業を再開しますか?\n\n既に作業があるブランチでワーカーセッションが開始され、そこでコードを書き、コミットします。タスクは In Progress のまま — 何も移動せず、セッションが開始しなくても戻すものはありません。',
+    resume_session_failed: '作業を再開できませんでした',
+    resume_session_refused: 'ワーカーセッションは開始されませんでした: {reason}',
+    resume_why_no_branch: 'このタスクにはブランチがなく、再開すると引き継ぐべき作業なしに HEAD から始まってしまいます',
     watch_title: 'ボードが気づいたこと',
     watch_unrecorded_label: '未記録の作業',
     watch_unrecorded_note: 'ボードがこのタスクで開始したセッションは終了し、{branch} にはコミットがありますが、タスクはまだ進行中のままです。コミットは残っていて、ステータスは変更されていません。',
@@ -2111,6 +2170,8 @@ const CLOSING_WHY = {
   dirty: 'closing_why_dirty',
   'ambiguous-branch': 'closing_why_ambiguous',
   'session-running': 'closing_why_session',
+  'no-branch': 'closing_why_no_branch',
+  'already-running': 'closing_why_running',
   'no-git': 'closing_why_git',
   'not-a-repo': 'closing_why_git',
 };
@@ -2149,6 +2210,19 @@ function removeBlocker(state, id) {
   return null;
 }
 
+// The third action, and the only one on this card that starts an agent (T-0329).
+// Its two blockers are the server's own, in the same order it applies them:
+// a session already running on the task, and the missing `task/T-NNNN` branch
+// that carries the round being corrected. Unreadable git blocks nothing here —
+// the server does not refuse on it either, and the dispatch that follows answers
+// for itself.
+function reworkBlocker(state, id) {
+  const session = sessionsById.get(id);
+  if (session && session.status === 'running') return 'already-running';
+  if (state.git !== 'ok') return null;
+  return (state.branches || []).indexOf('task/' + id) === -1 ? 'no-branch' : null;
+}
+
 function closingActionHtml(action, label, blocker) {
   const why = blocker ? `<span class="closing-why">${esc(t(CLOSING_WHY[blocker] || 'closing_why_git'))}</span>` : '';
   return `<button type="button" class="tf-btn" data-closing-${action}${blocker ? ' disabled' : ''}>${esc(label)}</button>${why}`;
@@ -2180,7 +2254,8 @@ function closingContentHtml(task, state) {
       : '';
   const actions =
     (task.status === 'review'
-      ? closingActionHtml('accept', t('closing_accept'), acceptBlocker(state))
+      ? closingActionHtml('accept', t('closing_accept'), acceptBlocker(state)) +
+        closingActionHtml('rework', t('closing_rework'), reworkBlocker(state, task.id))
       : '') +
     (ok && state.worktree
       ? closingActionHtml('remove', t('closing_remove'), removeBlocker(state, task.id))
@@ -2199,7 +2274,10 @@ function paintClosingBlock(overlay, task) {
   const box = overlay.querySelector('[data-closing]');
   if (!box) return;
   const state = gitStateById.get(task.id) || { git: 'pending' };
-  box.innerHTML = closingContentHtml(task, state);
+  // A card can leave those statuses with its dialog open: `rework` sends one to
+  // In Progress (T-0329). Past them the block has nothing to offer — and would
+  // otherwise go on offering a cleanup the server refuses in `in_progress`.
+  box.innerHTML = CLOSING_STATUSES.indexOf(task.status) === -1 ? '' : closingContentHtml(task, state);
   const fill = (selector, text) => {
     const el = box.querySelector(selector);
     if (el) el.textContent = text;
@@ -2223,6 +2301,9 @@ function wireClosingBlock(overlay, box, task) {
   });
   on('[data-closing-remove]', (e) => {
     if (!e.target.disabled) removeTaskWorktree(overlay, task);
+  });
+  on('[data-closing-rework]', (e) => {
+    if (!e.target.disabled) reworkTask(overlay, task);
   });
   on('[data-closing-copy]', (e) => copyClosingCommand(e.target, box));
 }
@@ -2268,6 +2349,45 @@ async function acceptTask(overlay, task) {
     await loadClosingBlock(overlay, task);
   } catch {
     alert(t('closing_accept_failed'));
+  }
+}
+
+// The same endpoint the CLI's `rework` posts to, and the same two things to say
+// afterwards as the drop into In Progress: what the server refused, or that the
+// dispatch reached no session and the card came back (T-0325, T-0327). It comes
+// back to REVIEW here, which is why this does not reuse `start_rolled_back`.
+//
+// The confirmation names what the drop's does: this one starts an agent, and the
+// text differs when the board has no worker command, so it never promises a
+// session that cannot be started.
+async function reworkTask(overlay, task) {
+  const key = sessionsConfigured.worker ? 'closing_rework_confirm' : 'closing_rework_confirm_no_session';
+  if (!confirm(tFill(key, { id: task.id, title: task.title }))) return;
+  try {
+    const r = await fetch('/api/task/' + encodeURIComponent(task.id) + '/rework', { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      alert(
+        data && data.reason
+          ? tFill('closing_rework_refused', { reason: t(CLOSING_WHY[data.reason] || 'closing_rework_failed') })
+          : t(writeErrorKey(r.status, 'closing_rework_failed'))
+      );
+      await loadClosingBlock(overlay, task);
+      return;
+    }
+    if (data && data.rolledBack) {
+      alert(tFill('rework_rolled_back', { id: task.id, reason: data.session }));
+      await loadClosingBlock(overlay, task);
+      return;
+    }
+    // The card is now In Progress, and the SSE frame that follows the write is
+    // what repaints the board. The dialog's own copy moves with it and the block
+    // is repainted from that — it belongs to `review` and `done`, so what it
+    // paints for a task under work is nothing at all.
+    task.status = 'in_progress';
+    paintClosingBlock(overlay, task);
+  } catch {
+    alert(t('closing_rework_failed'));
   }
 }
 
@@ -2421,6 +2541,30 @@ function reviewActionHtml(task) {
   });
 }
 
+// The third session a card can start, and the only one whose absence used to be
+// worked around by writing into the description: a card in `in_progress` whose
+// session is gone had no re-dispatch at all, so the way back was to append a
+// `### Session questions` section and press the answer form's restart box — a
+// question nobody asked, recorded for good (T-0333).
+//
+// Offered for any task in `in_progress`, with the same rule as its two
+// neighbours: the button is there where pressing it can work, and every reason it
+// cannot is said in its place instead. A session that is genuinely running is one
+// of those reasons and is `busy` here rather than a blocker of its own — the
+// server refuses it for real, from its registry, and this side is UX.
+function resumeActionHtml(task) {
+  return sessionActionHtml(task, {
+    visible: task.status === 'in_progress',
+    enabled: sessionsConfigured.worker,
+    busy: sessionBusy(task),
+    attr: 'data-resume-session',
+    titleKey: 'resume_session_title',
+    whatKey: 'resume_session_what',
+    buttonKey: 'resume_session_button',
+    unconfiguredKey: 'resume_session_unconfigured',
+  });
+}
+
 // ---------- stopping the running session from the card (T-0211) ----------
 // The kill endpoint has existed since T-0077, and until now the only way to
 // reach it was to open the session log: to stop a session you had to guess that
@@ -2465,7 +2609,14 @@ function sessionAreaHtml(task) {
     ? `<div class="session-row"><button type="button" class="tf-btn" data-session-log="${esc(task.id)}">` +
       `${esc(t('session_log_button'))}</button></div>`
     : '';
-  return log + treeNoteHtml(task) + stopActionHtml(task) + briefingActionHtml(task) + reviewActionHtml(task);
+  return (
+    log +
+    treeNoteHtml(task) +
+    stopActionHtml(task) +
+    briefingActionHtml(task) +
+    resumeActionHtml(task) +
+    reviewActionHtml(task)
+  );
 }
 
 function wireSessionArea(overlay, task) {
@@ -2478,6 +2629,8 @@ function wireSessionArea(overlay, task) {
   if (briefingButton) briefingButton.addEventListener('click', () => startBriefingSession(task));
   const reviewButton = overlay.querySelector('[data-review-session]');
   if (reviewButton) reviewButton.addEventListener('click', () => startReviewSession(task));
+  const resumeButton = overlay.querySelector('[data-resume-session]');
+  if (resumeButton) resumeButton.addEventListener('click', () => resumeWork(task));
 }
 
 // An open card catches up with the session registry, the way an open log already
@@ -2505,15 +2658,19 @@ function refreshOpenTaskSessions() {
 // wrong. Unlike the drops, the session IS the whole action here — no transition
 // stands behind the click — so a 200 that started nothing has to be said out loud
 // or the click reads as having worked.
-async function startCardSession(task, { action, confirmKey, failedKey, refusedKey }) {
+async function startCardSession(task, { action, confirmKey, failedKey, refusedKey, why }) {
   if (!confirm(tFill(confirmKey, { id: task.id, title: task.title }))) return;
   try {
     const r = await fetch('/api/task/' + encodeURIComponent(task.id) + '/' + action, { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      alert(t(writeErrorKey(r.status, failedKey)));
+      // In the board's own words where the server named a reason, which only
+      // /resume does: /briefing and /review send none at all, so `why` is absent
+      // for them and the answer is the same one they have always given.
+      const named = data && data.reason && why ? why[data.reason] : null;
+      alert(named ? tFill(refusedKey, { reason: t(named) }) : t(writeErrorKey(r.status, failedKey)));
       return;
     }
-    const data = await r.json().catch(() => ({}));
     if (data && data.session && data.session !== 'started') {
       alert(tFill(refusedKey, { reason: data.session }));
     }
@@ -2538,6 +2695,29 @@ function startReviewSession(task) {
     confirmKey: 'review_session_confirm',
     failedKey: 'review_session_failed',
     refusedKey: 'review_session_refused',
+  });
+}
+
+// The same endpoint the CLI's `resume` posts to. It changes no status, so unlike
+// the drop into In Progress there is no rollback to report and no card to move:
+// what there is to say is that the dispatch reached no session, which the body
+// above already says for all three.
+//
+// The two refusals it can meet are the server's, and they are worth the board's
+// own words rather than a bare "failed": one is fixed by finding the branch and
+// the other by waiting for the session that is running.
+const RESUME_WHY = {
+  'no-branch': 'resume_why_no_branch',
+  'already-running': 'closing_why_running',
+};
+
+function resumeWork(task) {
+  return startCardSession(task, {
+    action: 'resume',
+    confirmKey: 'resume_session_confirm',
+    failedKey: 'resume_session_failed',
+    refusedKey: 'resume_session_refused',
+    why: RESUME_WHY,
   });
 }
 
@@ -3563,6 +3743,23 @@ function attachStartDropZone(col) {
       const r = await fetch('/api/task/' + encodeURIComponent(id) + '/start', { method: 'POST' });
       if (!r.ok) {
         alert(t(writeErrorKey(r.status, 'start_failed')));
+        return;
+      }
+      // The transition succeeded, but since T-0325 it can be UNDONE by the same
+      // request: a dispatch that reached no session puts the task back to
+      // `ready`. The user then watches the card travel to In Progress and snap
+      // back, and without this reads a correct answer as the board losing their
+      // drop. The reason is in the body they never see.
+      //
+      // Keyed on `rolledBack`, NOT on "the session did not start". `disabled` —
+      // no worker command configured — answers a 200 that started nothing and
+      // leaves the task In Progress ON PURPOSE: that drop is a person taking the
+      // task by hand, which is the board's other supported way of working. A
+      // message keyed on the session would fire there and tell them the opposite
+      // of what happened.
+      const data = await r.json().catch(() => ({}));
+      if (data && data.rolledBack) {
+        alert(tFill('start_rolled_back', { id: id, reason: data.session }));
         return;
       }
       // Success: don't touch the DOM here - the SSE "changed" event fires once

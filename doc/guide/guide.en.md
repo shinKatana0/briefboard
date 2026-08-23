@@ -472,6 +472,22 @@ bringing it up again later costs no second briefing. There is deliberately
 no way back out of `ready`: past a written brief the task has cost something,
 and undoing that is a different decision.
 
+**`in_progress → ready` is missing too, and on purpose** — this is the one people
+reach for, usually because a session died and there seems to be no other way to put
+an agent back on the card. `ready` says that nobody has started the task, and while
+`task/T-0007` exists with commits on it, that is simply untrue. What to do instead:
+
+- **the session died and the work stands** — put a worker back with
+  [`resume`](#resume--put-a-worker-back-on-a-card-already-in_progress), or the card's
+  **Resume the work** button. The card does not move, because it is already where it
+  belongs; see
+  [When the session dies: resuming the work](#when-the-session-dies-resuming-the-work);
+- **the round is abandoned** — `cancelled` and a new card. That is a decision about
+  work rather than a status correction, and the record should show it as one;
+- `node tools/task.mjs status T-0007 ready --force` remains the escape for a genuine
+  mistake. It warns loudly every time, and that is the point rather than the friction:
+  a forced transition is meant to be remarkable.
+
 Step by step:
 
 1. **Create the task** (orchestrator). It lands in `backlog`:
@@ -551,7 +567,9 @@ Step by step:
 
 7. **Review and close** (orchestrator). The orchestrator reviews the work and
    runs the tests. If something is wrong, it sends the task back
-   (`review → in_progress`) with comments. If it passes and is merged, the
+   (`review → in_progress`) with comments — `node tools/task.mjs rework T-0007`
+   makes that move AND puts a worker on it, see
+   [Sending it back: a rework round](#sending-it-back-a-rework-round). If it passes and is merged, the
    orchestrator sets `done`:
 
    ```bash
@@ -574,7 +592,7 @@ Step by step:
 All task changes go through `node tools/task.mjs`. It guarantees the file
 format, sequential IDs, and atomic writes. The subcommands documented below are
 `add`, `status`, `priority`, `depends`, `labels`, `brief`, `link`, `note`, `show`, `list`,
-`runnable`, `summary`, `start`, `review-start`, `archive`,
+`runnable`, `summary`, `start`, `review-start`, `rework`, `resume`, `archive`,
 `board`, `sessions` and `validate`; `profile` is one too, and lives with the feature it
 belongs to — [The run profile](#the-run-profile-which-mode-an-agent-runs-in).
 For the list as the tool itself knows it, run `node tools/task.mjs` with no
@@ -593,9 +611,11 @@ alone: the call was well formed, and a usage line would answer nothing. Either
 way nothing is written; the backlog is only ever touched by a call that got all
 the way through.
 
-Two subcommands exit with more than `1`, and only above it:
-[`start`](#start--take-a-ready-task-and-put-an-agent-on-it) and
-[`review-start`](#review-start--ask-for-the-review-session-on-a-card-in-review)
+Four subcommands exit with more than `1`, and only above it:
+[`start`](#start--take-a-ready-task-and-put-an-agent-on-it),
+[`review-start`](#review-start--ask-for-the-review-session-on-a-card-in-review),
+[`rework`](#rework--send-a-card-in-review-back-for-another-round)
+and [`resume`](#resume--put-a-worker-back-on-a-card-already-in_progress)
 give each of their refusal classes a code of its own, so a script can tell "that
 task is blocked" from "no board is running" without reading the message. They
 share one table, not two. `1` still means there what it means everywhere else —
@@ -1139,7 +1159,9 @@ them and refuses rather than guessing which one the dispatch belongs to.
 
 **The session command is checked before anything is posted.** The board reports
 whether it has one; without `BRIEFBOARD_WORKER_CMD` the CLI declines and the task
-stays `ready`. The board's own drag still behaves as it always did — it moves the
+stays `ready`. A dispatch the board accepted and could not turn into a session
+also ends `ready` — the endpoint puts the task back and this command reports the
+status the endpoint reached, so the exit code below and the card agree. The board's own drag still behaves as it always did — it moves the
 card and starts nothing, deliberately, so a person can take a task and work by
 hand. The CLI is stricter by declining *sooner*, not by doing something else.
 
@@ -1148,8 +1170,10 @@ There is deliberately no `--force`. Overriding the dependency gate stays with
 a board may begin blocked work quietly.
 
 **Exit codes.** One table — shared with
-[`review-start`](#review-start--ask-for-the-review-session-on-a-card-in-review)
-below, which is the same client pointed at a different action — and `--json`'s
+[`review-start`](#review-start--ask-for-the-review-session-on-a-card-in-review),
+[`rework`](#rework--send-a-card-in-review-back-for-another-round) and
+[`resume`](#resume--put-a-worker-back-on-a-card-already-in_progress) below, which
+are the same client pointed at other actions — and `--json`'s
 `reason` is that table's other column, so `$?` and a parsed document can never
 tell you different things:
 
@@ -1162,20 +1186,26 @@ tell you different things:
 | `4` | `ambiguous-board` | more than one board is running; the command will not choose |
 | `5` | `not-configured` | this board starts no session of that kind (`BRIEFBOARD_WORKER_CMD`; `BRIEFBOARD_REVIEW_CMD` for `review-start`) |
 | `6` | `no-task` | the board has no such task |
-| `7` | `bad-status` | the task is not in the status the action requires — `ready` for `start`, `review` for `review-start` |
+| `7` | `bad-status` | the task is not in the status the action requires — `ready` for `start`, `review` for `review-start` and `rework`, `in_progress` for `resume` |
 | `8` | `blocked` | a prerequisite in `depends` is still unfinished (`start` only) |
 | `9` | `already-running` | a session for this task was already running |
 | `10` | `session-failed` | the session could not start (no git repository, `git worktree add` failed, the setup command failed, the session limit was reached) |
 | `11` | `board-error` | the board did not answer, or answered something the command cannot read |
+| `12` | `no-branch` | there is no `task/T-NNNN` branch, so the session would start from HEAD without the work it is meant to carry on (`rework` and `resume`) |
 
 `2` through `5` happen **before** anything is posted; `6`, `7` and `8` are the
 board's own refusals. Nothing is written in any of them, and the task is exactly
-where it was. `9` and `10` are the two where the action DID happen and only the
-agent is missing — after `start` that means the **status has changed**, and the
-message says so in the same breath, because a card that has already moved is not
-something to leave a reader to discover. (After `review-start` nothing has
-changed even then: that action never writes.) Exit `0` means both halves
-happened.
+where it was. `9` and `10` are the two where the board accepted the action and
+only the agent is missing, and after `start` they leave the card in different
+places: at `9` a session for that task is already running, so it stays
+`in_progress`; at `10` no session was registered at all and the board puts the
+task back to `ready`. Either way the message names the status the card ended in,
+because a card that has moved — or moved back — is not something to leave a
+reader to discover. (After `review-start` nothing has changed even then: that
+action never writes; after `rework` the card goes back to `review`, which is where
+it came from; after `resume` it stays `in_progress`, which is where it was — that
+command writes no status, so it has nothing to put back.) Exit `0` means both
+halves happened.
 
 `--json` prints one document on stdout and nothing else:
 
@@ -1250,6 +1280,87 @@ the card. `--json` prints the same document, with `command` reading
   "exit": 0
 }
 ```
+
+### `rework` — send a card in `review` back for another round
+
+```bash
+node tools/task.mjs rework T-0007
+node tools/task.mjs rework T-0007 --json
+```
+
+The command form of the **Send back for rework** button on a card in Review, and
+the third client of the same board endpoints. It performs `review → in_progress`
+and starts the worker session on the branch the previous round is already on —
+what the lifecycle allowed all along but nothing dispatched. The whole of what it
+means is in
+[Sending it back: a rework round](#sending-it-back-a-rework-round); what belongs
+here is how the command behaves.
+
+Everything said about [`start`](#start--take-a-ready-task-and-put-an-agent-on-it)
+holds unchanged: a board must be running and exactly one of them, the worker
+command is checked against the board's meta **before** anything is posted
+(`BRIEFBOARD_WORKER_CMD`), there is no `--force`, and the exit codes are the one
+table above. Three rows read differently: `7` here means the task is not in
+`review`; `8` cannot happen, because the dependency gate does not run for a card
+past `ready`; and `12` is this command's alone — the branch that carries the
+previous round is gone, which is fixed by finding that branch, not by trying
+again. A dispatch that reaches no session leaves the card in `review` rather than
+in `ready`, and the printed line names that status.
+
+`--json` prints the same document, with one field the others have no use for:
+
+```json
+{
+  "ok": true,
+  "command": "rework",
+  "id": "T-0007",
+  "status": "in_progress",
+  "round": 2,
+  "profile": "",
+  "session": "started",
+  "board": { "pid": 24192, "url": "http://127.0.0.1:4571" },
+  "exit": 0
+}
+```
+
+`round` is the round being started, derived by the board from the verdicts the
+description already carries — the second round of a card reviewed once. It is
+stored nowhere.
+
+### `resume` — put a worker back on a card already `in_progress`
+
+```bash
+node tools/task.mjs resume T-0007
+node tools/task.mjs resume T-0007 --json
+```
+
+The command form of the **Resume the work** button on a card in In Progress, and
+the fourth client of the same board endpoints. It starts a worker session on the
+branch the task is already on and **changes no status at all**: the card was
+`in_progress` before the call and is `in_progress` after it. What it is for is in
+[When the session dies: resuming the work](#when-the-session-dies-resuming-the-work),
+which also puts the three dispatches side by side; what belongs here is how the
+command behaves.
+
+Everything said about [`start`](#start--take-a-ready-task-and-put-an-agent-on-it)
+holds unchanged: a board must be running and exactly one of them, the worker
+command is checked against the board's meta **before** anything is posted
+(`BRIEFBOARD_WORKER_CMD`), there is no `--force`, and the exit codes are the one
+table above. Four rows read differently: `7` here means the task is not
+`in_progress`; `8` cannot happen, because the dependency gate does not run for a
+card past `ready`; `9` is the refusal this command exists to make — a session is
+genuinely running on the task, read from the board's registry and never guessed
+from the status, which says an agent is on the task either way; and `12` is the
+missing branch, refused for the same reason `rework` refuses it.
+
+The printed line names no transition, because there is none:
+
+```
+T-0007 still in_progress, worker session started (board pid 24192 at http://127.0.0.1:4571)
+```
+
+`--json` prints the same document as `start`'s, with `status` reading
+`in_progress` and no `round` in it: a resume is not a round of review.
 
 ### `archive` — move the closed tasks out of the backlog
 
@@ -1948,9 +2059,12 @@ from it:
 A worker session (which is isolated) can also answer `not-a-repo`, `no-git`,
 `worktree-failed`, `setup-failed` or `setup-timeout` — see the next section.
 
-In every case the task still moves: the transition and the session are
-independent, and a session that fails to start just leaves the task waiting for a
-human.
+The transition and the session are independent, and a session that fails to start
+just leaves the task waiting for a human — with one exception, the drop from
+Ready into In Progress: there a dispatch that never reached a session puts the
+task back to `ready`, because `in_progress` with no agent claims work that is not
+happening. What that does and does not undo is in
+[The worker session](#the-worker-session-ready--in-progress).
 
 ### Following a session on the board
 
@@ -2327,6 +2441,20 @@ BRIEFBOARD_SETUP_CMD='npm ci' \
   `(setup-timeout)` and the command's own output above it. The limit exists for
   the install that never ends (no network, or a tool waiting on a prompt a
   headless session cannot answer), not for the slow one;
+- those ten minutes are **`BRIEFBOARD_SETUP_TIMEOUT_MS`**, in milliseconds, and
+  the default is the one number here that is a ceiling rather than a
+  measurement — briefboard has never run your install command and has no way to
+  size it. If you know yours can never honestly take that long, say so:
+
+  ```bash
+  BRIEFBOARD_SETUP_CMD='npm ci' BRIEFBOARD_SETUP_TIMEOUT_MS=120000 \
+    node server/server.js
+  ```
+
+  A resolver with no network is then refused in two minutes instead of holding
+  the drop, and the card, for ten. Empty or unparsable falls back to the default
+  rather than turning the limit off, exactly as `BRIEFBOARD_SESSION_MAX` does —
+  a typo must not leave the board with no bound at all;
 - success is recorded in `.briefboard/worktrees/T-0007.setup.json`, and only that
   file suppresses the next run. So a restart on a prepared worktree does not
   reinstall, a preparation that failed is retried on the next session, and
@@ -2451,6 +2579,26 @@ different from the briefing drop:
   session that cannot happen.
 - **it is isolated.** The session runs in its own worktree on its own branch (see
   above), because it commits code.
+
+**A dispatch that never reached a session puts the task back.** `in_progress`
+means an agent is on the task, not that somebody tried to put one there. So when
+the worktree cannot be created, the setup command fails or runs past its limit,
+or the worker command cannot be spawned, the board restores `ready`: the card
+returns to the column you dragged it out of, the answer still names the reason,
+the setup output is still in the session log, and the retry is the same drop
+again. Two answers keep the card in In Progress, because in neither of them is
+the status a lie: `already-running`, where a session for that task is alive and
+pulling the task back would be taking it out from under an agent, and `disabled`,
+where no `BRIEFBOARD_WORKER_CMD` is configured at all — that drop is you taking
+the task by hand, and there is no dispatch to undo.
+
+The restore is conditional on the card not having moved in the meantime. Setup
+can run for minutes, and whatever moved the task during them — a person, a
+`tools/task.mjs status` call, a session of its own — decided something; a repair
+does not overrule a decision, so the board leaves such a task exactly where it
+was moved to and says so. The transition itself is deliberately made **before**
+the preparation rather than after it: while setup runs it is the only thing
+stopping a second `start` from preparing the same worktree at the same time.
 
 A task with unfinished prerequisites cannot be started from the board at all: the
 server refuses with `409` and names each blocker with its status. That is the
@@ -2623,7 +2771,9 @@ Merge in your terminal, press **Check again**, and the same block reads:
 **Accept** performs `review → done` and stamps `closed`. It asks first, because
 `done` is terminal — the board has no way back from it. **Remove the worktree**
 deletes `.briefboard/worktrees/T-0007` and nothing else: the branch and every
-commit on it stay.
+commit on it stay. **Send back for rework** is the other ending — `review →
+in_progress` and a fresh worker session on the same branch — and it has a section
+of its own below.
 
 Three things about that block are deliberate:
 
@@ -2695,6 +2845,116 @@ on the card as a session that ended, and its honest repairs are restarting the
 session or one CLI command. A button there would let a task be declared ready for
 judgement by someone who has not read the branch, which is exactly what the
 accept check above then has to catch.
+
+### Sending it back: a rework round
+
+A review that does not pass ends the other way: the card goes back to the worker.
+That has two halves, and only one of them ever existed.
+
+**The transition was always legal.** `review → in_progress` is in the lifecycle
+graph, it needs no `--force`, and it never did:
+
+```bash
+node tools/task.mjs status T-0007 in_progress
+```
+
+**What it does not do is put anybody on the task.** It moves the card and starts
+nothing — and `start` cannot help, because that command is bound to `ready` by
+the transition it performs. So a returned card used to sit in In Progress with no
+session behind it until somebody noticed.
+
+`rework` is that missing half:
+
+```bash
+node tools/task.mjs rework T-0007
+```
+
+and the same act is the **Send back for rework** button on a card in Review. Both
+go through `POST /api/task/:id/rework`: the `review → in_progress` transition, and
+the worker session, isolated in the task's own worktree exactly as the first round
+was.
+
+**It is a second round on the first round's work, not a fresh start.** The branch
+`task/T-0007` is what carries what was already written, so:
+
+- **a missing branch is refused**, with its own reason (`no-branch`) and its own
+  exit code. Recreating it would begin the correction from `HEAD` and silently
+  discard the round it is correcting — the one outcome nobody can recover from.
+  Find the branch, or start the work again deliberately;
+- **a missing worktree is not.** `.briefboard/worktrees/T-0007` is recreated from
+  the branch, the way `start` creates it, and nothing is lost with it. (A worktree
+  that is still there is reused, and the project's setup command is not paid for a
+  second time — the stamp beside the worktree says it has already run. A worktree
+  the board had to recreate is a checkout with nothing installed in it, so that
+  one is prepared again.)
+
+**Nothing already written is touched.** The first worker's report and every
+verdict stay where they are, and the next verdict opens its own section rather
+than joining the previous one — a judgement of the old code must not be presented
+as a judgement of the new. Each round writes its own session log, so the rounds
+stay readable apart.
+
+**The board does not read the verdict.** There is no check that the last one said
+"REWORK" and no reason field to fill in: dispatching the rework *is* the decision,
+and briefboard does not parse prose to authorise an action.
+
+**The dependency gate does not run again.** It answers "may this work begin", and
+it began: the card is in Review because the work exists. A prerequisite that was
+reopened elsewhere does not block a correction to this task's own review comments.
+`depends` itself is untouched.
+
+**The round is derived, never stored.** `--json` carries the round the dispatch is
+beginning — one more than the `### Review verdict` sections the description
+already holds. No field is added to the backlog for it.
+
+Two things are refused before anything is written: a card that is not in `review`,
+and a card with an agent session already running on it (on a card in Review that
+is the review session, and moving the card out from under it buys nothing). A
+dispatch that reaches no session at all — a setup command that fails, a worktree
+that cannot be made — puts the card back to **`review`**, where it came from.
+
+### When the session dies: resuming the work
+
+A worker session does not outlive the board that started it, and a machine can be
+rebooted mid-task. What is left then is a card in **In Progress** whose status
+says an agent is on it and whose registry entry reads `interrupted` or `exited` —
+the work is on the branch, half done, and nobody is carrying it on.
+
+```bash
+node tools/task.mjs resume T-0007
+```
+
+and the same act is the **Resume the work** button on a card in In Progress. Both
+go through `POST /api/task/:id/resume`, which starts the worker session on
+`task/T-0007` and **writes no status**: the card is already where it belongs.
+
+That is the whole difference between this and its two neighbours, and it is worth
+stating plainly, because three commands now put a worker on a card:
+
+| command | the card starts in | what it does |
+|---------|--------------------|--------------|
+| [`start`](#start--take-a-ready-task-and-put-an-agent-on-it) | `ready` | moves it to `in_progress` and dispatches a worker |
+| [`rework`](#rework--send-a-card-in-review-back-for-another-round) | `review` | moves it back to `in_progress` and dispatches a worker on the same branch |
+| [`resume`](#resume--put-a-worker-back-on-a-card-already-in_progress) | `in_progress` | dispatches a worker; the card does not move |
+
+Everything else follows from the middle column. `resume` **refuses while a session
+is genuinely running**, and it reads that from the board's session registry rather
+than from the status — the status says an agent is on the task in both cases,
+which is exactly why the operation is needed. The branch rule is `rework`'s,
+unchanged: a missing `task/T-0007` is refused, because resuming would begin from
+`HEAD` without the work being resumed, while a missing *worktree* over a live
+branch is recreated (and prepared again, since a recreated checkout has nothing
+installed in it). And because nothing is written, nothing is put back: a dispatch
+that reaches no session leaves the card exactly as it found it, `in_progress` with
+no agent on it — the state the board's watchdog already marks.
+
+**Until this existed there was a way, and it cost a false record.** The only
+control that reached a worker from a card in In Progress was the answer form's
+*Restart the worker session* box, and that form appears only for a task whose
+description carries a `### Session questions` section. Getting a worker back
+therefore meant writing that a session had asked a question when none had — into
+the description this project keeps as its audit trail. `resume` is what makes the
+answer form mean its label again: you answered the question, carry on.
 
 ### The review session: a card already in Review
 

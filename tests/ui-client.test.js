@@ -1718,6 +1718,138 @@ describe('drag & drop into In Progress', () => {
     assert.deepStrictEqual(sandbox.alertCalls, ['The backlog is busy right now — try again']);
     assert.strictEqual(sandbox.fetchCalls.length, 1, 'no automatic retry');
   });
+
+  // ---------- the answer the drop used to throw away (T-0327) ----------
+  // A 200 no longer means the card stayed: T-0325 made a dispatch that reached
+  // no session undo its own transition. What is asserted here is what the USER
+  // is shown, never that the body was fetched — a drop that reads the answer and
+  // says nothing is the defect this closes, and it would pass a fetch assertion.
+  //
+  // `answered` builds the shape the server really sends, so the two cases below
+  // differ in exactly the field the code keys on and in nothing else.
+  const answered = (body) =>
+    `fetchResponse = { ok: true, status: 200,
+       json: function () { return Promise.resolve(${JSON.stringify(body)}); } };`;
+
+  it('a drop whose dispatch rolled back names the reason and points at the log', async () => {
+    for (const [language, expected] of [
+      ['en', /^The session for T-10 did not start: setup-failed\./],
+      ['ru', /^Сессия по задаче T-10 не запустилась: setup-failed\./],
+      ['ja', /^タスク T-10 のセッションは開始されませんでした: setup-failed。/],
+    ]) {
+      const { sandbox } = run(`(function () {
+        lang = '${language}';
+        ${HARNESS}
+        ${answered({ ok: true, id: 'T-10', status: 'ready', session: 'setup-failed', rolledBack: true })}
+        var drop = fakeEvent();
+        drop.dataTransfer.setData('text/plain', 'T-10');
+        inProgressColumn.dispatch('drop', drop);
+        return true;
+      })()`);
+      await flush();
+      assert.strictEqual(sandbox.alertCalls.length, 1, language);
+      assert.match(sandbox.alertCalls[0], expected);
+      // The three things the user needs, in the language they are reading: the
+      // reason, that the card is back where it started, and where to look.
+      assert.match(sandbox.alertCalls[0], /setup-failed/);
+      assert.match(sandbox.alertCalls[0], /Ready/);
+      assert.match(sandbox.alertCalls[0], /(session log|логе сессии|セッションログ)/);
+    }
+  });
+
+  // The case a message keyed on "the session did not start" would break, which
+  // is why it is a test of its own rather than a line in the one above. This
+  // board has no worker command: the answer is `disabled`, the card stays In
+  // Progress on purpose, and the person who dropped it is taking the task by
+  // hand. Telling them it went back to Ready would be false.
+  it('a drop on a board with no worker command says nothing: disabled keeps the card', async () => {
+    const { sandbox } = run(`(function () {
+      ${HARNESS}
+      sessionsConfigured = { enabled: true, worker: false };
+      ${answered({ ok: true, id: 'T-10', status: 'in_progress', session: 'disabled' })}
+      var drop = fakeEvent();
+      drop.dataTransfer.setData('text/plain', 'T-10');
+      inProgressColumn.dispatch('drop', drop);
+      return true;
+    })()`);
+    await flush();
+    assert.deepStrictEqual(sandbox.alertCalls, []);
+    assert.strictEqual(sandbox.fetchCalls.length, 1);
+  });
+
+  it('a drop that reached a session says nothing new', async () => {
+    const { sandbox } = run(`(function () {
+      ${HARNESS}
+      ${answered({ ok: true, id: 'T-10', status: 'in_progress', session: 'started' })}
+      var drop = fakeEvent();
+      drop.dataTransfer.setData('text/plain', 'T-10');
+      inProgressColumn.dispatch('drop', drop);
+      return true;
+    })()`);
+    await flush();
+    assert.deepStrictEqual(sandbox.alertCalls, []);
+  });
+
+  // `already-running` is the other answer T-0325 put in KEEPS_THE_TASK_TAKEN: a
+  // session for the task exists, so the card is legitimately taken and the board
+  // has nothing to report about the drop.
+  it('a drop onto a task that already has a session says nothing', async () => {
+    const { sandbox } = run(`(function () {
+      ${HARNESS}
+      ${answered({ ok: true, id: 'T-10', status: 'in_progress', session: 'already-running' })}
+      var drop = fakeEvent();
+      drop.dataTransfer.setData('text/plain', 'T-10');
+      inProgressColumn.dispatch('drop', drop);
+      return true;
+    })()`);
+    await flush();
+    assert.deepStrictEqual(sandbox.alertCalls, []);
+  });
+
+  // The rollback that found the card already moved on: the server reports
+  // `rolledBack: false` and leaves it alone (T-0325 decision 2). Nothing was
+  // undone, so there is nothing to explain.
+  it('a refusal that did NOT roll the card back says nothing', async () => {
+    const { sandbox } = run(`(function () {
+      ${HARNESS}
+      ${answered({ ok: true, id: 'T-10', status: 'review', session: 'setup-failed', rolledBack: false })}
+      var drop = fakeEvent();
+      drop.dataTransfer.setData('text/plain', 'T-10');
+      inProgressColumn.dispatch('drop', drop);
+      return true;
+    })()`);
+    await flush();
+    assert.deepStrictEqual(sandbox.alertCalls, []);
+  });
+
+  it('a body that is not JSON at all leaves the drop silent rather than broken', async () => {
+    const { sandbox } = run(`(function () {
+      ${HARNESS}
+      fetchResponse = { ok: true, status: 200,
+        json: function () { return Promise.reject(new Error('not json')); } };
+      var drop = fakeEvent();
+      drop.dataTransfer.setData('text/plain', 'T-10');
+      inProgressColumn.dispatch('drop', drop);
+      return true;
+    })()`);
+    await flush();
+    assert.deepStrictEqual(sandbox.alertCalls, []);
+  });
+
+  it('the three locales say it in their own words, none left with the English', () => {
+    const { result } = run(`(function () {
+      var out = {};
+      ['en', 'ru', 'ja'].forEach(function (l) { lang = l; out[l] = t('start_rolled_back'); });
+      return out;
+    })()`);
+    assert.notStrictEqual(result.en, result.ru);
+    assert.notStrictEqual(result.en, result.ja);
+    assert.notStrictEqual(result.ru, result.ja);
+    for (const text of [result.en, result.ru, result.ja]) {
+      assert.match(text, /\{id\}/);
+      assert.match(text, /\{reason\}/);
+    }
+  });
 });
 
 // =====================================================================
@@ -4658,5 +4790,47 @@ describe('labels on the board', () => {
     assert.match(result.en, /labels/i);
     assert.match(result.ru, /метк/i);
     assert.match(result.ja, /ラベル/);
+  });
+});
+
+describe('the tab icon', () => {
+  // Asserted on the declaration, never on the drawing: a test pinning the
+  // artwork would fail the next time somebody improves it (T-0330).
+  //
+  // The tag cannot be delimited by the first ">": the href is an SVG data URI
+  // and carries ">" of its own. An attribute value cannot carry a raw quote,
+  // so the tag ends at the first '">' instead.
+  function iconLinks() {
+    return loadHtml().match(/<link[^>]*rel="icon"[\s\S]*?">/g) || [];
+  }
+
+  function iconHref() {
+    const href = iconLinks()[0].match(/href="([^"]*)"/);
+    assert.ok(href, 'the icon link must carry an href');
+    return href[1];
+  }
+
+  it('the page declares an icon, so no tab shows the browser blank-page glyph', () => {
+    const html = loadHtml();
+    const links = iconLinks();
+    assert.strictEqual(links.length, 1, 'ui/index.html must declare exactly one rel="icon" link');
+    const head = html.slice(0, html.indexOf('</head>'));
+    assert.ok(head.includes(links[0]), 'the icon must be declared inside <head>');
+  });
+
+  it('the icon is inline, so ui/ stays one file and the server serves no new path', () => {
+    assert.ok(
+      iconHref().startsWith('data:image/svg+xml,'),
+      'the icon must be an inline SVG data URI - a second file or a route is what T-0330 exists to avoid',
+    );
+  });
+
+  it('the data URI carries no raw #, which would cut it short at the first colour', () => {
+    // A raw # opens a URL fragment: everything after it is dropped before the
+    // SVG is parsed, and the icon silently stops rendering.
+    assert.ok(
+      !iconHref().includes('#'),
+      'write the colours as %23RRGGBB - a raw # ends the data URI',
+    );
   });
 });

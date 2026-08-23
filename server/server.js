@@ -20,6 +20,12 @@
  *                                    is ALREADY in open; changes no status
  *   /api/task/T-0007/start  (POST) → narrow ready -> in_progress transition,
  *                                    optionally starting an isolated worker session
+ *   /api/task/T-0007/rework (POST) → narrow review -> in_progress transition, the
+ *                                    same isolated worker session on the round's
+ *                                    own branch; refuses when it is gone (T-0329)
+ *   /api/task/T-0007/resume (POST) → starts that same isolated worker session on a
+ *                                    task ALREADY in in_progress whose session is
+ *                                    gone; changes no status at all (T-0333)
  *   /api/task/T-0007/answer (POST) → appends an answer to the description of a
  *                                    task waiting on session questions
  *   /api/task/T-0007/profile (POST) → sets the task's run profile and nothing
@@ -55,6 +61,7 @@ const {
   addTask,
   blockingDependencies,
   awaitsAnswer,
+  countReviewVerdicts,
   appendDescriptionSection,
   archivePathFor,
   readArchivedTasks,
@@ -68,7 +75,7 @@ const {
   LOCK_TIMEOUT_CODE,
 } = require('./parser');
 const { createSessionRunner, resolveReviewCommand } = require('./sessions');
-const { createGitOps } = require('./git');
+const { createGitOps, BRANCH_PREFIX } = require('./git');
 const {
   createWatchdog,
   parseInterval: parseWatchdogInterval,
@@ -177,6 +184,12 @@ const sessionRunner = createSessionRunner({
   // (T-0150). Unset is the normal case for a project with no dependencies, and
   // then nothing is run and nothing is said about it.
   setupCommand: process.env.BRIEFBOARD_SETUP_CMD,
+  // How long that command may take (T-0328). The default bounds somebody else's
+  // install, which briefboard cannot measure, so a project that knows its own
+  // install can never legitimately run that long says so here rather than
+  // holding the drop for ten minutes. Passed raw and normalized in sessions.js,
+  // exactly like the cap below.
+  setupTimeoutMs: process.env.BRIEFBOARD_SETUP_TIMEOUT_MS,
   maxSessions: process.env.BRIEFBOARD_SESSION_MAX,
   // The run profiles the user declared (T-0108). briefboard reads them as
   // opaque strings; what they mean lives in the command templates above.
@@ -658,6 +671,9 @@ function jsonContentType(res, req) {
 // 200 payload. It is deliberately NOT transactional with the write: the
 // transition already happened and stands on its own, so a failure there is
 // reported in the payload, never by undoing the write or answering with an error.
+// /start is the one caller that compensates for its own write when the dispatch
+// never reached a session (T-0325) — a second, conditional write it makes itself
+// inside its `after`, never something this helper does for anybody.
 function applyNarrowWrite(res, id, allowedFrom, conflictMessage, mutate, after) {
   let result;
   try {
@@ -784,9 +800,16 @@ function handleReturnToBacklog(req, res, id) {
 //
 // The session that follows is the worker one, isolated in its own git worktree
 // (T-0091): it writes code and commits, and doing that in the shared checkout
-// would move HEAD under everyone else (T-0064). A session that cannot start
-// leaves the task in `in_progress` anyway — the human dragged the card, so the
-// task is taken; the missing agent only means a human will do the work.
+// would move HEAD under everyone else (T-0064).
+//
+// A dispatch that never reached a session puts the task back (T-0325): the
+// transition is written first and rolled back below, rather than deferred until
+// the session exists. That order is not a compromise. The status is the only
+// thing excluding a SECOND start while this one prepares — startSession() refuses
+// a duplicate on its `children` map, which stays empty until a process is
+// actually spawned, and the worktree setup in between can run for minutes. Move
+// the transition after the setup and two concurrent starts run the project's
+// setup command in the same worktree.
 function handleStartTask(req, res, id) {
   applyNarrowWrite(
     res,
@@ -812,14 +835,254 @@ function handleStartTask(req, res, id) {
       task.status = 'in_progress';
       return { ok: true, id, status: task.status, profile: task.profile };
     },
-    async (written) => ({
-      session: await startSessionFor(id, {
+    async (written) => {
+      const session = await startSessionFor(id, {
         kind: 'worker',
         isolate: true,
         profile: written.profile,
-      }),
-    })
+      });
+      if (KEEPS_THE_TASK_TAKEN.has(session)) return { session };
+      return { session, ...rollBackDispatch(id, session, 'ready') };
+    }
   );
+}
+
+// ---------- putting a worker on a task that is PAST `ready` ----------
+// The two dispatches that are not /start: /rework, which carries `review ->
+// in_progress` (T-0329), and /resume, which carries no transition at all
+// (T-0333). What they refuse before doing anything is here, once, because they
+// have to refuse alike — a second copy is where the two would quietly stop
+// doing so.
+//
+// The order is the order of what the checks are about: the task, then the
+// registry, then git. Asking git first would report an unknown id as a missing
+// branch.
+//
+//   the status  — carries `reason: 'bad-status'`, which /start's own 409 does
+//                 not: both of these are dispatched from the CLI as well, and
+//                 there the reason is what the exit code is read from (T-0319).
+//   the session — refused BEFORE anything is written or prepared, where /start
+//                 lets the answer `already-running` keep the card it has just
+//                 moved. /start's card was `ready`, and a session on it is a task
+//                 legitimately taken; here a live session means the dispatch has
+//                 nothing to do — the review session is running, or the worker
+//                 still is. It is read from the REGISTRY and never inferred from
+//                 the status, which cannot tell a dead session from a live one.
+//                 Refusing first is also what keeps doc/backlog.md untouched by a
+//                 refusal.
+//   the branch  — `task/T-NNNN` is what carries the work already done. Gone, it
+//                 is not an ambiguity: prepareWorktree() would create it afresh
+//                 from HEAD, and the session would begin without the work it is
+//                 there to continue — silently, and unrecoverably. A missing
+//                 WORKTREE over a live branch is the opposite case and is NOT
+//                 refused: it is recreated exactly as /start's would be, and its
+//                 setup runs again, because setUpWorktree() clears the stamp for
+//                 a worktree it created (T-0150).
+//
+// `branchLoss` is the half of that last refusal only the caller can word: what
+// starting from HEAD would cost is a round for one of them and the work being
+// resumed for the other.
+function guardWorkerDispatch(res, id, { from, conflict, branchLoss }, then) {
+  let task;
+  try {
+    task = parseBacklog(fs.readFileSync(BACKLOG, 'utf8')).find((t) => t.id === id);
+  } catch (e) {
+    failRequest(res, e);
+    return;
+  }
+  if (!task) {
+    json(res, 404, { error: `${id} not found` });
+    return;
+  }
+  if (task.status !== from) {
+    json(res, 409, { error: conflict, reason: 'bad-status' });
+    return;
+  }
+  const running = sessionRunner.get(id);
+  if (running && running.status === 'running') {
+    json(res, 409, {
+      error: 'an agent session is already running on this task',
+      reason: 'already-running',
+    });
+    return;
+  }
+  gitOps.inspect(id).then((state) => {
+    // Only on a fact git actually established. A git that is missing, a project
+    // that is not a repository, a call that timed out — none of them say the
+    // branch is gone, and the dispatch refuses them on its own with its own
+    // reason a moment later (T-0091), which is a truer answer than this one.
+    if (state.git === 'ok' && !(state.branches || []).includes(BRANCH_PREFIX + id)) {
+      json(res, 409, {
+        error: `there is no ${BRANCH_PREFIX + id} branch: ${branchLoss}`,
+        reason: 'no-branch',
+        branch: BRANCH_PREFIX + id,
+      });
+      return;
+    }
+    then(task);
+  }, (e) => failRequest(res, e));
+}
+
+// The dispatch a card returned for review never had (T-0329).
+//
+// `review -> in_progress` has been a legal transition all along and has never
+// needed `--force`: TRANSITIONS carries it and ORCHESTRATOR.md documents it. What
+// did not exist is an operation that puts a WORKER on a task past `ready` —
+// /start is bound to `ready` by the transition it performs, and `tools/task.mjs
+// status ... in_progress` moves the card and starts nothing.
+//
+// So this is /start's sibling and not a second copy of it: the same isolated
+// worker session, the same rollback, the same reading of the profile from the
+// file. What it refuses before any of that is above, shared with /resume.
+function handleReworkTask(req, res, id) {
+  const conflict = 'task is not in review, it cannot be sent back for rework from the UI';
+  guardWorkerDispatch(
+    res,
+    id,
+    {
+      from: 'review',
+      conflict,
+      branchLoss: 'the previous round is not here, and a rework would start from HEAD and lose it',
+    },
+    () => {
+      applyNarrowWrite(
+        res,
+        id,
+        ['review'],
+        conflict,
+        (t) => {
+          // The round is derived and stored nowhere (decision 6): one more than the
+          // verdicts already written. A backlog field would be a compatibility
+          // question between parser versions, and this needs none.
+          const round = countReviewVerdicts(t.description) + 1;
+          t.status = 'in_progress';
+          return { ok: true, id, status: t.status, round, profile: t.profile };
+        },
+        async (written) => {
+          const session = await startSessionFor(id, {
+            kind: 'worker',
+            isolate: true,
+            profile: written.profile,
+          });
+          if (KEEPS_THE_TASK_TAKEN.has(session)) return { session };
+          // Back to `review`, which is where this transition came from — the whole
+          // reason the helper takes a status instead of writing `ready` itself.
+          return { session, ...rollBackDispatch(id, session, 'review') };
+        }
+      );
+    }
+  );
+}
+
+// Putting a worker back on a card that is already `in_progress` and whose session
+// is gone (T-0333): an interrupted board, a crashed worker, a rebooted machine.
+// Until this existed there was no re-dispatch for that card at all — /start
+// requires `ready` and /rework requires `review` — and the only way back was to
+// append a `### Session questions` section so that the answer-and-restart control
+// appeared: a question nobody asked, written into the description this project
+// keeps as its audit trail.
+//
+// IT WRITES NO STATUS, AND THEREFORE HAS NO ROLLBACK. That is the one place where
+// this differs from both of its siblings, and it is a consequence rather than an
+// omission: /start and /rework each carry a transition, so a dispatch that
+// registers no session leaves a card claiming an agent is on it, and
+// rollBackDispatch() puts it back (T-0325). Here the card is `in_progress` before
+// the call and `in_progress` after it whatever the dispatch answers — there is
+// nothing to undo, and a rollback would have to invent a status to undo it TO.
+// Do not add one.
+//
+// A dispatch that started nothing is still said out loud, in `session`; the card
+// it leaves behind — `in_progress` with no session on it — is the state it was
+// called in, and the one the watchdog already marks (T-0159).
+function handleResumeTask(req, res, id) {
+  guardWorkerDispatch(
+    res,
+    id,
+    {
+      from: 'in_progress',
+      conflict: 'task is not in progress, there is no work on it to resume',
+      branchLoss:
+        'the work to resume is not here, and a resume would start from HEAD without it',
+    },
+    // The profile is read from the file, never taken from the request — the same
+    // rule as every other session start: a command line stays out of a caller's
+    // reach. `status` is what the file said a moment ago, which is what this call
+    // did not change.
+    (task) => {
+      Promise.resolve(
+        startSessionFor(id, { kind: 'worker', isolate: true, profile: task.profile })
+      ).then((session) => json(res, 200, { ok: true, id, status: task.status, session }));
+    }
+  );
+}
+
+// The answers of startSessionFor() that leave the task where the transition put
+// it. Everything else — a worktree that could not be created, a setup that
+// failed or timed out, a spawn the OS refused, a refusal for the profile or the
+// concurrency cap — registered no session for this task, and `in_progress` would
+// then claim an agent is on work nobody is doing (T-0325).
+//
+// The line is registration rather than success, which is why two non-'started'
+// answers are here:
+//   'disabled'        — no worker command is configured at all. Nothing was
+//                       dispatched and nothing failed: the drop is a person
+//                       taking the task by hand, which is the board's other
+//                       supported way of working, and rolling it back would make
+//                       that drop impossible to perform.
+//   'already-running' — a session for this task exists (this board's or another
+//                       process's). It was not started by this call, but it IS
+//                       registered, and putting a task back to `ready` under a
+//                       live agent is the state this card exists to prevent.
+// Membership, not a list of failures: a reason added later rolls back by default,
+// which is the safe side of that mistake.
+const KEEPS_THE_TASK_TAKEN = new Set(['started', 'disabled', 'already-running']);
+
+// Undoes a dispatch's transition after one that registered no session, and
+// reports what it found: { rolledBack, status } merged into the 200 payload, so
+// the answer says the status the card came from rather than the `in_progress`
+// the write had set.
+//
+// `restoreTo` is that status, and it is a parameter rather than the `ready` this
+// was born with (T-0329): /start undoes a move out of `ready` and /rework one out
+// of `review`, and a helper that knew only the first would put a returned card
+// into the column it was refined in — a second helper beside this one would be
+// the same mistake made twice.
+//
+// The condition is load-bearing and is NOT redundant with the write above. The
+// backlog lock is taken twice, not held across the session start — it cannot be:
+// `git worktree add` and the project's setup command run in between and take
+// minutes. In that window a person, a `tools/task.mjs status` call or another
+// endpoint may move the card, and their decision outranks this repair: a
+// rollback that overwrites it is worse than the state it fixes. So the previous
+// status is restored only from exactly the state the transition left, and
+// anything else is left alone and said out loud. Do not simplify this into an
+// unconditional write.
+function rollBackDispatch(id, session, restoreTo) {
+  let outcome;
+  try {
+    outcome = updateBacklog(BACKLOG, (tasks) => {
+      const task = tasks.find((t) => t.id === id);
+      if (!task) return { rolledBack: false };
+      if (task.status !== 'in_progress') return { rolledBack: false, status: task.status };
+      task.status = restoreTo;
+      return { rolledBack: true, status: task.status };
+    });
+  } catch (e) {
+    // The dispatch has already failed; failing the request on top of that would
+    // hide the reason the caller actually needs. The card keeps `in_progress`,
+    // which the watchdog reports as a status with no session behind it (T-0159).
+    console.error(`${id}: could not put the task back after ${session}: ${e.message}`);
+    return { rolledBack: false };
+  }
+  if (outcome.rolledBack) {
+    console.error(`${id}: no session was started (${session}) — the task is back in ${restoreTo}`);
+  } else {
+    console.error(
+      `${id}: no session was started (${session}), and the task is no longer in_progress` +
+        `${outcome.status ? ` (${outcome.status})` : ''} — it was left as it is`
+    );
+  }
+  return outcome;
 }
 
 // Statuses whose task can still be picked up by a session. Past them a run
@@ -1100,6 +1363,8 @@ const TASK_ACTIONS = {
   backlog: handleReturnToBacklog,
   briefing: handleBriefingSession,
   start: handleStartTask,
+  rework: handleReworkTask,
+  resume: handleResumeTask,
   answer: handleAnswerTask,
   profile: handleProfileTask,
   labels: handleLabelsTask,

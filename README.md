@@ -173,6 +173,21 @@ the backlog (335 KB → 28 KB here, roughly 89k tokens → 7k).
   (`review → done`, confirmed) and **Remove the worktree** — each refused with its
   reason while the branch is not merged or the tree is not clean. The merge itself
   is never the board's: it is a judgement and it stays yours.
+- The same card carries the other ending: **Send back for rework** performs
+  `review → in_progress` and starts a worker session on the branch the previous
+  round is already on. It asks first — it starts an agent — and it is refused when
+  there is no `task/T-NNNN` branch, because a rework would then begin from HEAD and
+  lose the round it was meant to correct. A missing *worktree* is not a refusal: it
+  is recreated from the branch. The transition itself was always legal; what this
+  adds is that somebody is put on the task, which `status … in_progress` never did.
+- A card in **In progress** carries **Resume the work**: a worker session again,
+  on the branch the task is already on, for a session that ended without the task
+  moving — an interrupted board, a crashed worker, a rebooted machine. It writes
+  no status, because the card is already where it belongs, and it is refused while
+  a session is genuinely running on the task (read from the session registry, not
+  guessed from the status) or when there is no `task/T-NNNN` branch to carry on
+  from. Before it existed the only way back to a worker from here was to write a
+  question the session never asked into the description.
 - Task dependencies: a card whose prerequisites are not finished is marked
   "blocked", the task dialog lists them with their current status as clickable
   links, and `ready → in_progress` is refused until they are closed.
@@ -208,8 +223,11 @@ the backlog (335 KB → 28 KB here, roughly 89k tokens → 7k).
 
 Two drops on the board can start an agent session, and each has its own command:
 the **briefing** session when a card is dropped into Open, and the **worker**
-session when a card is dropped into In progress. A button on a card in Review
-starts a third, the **review** session.
+session when a card is dropped into In progress. Buttons on a card start them too:
+**Start the review session** on a card in Review starts the third kind, the
+**review** session; **Send back for rework** on the same card starts the worker one
+again, for a second round on the same branch; and **Resume the work** on a card in
+In progress starts it for a session that died, without moving the card.
 
 The names, once, because they are easy to confuse:
 
@@ -407,8 +425,8 @@ Open: the task left `backlog` when it was opened the first time.
   dependencies needs this before its tests can run at all. It is run once per
   worktree, with that worktree as its working directory, before the worker
   session starts; the briefing and review sessions run in the project root and
-  never trigger it. A non-zero exit or a run longer than 10 minutes kills the
-  command and refuses the session — an agent turned loose in an unprepared
+  never trigger it. A non-zero exit or a run longer than 10 minutes
+  (`BRIEFBOARD_SETUP_TIMEOUT_MS` below) kills the command and refuses the session — an agent turned loose in an unprepared
   checkout reports failures that are not its task's. The reason and the command's
   own output go into the session log, as `[briefboard] setup failed (...)`. A
   successful run is recorded in `.briefboard/worktrees/T-0007.setup.json`, and
@@ -416,6 +434,14 @@ Open: the task left `backlog` when it was opened the first time.
   failed is retried on the next session, and deleting the file forces a rerun.
   Unset = nothing is run and nothing is said about it. The price is one
   installation per task, paid on the first session of that task.
+- `BRIEFBOARD_SETUP_TIMEOUT_MS` — how long that command may take, in
+  milliseconds (default `600000`, ten minutes). The default is a ceiling, not a
+  measurement: briefboard has never run your install command and cannot size it,
+  so if you know yours can never legitimately take that long, say so here and a
+  hung install refuses the session in seconds instead of holding the drop for ten
+  minutes. Empty, or anything that is not a positive number, falls back to the
+  default rather than turning the limit off — the same rule as
+  `BRIEFBOARD_SESSION_MAX`.
 - `BRIEFBOARD_SESSION_MAX` — how many sessions may run at once, over both kinds
   together (default `4`).
 - `BRIEFBOARD_PROFILES` — the run profiles you declare, comma-separated. Their
@@ -877,7 +903,12 @@ kept narrow:
   network); the server says so at start-up;
 - a session that fails to start does not undo the transition — the card stays
   where you dropped it and the failure is reported in the response; it never
-  takes the server down;
+  takes the server down. The drop into In Progress is the one exception, and it
+  is about what a status means: a dispatch that never reached a session puts the
+  task back to `ready`, because `in_progress` says an agent is on the task rather
+  than that somebody tried. A task whose session is already running keeps its
+  place, and so does one on a board with no worker command — there the drop is a
+  person taking the task by hand;
 - no session outlives the server when the board is stopped: stopping it kills the
   sessions it started — the whole process tree, not just the process the board
   can see. What is bounded is how long it then waits for the session logs to be
@@ -1173,6 +1204,28 @@ node tools/task.mjs review-start T-0007 [--json]
                                   # "### Review verdict" section, which is all it has ever done
                                   # refuses before posting without BRIEFBOARD_REVIEW_CMD (the
                                   # older BRIEFBOARD_ORCHESTRATOR_CMD configures it too), and
+                                  # shares `start`'s exit-code table rather than adding one
+node tools/task.mjs rework T-0007 [--json]
+                                  # the command form of the card's "Send back for rework"
+                                  # button: `review` → `in_progress` AND the worker session,
+                                  # on the branch the previous round is already on. The
+                                  # transition was always legal and needed no --force; what
+                                  # this adds is the dispatch, which `status … in_progress`
+                                  # does not make
+                                  # refuses when task/T-0007 is gone — a rework would start
+                                  # from HEAD and lose that round — with its own exit code;
+                                  # a missing WORKTREE is recreated instead
+                                  # --json carries the `round` being started, derived from
+                                  # the verdicts already written and stored nowhere
+node tools/task.mjs resume T-0007 [--json]
+                                  # the command form of the card's "Resume the work" button:
+                                  # the worker session again, on the branch the task is
+                                  # already on, for a card in `in_progress` whose session is
+                                  # gone. It writes NO status — the card is already where it
+                                  # belongs, so nothing moves and nothing is put back
+                                  # refuses while a session is genuinely RUNNING on the task,
+                                  # read from the board's registry and never guessed from the
+                                  # status; and when task/T-0007 is gone, like `rework`
                                   # shares `start`'s exit-code table rather than adding one
 node tools/task.mjs archive [--dry-run]
                                   # move every done/cancelled task to doc/backlog-archive.md

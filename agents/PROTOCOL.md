@@ -313,8 +313,10 @@ What is in / what is out.
 5. Dates are always the actual current moment, written in the shape the field table gives —
    never a guessed or back-dated one.
 6. **The exceptions** — `ui/index.html` may reach `doc/backlog.md` directly, bypassing the
-   CLI/orchestrator, but only through these twelve narrow server endpoints (three of which
-   write nothing to the backlog at all):
+   CLI/orchestrator, but only through these fourteen narrow server endpoints (four of which
+   write nothing to the backlog at all). The count is not prose: briefboard's own tests hold
+   it, and this list, against `TASK_ACTIONS` in `server/server.js`, because both had gone
+   stale twice (T-0331).
    - `POST /api/task/:id/cancel` (T-0017) — drag & drop a card onto the Cancelled row, and
      only for a single transition `backlog`/`open` → `cancelled`. The server itself verifies
      that the task's current status is indeed `backlog`/`open` before changing the file.
@@ -351,7 +353,40 @@ What is in / what is out.
      prerequisites is refused with 409 naming each blocker and its status, and the file is not
      touched. There is deliberately no `--force` counterpart here — overriding the gate stays
      a CLI act. This is also the transition that may start the worker session, isolated in its
-     own git worktree; a session that fails to start does not undo the transition.
+     own git worktree — and the one place where a failed session DOES undo a transition
+     (T-0325): a dispatch that never reached a registered session restores `ready`, because
+     `in_progress` states that an agent is on the task. The write is the same locked one and it
+     is conditional — a task that is no longer `in_progress` when the failure comes back was
+     moved by somebody else and is left alone, which the answer says (`rolledBack`). Two answers
+     keep the task where it is: `already-running`, where a session for it is alive, and
+     `disabled`, where no worker command is configured and the drop is a person taking the task
+     by hand. The transition is deliberately NOT deferred until the session exists: while the
+     worktree is prepared it is the only thing excluding a second concurrent `start`.
+   - `POST /api/task/:id/rework` (T-0329) — the **Send back for rework** button in the card's
+     dialog, and the only route that carries `review` → `in_progress`. The task must ALREADY
+     be in `review` (anything else is 409, an unknown id 404), and the endpoint both makes
+     that transition and starts the same isolated worker session as `/start`, on the round's
+     own branch. That branch must exist: a missing `task/T-NNNN` is refused (`no-branch`),
+     because a rework beginning from HEAD would begin without the work it is sent to redo,
+     and a session already alive on the card is refused too (`already-running`). The round
+     the dispatch opens is **derived and stored nowhere** — one past the `### Review verdict`
+     sections the description already holds — so nothing is added to the format for it. A
+     dispatch that reaches no session puts the task back to `review`, where the transition
+     came from, by the same conditional write as `/start` (T-0325).
+   - `POST /api/task/:id/resume` (T-0333) — the **Resume the work** button on a card in In
+     Progress. It is **not** a transition and it writes nothing: the task must ALREADY be in
+     `in_progress` (anything else is 409, an unknown id 404), and all the endpoint does is
+     start that same isolated worker session on `task/T-NNNN`. It serves the card whose
+     session is gone — a board that went down, a crashed worker, a rebooted machine — which
+     neither `/start` (it needs `ready`) nor `/rework` (it needs `review`) can reach, and
+     which before it could be re-dispatched only by writing a question nobody asked into the
+     description. A genuinely running session refuses it, read from the session registry and
+     never guessed from the status, which says an agent is on the task either way; a missing
+     branch refuses it for `/rework`'s reason. **It has no rollback**, which is a consequence
+     and not an omission: with no transition written there is nothing to undo, and a rollback
+     would have to invent a status to undo it to. A dispatch that started nothing leaves the
+     card `in_progress` with no agent on it — the state it was called in, and the one the
+     watchdog already marks (T-0159).
    - `POST /api/task` (T-0074) — the "+" button on the board creates a task. The new task is
      **always** created in status `backlog` (this endpoint can set no other status) and with
      no briefs; the server validates every field (title, type, priority, description, and the
@@ -435,11 +470,12 @@ What is in / what is out.
    different formats or duplicate IDs. This does not override the rule in point 2: apart from
    the transitions listed here, every status change is still made only by the
    orchestrator (and the worker's two transitions) through the CLI — `ready` and `review` have
-   no route that sets them (`/review` and `/briefing` start a session and change nothing),
-   `in_progress` has one only for the single step out of `ready`, and `done` only the one above,
+   no route that sets them (`/briefing`, `/review` and `/resume` start a session and change
+   nothing), `in_progress` has two, the step out of `ready` and the step back out of `review`,
+   and `done` only the one above,
    out of `review` and behind the merge check. `backlog` has one too, and it is the one step of
    the graph that runs in both directions (T-0141).
-   What that check reads is a thirteenth route, `GET /api/git/:id`: the
+   What that check reads is a fifteenth route, `GET /api/git/:id`: the
    task's branch, whether HEAD contains it, its worktree and whether that tree is clean. It is
    a read, it is asked for when a card is opened or rechecked rather than on every board
    update, and it changes nothing at all.

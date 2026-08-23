@@ -55,7 +55,10 @@ function boardFetch(cfg) {
     if (url === '/api/sessions') return answer(200, { sessions: c.sessions || [], costs: {} });
     if (/\/done$/.test(url)) return answer(c.doneStatus || 200, c.doneBody || { ok: true });
     if (/\/remove-worktree$/.test(url)) return answer(c.removeStatus || 200, c.removeBody || { ok: true });
-    return answer(200, { tasks: [] });
+    if (/\/rework$/.test(url)) {
+      return answer(c.reworkStatus || 200, c.reworkBody || { ok: true, id: 'T-0001', status: 'in_progress', round: 2, session: 'started' });
+    }
+    return answer(200, { tasks: [], sessions: c.sessionsMeta });
   };
   fn.calls = calls;
   return fn;
@@ -66,9 +69,25 @@ function boardFetch(cfg) {
  * `probe()` reads it after the /api/git answer has been applied, and `click()`
  * presses one of its buttons.
  */
-function dialog({ status = 'review', state = MERGED, session = null, clipboard = false, cfg = {} } = {}) {
+function dialog({
+  status = 'review',
+  state = MERGED,
+  session = null,
+  clipboard = false,
+  cfg = {},
+  lang = 'en',
+  sessionsConfigured = { enabled: true, worker: true },
+} = {}) {
+  const meta = {
+    enabled: true,
+    worker: true,
+    orchestrator: false,
+    profiles: [],
+    profileUsedBy: {},
+    ...sessionsConfigured,
+  };
   const sandbox = createSandbox({
-    fetch: boardFetch({ state, sessions: session ? [session] : [], ...cfg }),
+    fetch: boardFetch({ state, sessions: session ? [session] : [], sessionsMeta: meta, ...cfg }),
   });
   if (clipboard) {
     sandbox.clipboardWrites = [];
@@ -87,8 +106,8 @@ function dialog({ status = 'review', state = MERGED, session = null, clipboard =
     `(function () {
       tasks = [${taskSrc(status)}];
       sessionsById = new Map(${session ? `[['T-0001', ${JSON.stringify(session)}]]` : '[]'});
-      lang = 'en';
-      sessionsConfigured = { enabled: true, worker: true, orchestrator: false, profiles: [], profileUsedBy: {} };
+      lang = '${lang}';
+      sessionsConfigured = ${JSON.stringify(meta)};
       openTask('T-0001');
       var overlay = modals[modals.length - 1];
       var box = overlay.querySelector('[data-closing]');
@@ -385,3 +404,177 @@ describe('the board never names the user\'s test command', () => {
     }
   });
 });
+
+// ---------- the other ending: back for another round (T-0329) ----------
+//
+// The board's half of the dispatch a returned card never had. What the UI owns
+// is the offer and what it says afterwards; the transition, the branch rule and
+// the rollback are the server's, and tests/worker-session-api covers them there.
+
+describe('the rework action on a card in review', () => {
+  it('is offered beside the accept, and only while the task is in review', async () => {
+    const inReview = dialog({ state: MERGED });
+    await flush();
+    assert.ok(/data-closing-rework(?! disabled)/.test(inReview.probe().html), inReview.probe().html);
+
+    const accepted = dialog({ status: 'done', state: MERGED });
+    await flush();
+    assert.ok(!accepted.probe().html.includes('data-closing-rework'), 'a finished task is not sent back');
+  });
+
+  it('is refused with its reason when the branch of the previous round is gone', async () => {
+    const sandbox = dialog({
+      state: { git: 'ok', branches: [], branch: null, merged: null, worktree: null },
+    });
+    await flush();
+    const view = sandbox.probe();
+    assert.ok(/data-closing-rework disabled/.test(view.html), view.html);
+    assert.ok(view.html.includes('lose the previous round'), view.html);
+    // The accept is untouched by that: a task nobody branched for is accepted as
+    // it always was, and only the rework has something to lose.
+    assert.ok(/data-closing-accept(?! disabled)/.test(view.html), view.html);
+  });
+
+  // The branch the runner uses is `task/T-NNNN` exactly. A worker's own
+  // `task/T-NNNN-slug` beside it is not the branch a rework would check out, so
+  // offering the action on it would offer exactly the loss it exists to prevent.
+  it('a branch with a slug is not the branch the rework would reuse', async () => {
+    const sandbox = dialog({
+      state: { ...MERGED, branch: 'task/T-0001-slug', branches: ['task/T-0001-slug'] },
+    });
+    await flush();
+    assert.ok(/data-closing-rework disabled/.test(sandbox.probe().html), sandbox.probe().html);
+  });
+
+  it('a session already running on the task blocks it', async () => {
+    const sandbox = dialog({
+      state: MERGED,
+      session: { id: 'T-0001', kind: 'orchestrator', status: 'running' },
+    });
+    await flush();
+    const view = sandbox.probe();
+    assert.ok(/data-closing-rework disabled/.test(view.html), view.html);
+    assert.ok(view.html.includes('already running'), view.html);
+  });
+
+  it('posts only after the confirmation, which says an agent will be started', async () => {
+    const sandbox = dialog({ state: MERGED });
+    await flush();
+    sandbox.confirmReturn = false;
+    await sandbox.click('rework');
+    assert.ok(!sandbox.fetch.calls.some((c) => /\/rework$/.test(c.url)), 'refused confirmation posts nothing');
+
+    sandbox.confirmReturn = true;
+    await sandbox.click('rework');
+    await flush();
+    const posts = sandbox.fetch.calls.filter((c) => /\/rework$/.test(c.url));
+    assert.strictEqual(posts.length, 1, 'exactly one write');
+    assert.strictEqual(posts[0].url, '/api/task/T-0001/rework', 'the same endpoint the CLI posts to');
+    assert.strictEqual(posts[0].init.method, 'POST');
+    assert.ok(
+      sandbox.confirmCalls[sandbox.confirmCalls.length - 1].includes('agent session'),
+      sandbox.confirmCalls.join('|')
+    );
+  });
+
+  // The board that starts no worker session still performs the transition, so
+  // the question must not promise one — the rule the drop into In Progress
+  // follows, for the same reason.
+  it('with no worker command the question promises no session', async () => {
+    const sandbox = dialog({ state: MERGED, sessionsConfigured: { enabled: true, worker: false } });
+    await flush();
+    sandbox.confirmReturn = false;
+    await sandbox.click('rework');
+    assert.ok(
+      sandbox.confirmCalls[sandbox.confirmCalls.length - 1].includes('BRIEFBOARD_WORKER_CMD'),
+      sandbox.confirmCalls.join('|')
+    );
+  });
+
+  it('a card that was sent back stops offering the actions of a card in review', async () => {
+    const sandbox = dialog({ state: MERGED });
+    await flush();
+    await sandbox.click('rework');
+    await flush();
+    await flush();
+    assert.strictEqual(sandbox.probe().html, '', 'the block belongs to review and done, and this card is in neither');
+  });
+
+  it('a refusal names the reason the server gave, in the board\'s own words', async () => {
+    const sandbox = dialog({
+      state: MERGED,
+      cfg: { reworkStatus: 409, reworkBody: { error: 'no', reason: 'no-branch' } },
+    });
+    await flush();
+    await sandbox.click('rework');
+    await flush();
+    assert.ok(
+      sandbox.alertCalls.some((m) => m.includes('lose the previous round')),
+      sandbox.alertCalls.join('|')
+    );
+  });
+
+  // T-0327's rule, on the action that inherits it: a 200 no longer means the card
+  // stayed, and the reason is in a body the user never sees. The one thing that
+  // differs is where it came back TO — `review`, not `ready` — so the message is
+  // its own and not a reuse of the drop's.
+  it('a dispatch that rolled back says so, and names Review as where the card is', async () => {
+    for (const [language, expected] of [
+      ['en', /^The session for T-0001 did not start: setup-failed\./],
+      ['ru', /^Сессия по задаче T-0001 не запустилась: setup-failed\./],
+      ['ja', /^タスク T-0001 のセッションは開始されませんでした: setup-failed。/],
+    ]) {
+      const sandbox = dialog({
+        lang: language,
+        state: MERGED,
+        cfg: { reworkBody: { ok: true, id: 'T-0001', status: 'review', session: 'setup-failed', rolledBack: true } },
+      });
+      await flush();
+      await sandbox.click('rework');
+      await flush();
+      assert.strictEqual(sandbox.alertCalls.length, 1, language);
+      assert.match(sandbox.alertCalls[0], expected);
+      assert.match(sandbox.alertCalls[0], /Review/, `${language}: where the card is now`);
+      assert.match(sandbox.alertCalls[0], /(session log|логе сессии|セッションログ)/, language);
+    }
+  });
+
+  it('a dispatch that reached a session says nothing', async () => {
+    const sandbox = dialog({
+      state: MERGED,
+      cfg: { reworkBody: { ok: true, id: 'T-0001', status: 'in_progress', round: 2, session: 'started' } },
+    });
+    await flush();
+    await sandbox.click('rework');
+    await flush();
+    assert.deepStrictEqual(sandbox.alertCalls, []);
+  });
+
+  it('the rework strings are translated into all three languages', () => {
+    const sandbox = createSandbox({});
+    const raw = runInSandbox(
+      UI_SRC,
+      sandbox,
+      `(function () {
+        var keys = ['closing_rework', 'closing_rework_confirm', 'closing_rework_confirm_no_session',
+          'closing_rework_failed', 'closing_rework_refused', 'rework_rolled_back',
+          'closing_why_no_branch', 'closing_why_running'];
+        var out = {};
+        ['en', 'ru', 'ja'].forEach(function (l) {
+          lang = l;
+          out[l] = keys.map(function (k) { return t(k); });
+        });
+        return out;
+      })()`
+    );
+    const result = JSON.parse(JSON.stringify(raw));
+    for (const value of [...result.en, ...result.ru, ...result.ja]) {
+      assert.ok(value && value.trim(), 'every rework string is filled in');
+    }
+    for (let i = 0; i < result.en.length; i++) {
+      assert.notStrictEqual(result.ru[i], result.en[i], `ru[${i}] is translated, not borrowed`);
+      assert.notStrictEqual(result.ja[i], result.en[i], `ja[${i}] is translated, not borrowed`);
+    }
+  });
+});
+

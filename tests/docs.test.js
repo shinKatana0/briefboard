@@ -823,9 +823,22 @@ describe('the rules established over two days are written down (T-0217)', () => 
 //
 // Counted from the map that dispatches them, never from the prose next to it,
 // and it needs no exemptions: an action is in TASK_ACTIONS or it is not a route.
-describe('the server header lists every task action it dispatches (T-0229)', () => {
-  const SERVER = 'server/server.js';
+const SERVER = 'server/server.js';
 
+// Read by both blocks below — the server's own header and agents/PROTOCOL.md
+// have each gone stale against this map, so both are held against it here.
+function taskActions() {
+  const map = /const TASK_ACTIONS = \{([^}]*)\}/.exec(read(SERVER));
+  assert.ok(map, `${SERVER} must keep TASK_ACTIONS as a literal map — it is what this reads`);
+  // Whatever the key looks like, quoted or not: a pattern that only accepted
+  // plain words would skip the odd one instead of failing on it, and the
+  // assertion about metacharacters below could never fire.
+  const keys = [...map[1].matchAll(/^\s*(?:'([^']*)'|([^\s':]+))\s*:/gm)].map((m) => m[1] ?? m[2]);
+  assert.ok(keys.length > 1, `only ${keys.length} action(s) were read out of TASK_ACTIONS`);
+  return keys;
+}
+
+describe('the server header lists every task action it dispatches (T-0229)', () => {
   // The file's opening block comment: everything above the first `*/`.
   function headerComment() {
     const text = read(SERVER);
@@ -834,20 +847,9 @@ describe('the server header lists every task action it dispatches (T-0229)', () 
     return text.slice(0, end);
   }
 
-  function actions() {
-    const map = /const TASK_ACTIONS = \{([^}]*)\}/.exec(read(SERVER));
-    assert.ok(map, `${SERVER} must keep TASK_ACTIONS as a literal map — it is what this reads`);
-    // Whatever the key looks like, quoted or not: a pattern that only accepted
-    // plain words would skip the odd one instead of failing on it, and the
-    // assertion below about metacharacters could never fire.
-    const keys = [...map[1].matchAll(/^\s*(?:'([^']*)'|([^\s':]+))\s*:/gm)].map((m) => m[1] ?? m[2]);
-    assert.ok(keys.length > 1, `only ${keys.length} action(s) were read out of TASK_ACTIONS`);
-    return keys;
-  }
-
   it('every action in TASK_ACTIONS is named in the header', () => {
     const header = headerComment();
-    for (const action of actions()) {
+    for (const action of taskActions()) {
       assert.match(
         header,
         new RegExp(String.raw`/api/task/T-\d{4}/${action}\b`),
@@ -857,7 +859,7 @@ describe('the server header lists every task action it dispatches (T-0229)', () 
   });
 
   it('the header names no task action the server does not dispatch', () => {
-    const dispatched = actions();
+    const dispatched = taskActions();
     const listed = [...headerComment().matchAll(/\/api\/task\/T-\d{4}\/([\w-]+)/g)].map((m) => m[1]);
     assert.ok(listed.length, 'the header must go on listing the task routes');
     for (const action of listed) {
@@ -872,9 +874,102 @@ describe('the server header lists every task action it dispatches (T-0229)', () 
   // regex metacharacter would not 404 — it would quietly change what the router
   // accepts on every task route.
   it('the actions are plain words, because the route pattern is built from them', () => {
-    for (const action of actions()) {
+    for (const action of taskActions()) {
       assert.match(action, /^[a-z][a-z-]*$/, `\`${action}\` is not safe to join into a pattern`);
     }
+  });
+});
+
+// T-0331: the same defect one document further out, and this one is the format
+// contract agents read before their first write. Writing rule 6 of
+// agents/PROTOCOL.md enumerates the endpoints through which the UI may reach the
+// backlog AND counts them in words. Both had gone stale: it said "twelve narrow
+// server endpoints" while the router dispatched fourteen, described neither
+// `/rework` (T-0329) nor `/resume` (T-0333), and called `GET /api/git/:id` "a
+// thirteenth route". A missing endpoint there reads as an endpoint that does not
+// exist, and a number written as prose is exactly what nobody rechecks — so it is
+// counted here, from the map that dispatches, never from the sentence beside it.
+describe('PROTOCOL.md writing rule 6 lists and counts the router (T-0331)', () => {
+  const PROTOCOL = 'agents/PROTOCOL.md';
+
+  // Writing rule 6 runs from its numbered heading to the next `## ` section, or
+  // to the end of the file while it is the last rule there.
+  function rule6() {
+    const text = read(PROTOCOL);
+    const start = text.indexOf('\n6. **The exceptions**');
+    assert.notStrictEqual(start, -1, `${PROTOCOL} must keep writing rule 6, which is what this reads`);
+    const rest = text.slice(start + 1);
+    const end = rest.indexOf('\n## ');
+    return end === -1 ? rest : rest.slice(0, end);
+  }
+
+  // The one board route that writes the backlog and is not a task action:
+  // creation posts to `/api/task` itself. Asserted against the server rather
+  // than assumed, because the two counts below are `actions + 1` and a rename
+  // there would otherwise leave them quietly one short.
+  function boardEndpoints() {
+    assert.match(
+      read(SERVER),
+      /url\.pathname === '\/api\/task'/,
+      `${SERVER} must still answer POST /api/task — the counts below are the task actions plus it`
+    );
+    return taskActions().length + 1;
+  }
+
+  // Spelled out, because that is how the document is written. A table rather
+  // than a dependency, and one that fails with instructions rather than silently
+  // if the router ever grows past its range.
+  const CARDINAL = { 12: 'twelve', 13: 'thirteen', 14: 'fourteen', 15: 'fifteen', 16: 'sixteen', 17: 'seventeen' };
+  const ORDINAL = { 13: 'thirteenth', 14: 'fourteenth', 15: 'fifteenth', 16: 'sixteenth', 17: 'seventeenth', 18: 'eighteenth' };
+
+  // assert.ok rather than assert.match throughout: rule 6 is four screens of
+  // prose, and a failure that prints all of it buries its own message.
+  it('every action in TASK_ACTIONS is described in rule 6', () => {
+    const rule = rule6();
+    for (const action of taskActions()) {
+      assert.ok(
+        new RegExp(String.raw`/api/task/:id/${action}\b`).test(rule),
+        `\`${action}\` is a route agents/PROTOCOL.md never describes`
+      );
+    }
+  });
+
+  it('rule 6 describes no task action the server does not dispatch', () => {
+    const dispatched = taskActions();
+    const listed = [...rule6().matchAll(/\/api\/task\/:id\/([\w-]+)/g)].map((m) => m[1]);
+    assert.ok(listed.length, 'rule 6 must go on describing the task routes');
+    for (const action of listed) {
+      assert.ok(
+        dispatched.includes(action),
+        `rule 6 offers \`${action}\`, which TASK_ACTIONS does not dispatch`
+      );
+    }
+  });
+
+  it('the count in words is the number of endpoints the router really has', () => {
+    const count = boardEndpoints();
+    const word = CARDINAL[count];
+    assert.ok(word, `extend CARDINAL: the router now has ${count} board endpoints`);
+    const said = /through these ([a-z-]+) narrow server endpoints/.exec(rule6());
+    assert.ok(said, 'rule 6 must open by counting the narrow server endpoints it then lists');
+    assert.strictEqual(
+      said[1],
+      word,
+      `rule 6 counts ${said[1]} narrow server endpoints; the router has ${count} (${word})`
+    );
+  });
+
+  it('the read route GET /api/git is numbered one past them', () => {
+    const nth = boardEndpoints() + 1;
+    const word = ORDINAL[nth];
+    assert.ok(word, `extend ORDINAL: GET /api/git/:id is now route ${nth}`);
+    const said = /a ([a-z-]+) route, `GET \/api\/git\/:id`/.exec(rule6());
+    assert.ok(said, 'rule 6 must go on numbering GET /api/git/:id against the writing routes');
+    assert.strictEqual(
+      said[1],
+      word,
+      `rule 6 calls GET /api/git/:id the ${said[1]} route; it is route ${nth} (${word})`
+    );
   });
 });
 
@@ -1315,5 +1410,64 @@ describe('the documented update categories are the ones the code produces (T-029
         `${README}: the prose list names \`${name}\`, which \`update\` does not print`
       );
     }
+  });
+});
+
+// T-0325: `in_progress` means an agent is on the task, and a dispatch that never
+// reached a session puts the task back. A guarantee a reader cannot find is one
+// nobody relies on — and this one changes what a status MEANS, which is the
+// guide's own subject. Asserted against the section rather than the file: a
+// sentence somewhere in three thousand lines is not the same as the promise
+// standing where a reader meets the drop.
+describe('the guide states what in_progress guarantees (T-0325)', () => {
+  const GUIDE = 'doc/guide/guide.en.md';
+  const workerSession = () => section(GUIDE, /^#{2,4} The worker session/im);
+
+  it(`${GUIDE}: the worker-session section says a failed dispatch puts the task back`, () => {
+    const text = workerSession();
+    assert.match(text, /puts the task back/i, 'the guarantee itself');
+    assert.match(text, /restores `ready`/, 'in the words of the status it restores');
+    assert.match(
+      text,
+      /`in_progress`\s*\n?means an agent is on the task|`in_progress` means an agent is on the task/i,
+      'and what the guarantee is about'
+    );
+  });
+
+  it(`${GUIDE}: it names the two answers that keep the card, and the condition on the repair`, () => {
+    const text = workerSession();
+    assert.match(text, /`already-running`/, 'a live session for the task keeps it');
+    assert.match(text, /`disabled`/, 'and so does a board with no worker command');
+    assert.match(
+      text,
+      /moved in the meantime/i,
+      'a repair that could overrule somebody else\'s decision would be worse than the state it fixes'
+    );
+  });
+});
+
+// T-0333: three commands now put a worker on a card, and they differ only in the
+// status each begins from. Documented apart, they are exactly where a reader
+// picks the wrong one - so the guide has to show them together, and this is what
+// keeps a later edit from splitting them up again. The claim is checked against
+// the SECTION, not the file: three names scattered over three thousand lines are
+// not the same as three names in one place.
+describe('the guide shows the three dispatches side by side (T-0333)', () => {
+  const GUIDE = 'doc/guide/guide.en.md';
+  const resuming = () => section(GUIDE, /^#{2,4} When the session dies/im);
+
+  it(`${GUIDE}: one passage names all three, with the status each begins from`, () => {
+    const text = resuming();
+    for (const [command, from] of [['start', 'ready'], ['rework', 'review'], ['resume', 'in_progress']]) {
+      const row = new RegExp('`' + command + '`[^\\n|]*\\|[^\\n|]*`' + from + '`');
+      assert.match(text, row, `${command} must be shown together with the status it begins from`);
+    }
+  });
+
+  it(`${GUIDE}: it says what makes this one different - it moves nothing`, () => {
+    const text = resuming();
+    assert.match(text, /writes no status|does not move/i, 'the card stays where it is');
+    assert.match(text, /registry/i, 'a live session is read from the registry, not from the status');
+    assert.match(text, /### Session questions/, 'and what this replaces is named, not hinted at');
   });
 });

@@ -103,13 +103,21 @@ and only then decide.
 
 A session listed as `interrupted` is not running: it went down with the board that started
 it, and nothing was restarted. Read its log (the last column of the output) to see how far
-it got, then treat the task as you would any other — hand it to a worker, or restart the
-session from the board. The state of the task in `doc/backlog.md` is what says where the
-work stands; the session record only says what happened to the process.
+it got, then treat the task as you would any other — hand it to a worker, or put one back
+on the card with `node tools/task.mjs resume T-0007`, which is the **Resume the work**
+button on that card in In Progress (T-0333). `resume` writes no status and needs none: the
+task is already `in_progress`, which is where it belongs, and the command refuses while a
+session is genuinely running. The state of the task in `doc/backlog.md` is what says where
+the work stands; the session record only says what happened to the process.
 
 Continue that work instead of starting it over: a new session re-reads the
 protocol, the briefs and the same files from zero. What the log and the branch
 already show goes into its prompt, so it picks up rather than repeats.
+
+**Do not move the card to `ready` to re-dispatch it.** That transition does not exist and
+should not be forced: `ready` claims nobody has started the task, which the branch
+contradicts. A session that died and left work standing is what `resume` is for; a round
+you are abandoning is `cancelled` plus a new card.
 
 `exited` is a session that finished on its own — the same as `interrupted` as far as
 launching a worker goes.

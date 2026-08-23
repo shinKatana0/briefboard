@@ -118,6 +118,15 @@ const SETUP_ENV = 'BRIEFBOARD_SETUP_CMD';
 // or a tool waiting on a prompt nobody can answer, since the session is headless.
 // Ten minutes is far above the honest work and still bounded, and a board hung
 // on `pub get` with no network is worse than a refusal that says so.
+//
+// This number is NOT derived and cannot be, which is the difference between it
+// and the budgets T-0271, T-0312 and T-0316 measured: those bound work
+// briefboard itself does, so a run of that work sizes them. This one bounds the
+// USER's install command, in the user's stack, on the user's machine —
+// briefboard has never run it and cannot measure it. So do not go looking for a
+// benchmark behind the ten minutes: it is a defensible ceiling, not a
+// measurement, and the way to fit it to a project is BRIEFBOARD_SETUP_TIMEOUT_MS
+// (T-0328) rather than a number derived here.
 const SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 // `git worktree add` gets its own limit instead of the read-sized default
 // server/git.js applies (T-0171): it writes out a whole checkout, so unlike
@@ -1321,7 +1330,10 @@ function compileTemplate(template, envName, { loopback, logger, profiles }) {
  *                   worktree before the session that will work in it (T-0150);
  *                   empty/absent = nothing is run and nothing is said
  *   setupTimeoutMs — how long that command may take before it is killed and the
- *                   session refused; injectable so the limit can be tested
+ *                   session refused (SETUP_TIMEOUT_MS); the
+ *                   BRIEFBOARD_SETUP_TIMEOUT_MS declaration, normalized here
+ *                   like maxSessions, so absent/empty/unparsable is the default
+ *                   rather than a budget of zero (T-0328)
  *   maxSessions   — concurrency cap, over all kinds together
  *   maxFinished   — how many finished sessions the registry keeps (MAX_FINISHED);
  *                   injectable so the eviction can be tested at three spawns
@@ -1362,7 +1374,7 @@ function createSessionRunner({
   orchestratorCommand,
   orchestratorEnvName = ENV_NAMES.orchestrator,
   setupCommand,
-  setupTimeoutMs = SETUP_TIMEOUT_MS,
+  setupTimeoutMs,
   maxSessions,
   maxFinished,
   profiles: profilesRaw,
@@ -1401,6 +1413,11 @@ function createSessionRunner({
   // shrinks the registry to three records must not silently shrink the ledger to
   // thirty entries underneath it.
   const finishedCap = normalizeCap(maxFinished, MAX_FINISHED);
+  // The same normalization for the same reason: this one arrives straight from
+  // the environment, and `setTimeout` reads both '' (Number → 0) and a typo
+  // (NaN) as "fire now" — a mistyped budget would kill every setup command on
+  // its first tick and refuse every session with `setup-timeout` (T-0328).
+  const setupBudget = normalizeCap(setupTimeoutMs, SETUP_TIMEOUT_MS);
 
   const profiles = parseProfiles(profilesRaw);
   const tokensMode = parseTokensMode(tokensModeRaw, logger);
@@ -2114,7 +2131,7 @@ function createSessionRunner({
       cwd: worktree,
       log,
       env: { ...process.env, [ROOT_ENV]: project },
-      timeoutMs: setupTimeoutMs,
+      timeoutMs: setupBudget,
       track: setupChildren,
     });
     if (!result.ok) return result;

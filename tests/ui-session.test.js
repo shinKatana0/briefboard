@@ -805,6 +805,189 @@ describe('the review action on a card in review', () => {
 });
 
 // =====================================================================
+// putting a worker back on a card whose session died (T-0333)
+// =====================================================================
+// The card is already `in_progress` and stays there: this action starts a
+// session and writes no status, which is why it lives among the session blocks
+// and not among the closing ones. Until it existed the only way to reach a
+// worker from here was the answer form's restart box, which meant writing a
+// question nobody asked into the description.
+describe('the resume action on a card in progress', () => {
+  const WORKING_TASK = TASK; // `in_progress`, with no session on it
+
+  // Opens the dialog of `taskSrc` with the given session configuration and
+  // registry, and leaves a `probeClick()` that presses the resume button.
+  function dialog({ taskSrc = WORKING_TASK, worker = true, sessions = '[]', overrides = {} } = {}) {
+    const sandbox = createSandbox(overrides);
+    const raw = runInSandbox(
+      UI_SRC,
+      sandbox,
+      `(function () {
+        tasks = [${taskSrc}];
+        sessionsById = new Map(${sessions}.map(function (r) { return [r.id, r]; }));
+        lang = 'en';
+        sessionsConfigured = { enabled: true, worker: ${worker}, orchestrator: true,
+          profiles: [], profileUsedBy: {} };
+        openTask('T-0001');
+        var overlay = modals[modals.length - 1];
+        probeClick = function () {
+          return overlay.querySelector('[data-resume-session]').dispatch('click');
+        };
+        return { html: overlay.innerHTML };
+      })()`
+    );
+    return { html: JSON.parse(JSON.stringify(raw)).html, sandbox };
+  }
+
+  function recordingFetch(status, body, calls) {
+    return function (url, init) {
+      calls.push({ url, init });
+      return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) });
+    };
+  }
+
+  it('offers the action on a card under work when a worker command is configured', () => {
+    const { html } = dialog({});
+    assert.ok(html.includes('data-resume-session="T-0001"'), html);
+    assert.ok(html.includes('Resume the work'));
+  });
+
+  it('is a captioned block of its own, and says beforehand that no status is written', () => {
+    const { html } = dialog({});
+    assert.ok(html.includes('<div class="card-action"><h3>Worker session</h3>'), html);
+    assert.ok(html.includes('<div class="card-action-row">'), 'the button sits on a line of its own');
+    // The property a reader would otherwise have to guess at: this dispatch moves
+    // nothing, so a card that has not moved is what success looks like.
+    assert.ok(html.includes('The task stays In Progress; no status is written.'));
+  });
+
+  it('names BRIEFBOARD_WORKER_CMD instead of falling silent when nothing is configured', () => {
+    const { html } = dialog({ worker: false });
+    assert.ok(!html.includes('data-resume-session'), 'no button: it could do nothing');
+    assert.ok(html.includes('Worker session'), 'the block stays, so the absence is explained');
+    assert.ok(html.includes('BRIEFBOARD_WORKER_CMD'));
+  });
+
+  // The board's half of the rule the endpoint enforces: the status says an agent
+  // is on the task either way, so what decides is the registry.
+  it('offers no button while a session is genuinely running, and says why', () => {
+    const { html } = dialog({ sessions: JSON.stringify([RUNNING]) });
+    assert.ok(!html.includes('data-resume-session'), html);
+    assert.ok(html.includes('Worker session'), 'the block explains itself rather than vanishing');
+    assert.ok(html.includes('A session is already running on this task'), html);
+  });
+
+  it('says nothing at all about it outside in_progress, configured or not', () => {
+    const REVIEWED = WORKING_TASK.replace("status: 'in_progress'", "status: 'review'");
+    for (const worker of [true, false]) {
+      const { html } = dialog({ taskSrc: REVIEWED, worker });
+      assert.ok(!html.includes('data-resume-session'), 'no button outside in_progress');
+      assert.ok(!html.includes('Worker session'), 'and no caption either');
+    }
+  });
+
+  it('asks first, then posts the same endpoint the CLI does', async () => {
+    const calls = [];
+    const { sandbox } = dialog({
+      overrides: { fetch: recordingFetch(200, { ok: true, status: 'in_progress', session: 'started' }, calls) },
+    });
+    await sandbox.probeClick();
+
+    assert.strictEqual(sandbox.confirmCalls.length, 1, 'the click must ask first');
+    assert.match(sandbox.confirmCalls[0], /T-0001/);
+    assert.match(sandbox.confirmCalls[0], /stays In Progress/, 'the card does not move, and it says so');
+    const sent = calls.filter((c) => /\/resume$/.test(c.url));
+    assert.deepStrictEqual(sent.map((c) => c.url), ['/api/task/T-0001/resume']);
+    assert.strictEqual(sent[0].init.method, 'POST');
+  });
+
+  it('a refused confirmation sends nothing at all', async () => {
+    const calls = [];
+    const { sandbox } = dialog({
+      overrides: { confirm: () => false, fetch: recordingFetch(200, { session: 'started' }, calls) },
+    });
+    await sandbox.probeClick();
+    assert.deepStrictEqual(calls.filter((c) => /\/resume$/.test(c.url)), []);
+  });
+
+  it('a started session says nothing: the board repaints on its own event', async () => {
+    const alerts = [];
+    const { sandbox } = dialog({
+      overrides: {
+        fetch: recordingFetch(200, { ok: true, status: 'in_progress', session: 'started' }, []),
+        alert: (msg) => alerts.push(msg),
+      },
+    });
+    await sandbox.probeClick();
+    assert.deepStrictEqual(alerts, []);
+  });
+
+  // A 200 whose dispatch reached no session. There is no rollback to report here
+  // — the card never moved — so the whole of what is said is that nothing started.
+  it('a 200 that started nothing is reported, and says nothing about a card coming back', async () => {
+    const alerts = [];
+    const { sandbox } = dialog({
+      overrides: {
+        fetch: recordingFetch(200, { ok: true, status: 'in_progress', session: 'limit' }, []),
+        alert: (msg) => alerts.push(msg),
+      },
+    });
+    await sandbox.probeClick();
+    assert.strictEqual(alerts.length, 1);
+    assert.match(alerts[0], /did not start: limit/);
+    assert.doesNotMatch(alerts[0], /put back|Ready|Review/, 'nothing was moved, so nothing came back');
+  });
+
+  it("a refusal names the reason in the board's own words", async () => {
+    const alerts = [];
+    const { sandbox } = dialog({
+      overrides: {
+        fetch: recordingFetch(409, { error: 'no', reason: 'no-branch' }, []),
+        alert: (msg) => alerts.push(msg),
+      },
+    });
+    await sandbox.probeClick();
+    assert.strictEqual(alerts.length, 1);
+    assert.match(alerts[0], /this task has no branch/, alerts[0]);
+  });
+
+  // A refusal the board has no words for still says something: the fallback is
+  // the one every other action uses.
+  it('a refusal with no reason falls back to the plain failure line', async () => {
+    const alerts = [];
+    const { sandbox } = dialog({
+      overrides: {
+        fetch: recordingFetch(409, {}, []),
+        alert: (msg) => alerts.push(msg),
+      },
+    });
+    await sandbox.probeClick();
+    assert.deepStrictEqual(alerts, ['Failed to resume the work']);
+  });
+
+  it('the resume strings exist and differ in all three languages', () => {
+    const KEYS = [
+      'resume_session_title', 'resume_session_what', 'resume_session_button',
+      'resume_session_unconfigured', 'resume_session_confirm', 'resume_session_failed',
+      'resume_session_refused', 'resume_why_no_branch',
+    ];
+    const { result } = run(`(function () {
+      var out = {};
+      ['en', 'ru', 'ja'].forEach(function (l) {
+        lang = l;
+        out[l] = ${JSON.stringify(KEYS)}.map(function (k) { return t(k); });
+      });
+      return out;
+    })()`);
+    for (const l of ['en', 'ru', 'ja']) {
+      for (let i = 0; i < KEYS.length; i++) assert.ok(result[l][i], `${l}.${KEYS[i]} is missing`);
+    }
+    assert.notDeepStrictEqual(result.ru, result.en);
+    assert.notDeepStrictEqual(result.ja, result.en);
+  });
+});
+
+// =====================================================================
 // starting the briefing session by hand (T-0141)
 // =====================================================================
 // The drop into Open starts one only for a task nobody has briefed yet, so this

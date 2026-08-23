@@ -102,6 +102,24 @@
  *       # the status gate, the dependency gate and the worktree are the server's
  *       # (T-0319). A board must therefore be RUNNING, because a session does not
  *       # outlive the board process; with none, this refuses and writes nothing.
+ *   node tools/task.mjs rework T-0007 [--json]
+ *       # the same client against /api/task/T-0007/rework: takes a `review` task
+ *       # back into `in_progress` and starts a worker session on the branch the
+ *       # previous round is already on. `review -> in_progress` was always legal
+ *       # and never needed --force; what this adds is the DISPATCH, which `status
+ *       # T-0007 in_progress` does not make (T-0329). It refuses when task/T-0007
+ *       # is gone - a rework would then start from HEAD and lose that round - and
+ *       # --json carries the round it is beginning, derived from the verdicts
+ *       # already written and stored nowhere.
+ *   node tools/task.mjs resume T-0007 [--json]
+ *       # the same client against /api/task/T-0007/resume: puts a worker back on a
+ *       # task that is ALREADY `in_progress` and whose session is gone - a board
+ *       # that was interrupted, a worker that crashed, a machine that rebooted.
+ *       # It writes NO status: the card is already where it belongs, so nothing
+ *       # moves and nothing is rolled back (T-0333). It refuses while a session is
+ *       # genuinely running - read from the board's registry, which is the only
+ *       # thing that can tell a dead session from a live one - and when task/T-0007
+ *       # is gone, for the same reason `rework` does.
  *   node tools/task.mjs review-start T-0007 [--json]
  *       # the same client against /api/task/T-0007/review: the review session the
  *       # card's button starts. Requires status `review` and changes NO status -
@@ -529,6 +547,14 @@ const SPECS = {
     flags: { json: 'bool' },
     usage: 'node tools/task.mjs review-start T-0007 [--json]',
   },
+  // The third client (T-0329), and no --force here either: the transition it asks
+  // for has never needed one.
+  rework: { args: ['T-0007'], flags: { json: 'bool' }, usage: 'node tools/task.mjs rework T-0007 [--json]' },
+  // The fourth (T-0333). `resume` and not `restart`, which the card's answer form
+  // already uses for restarting the session that asked a question, and not
+  // `rework`, which says something was reviewed. What is resumed is the WORK: it
+  // was begun, its session is gone, and the card never moved.
+  resume: { args: ['T-0007'], flags: { json: 'bool' }, usage: 'node tools/task.mjs resume T-0007 [--json]' },
   archive: { args: [], flags: { 'dry-run': 'bool' }, usage: 'node tools/task.mjs archive [--dry-run]' },
   board: { args: [], flags: {}, usage: 'node tools/task.mjs board' },
   sessions: { args: [], flags: {}, usage: 'node tools/task.mjs sessions' },
@@ -766,6 +792,11 @@ const DISPATCH_EXITS = {
   'already-running': 9,
   'session-failed': 10,
   'board-error': 11,
+  // Made by `rework` and `resume` - the two dispatches onto a task past `ready`
+  // (T-0329, T-0333) - and worth a code rather than the generic `bad-status`: the
+  // branch carrying the work is gone, and that is fixed by finding the branch,
+  // not by retrying anything.
+  'no-branch': 12,
 };
 
 // What each command posts to, what the board's meta calls the session it would
@@ -776,9 +807,26 @@ const DISPATCH_EXITS = {
 // VARIABLE to BRIEFBOARD_REVIEW_CMD and deliberately left the session KIND alone,
 // because the kind is written into the registry, into log file names and into
 // what `sessions` prints - and the meta reports kinds. Do not "fix" that here.
+// What a call with no task is missing, in the command's own words: `start` takes
+// a task, `review-start` reviews one, `rework` sends one back, `resume` picks one
+// back up (T-0269).
+const DISPATCH_VERB = {
+  start: 'start',
+  'review-start': 'review',
+  rework: 'send back for rework',
+  resume: 'resume',
+};
+
+// `moves` is the one line of this table that is not a name, and `resume` is the
+// second command to answer it `false`: it starts a worker on a card that is
+// already `in_progress` and writes no status at all, so the sentence it prints
+// must not draw an arrow. `review-start` says the same about the review session
+// for a different reason - that session sets no status either (T-0122).
 const DISPATCH = {
   start: { action: 'start', metaKey: 'worker', what: 'worker session', moves: true },
   'review-start': { action: 'review', metaKey: 'orchestrator', what: 'review session', moves: false },
+  rework: { action: 'rework', metaKey: 'worker', what: 'worker session', moves: true },
+  resume: { action: 'resume', metaKey: 'worker', what: 'worker session', moves: false },
 };
 
 // The variable a refusal has to name. sessions.js owns ENV_NAMES and does not
@@ -786,7 +834,7 @@ const DISPATCH = {
 // one is written out; the review pair IS exported, and both names are given
 // because either of them configures it (T-0305).
 function envNameOf(name) {
-  if (name === 'start') return 'BRIEFBOARD_WORKER_CMD';
+  if (DISPATCH[name].metaKey === 'worker') return 'BRIEFBOARD_WORKER_CMD';
   const { REVIEW_ENV, LEGACY_REVIEW_ENV } = require('../server/sessions.js');
   return `${REVIEW_ENV} (or ${LEGACY_REVIEW_ENV})`;
 }
@@ -905,6 +953,12 @@ function boardRequest(url, { method }) {
 // missing field is filed as its own card instead (T-0323). /review has only one
 // 409 ("task is not in review"), so it never reaches the branch below.
 function classifyRefusal(res) {
+  // /rework and /resume do carry one, and every value they send is a key of the
+  // table above. Read first and trusted only when the table knows it: a reason this
+  // side cannot map is no better than no reason at all, and the message-reading
+  // below is what still tells /start's two 409s apart.
+  const said = res.body && res.body.reason;
+  if (said && Object.prototype.hasOwnProperty.call(DISPATCH_EXITS, said)) return said;
   if (res.status === 404) return 'no-task';
   if (res.status === 409) {
     const message = String((res.body && res.body.error) || res.text);
@@ -1045,6 +1099,11 @@ async function runDispatch(name, id, wantJson) {
     command: name,
     id,
     status: answer.status,
+    // Only `rework` sends one, and it is passed on rather than counted here: the
+    // board derives it from the description under its own lock, and a second
+    // derivation on this side could answer a question about a file that has
+    // moved since (T-0329).
+    ...(answer.round === undefined ? {} : { round: answer.round }),
     ...(answer.profile === undefined ? {} : { profile: answer.profile }),
     session,
     board,
@@ -1637,14 +1696,16 @@ switch (cmd) {
     break;
   }
 
-  // The two clients of the board's own actions (T-0319, T-0320). Everything they
-  // do beyond checking how they were CALLED is in runDispatch() above, shared
-  // whole: one board lookup, one exit table, one document.
+  // The four clients of the board's own actions (T-0319, T-0320, T-0329, T-0333).
+  // Everything they do beyond checking how they were CALLED is in runDispatch()
+  // above, shared whole: one board lookup, one exit table, one document.
   case 'start':
-  case 'review-start': {
+  case 'review-start':
+  case 'rework':
+  case 'resume': {
     const { flags: f, positional } = parseArgs(cmd, rest);
     const [id] = positional;
-    if (!id) dieUsage(cmd, `${cmd} needs the task to ${cmd === 'start' ? 'start' : 'review'}`);
+    if (!id) dieUsage(cmd, `${cmd} needs the task to ${DISPATCH_VERB[cmd]}`);
     // Refused here rather than by the board's route regex: a malformed id is a
     // wrong CALL, and those exit 1 without a board being looked for at all.
     if (!TASK_ID_RE.test(id)) dieUsage(cmd, `"${id}" is not a task id (expected T-NNNN)`);
@@ -1759,7 +1820,7 @@ switch (cmd) {
     // a single word — `task.mjs stauts T-0007 review` printed this same list and
     // exited 0, which in a script reads as the status having been set (T-0220).
     const help =
-      'commands: add | status | priority | depends | labels | profile | brief | link | note | show | list | runnable | summary | start | review-start | archive | board | sessions | validate  (see the file header)';
+      'commands: add | status | priority | depends | labels | profile | brief | link | note | show | list | runnable | summary | start | review-start | rework | resume | archive | board | sessions | validate  (see the file header)';
     // `help` and its flag spellings are the same question as no command at all,
     // and refusing the one word every CLI answers would be a refusal of the kind
     // this task exists to remove. It is deliberately not in the list it prints:

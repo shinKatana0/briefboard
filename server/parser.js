@@ -23,6 +23,21 @@ const TRANSITIONS = {
   // undoing it is a different decision from putting a card back down.
   open: ['ready', 'backlog', 'cancelled'],
   ready: ['in_progress', 'cancelled'],
+  // No `in_progress -> ready` either, and this absence is decided rather than
+  // overlooked (T-0334): `ready` states that nobody has started the task, and
+  // while `task/T-NNNN` exists with commits on it that statement is false — the
+  // same class of untrue status the board's watchdog exists to catch. Written
+  // down because an unexplained absence gets forced: an orchestrator on another
+  // project forced this very edge twice in one session. What to reach for
+  // instead:
+  //   - the session died and the work stands -> `resume` (T-0333). It puts a
+  //     worker back on the card and moves nothing, because the card is already
+  //     where it belongs;
+  //   - the round is abandoned -> `cancelled` plus a new card. That is a
+  //     decision about work rather than a status correction, and it should look
+  //     like one in the record.
+  // `--force` stays the escape for a genuine mistake, and its being remarkable
+  // every single time is the feature rather than the friction.
   in_progress: ['review', 'cancelled'],
   review: ['done', 'in_progress', 'cancelled'],
   done: [],
