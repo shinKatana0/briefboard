@@ -4129,7 +4129,10 @@ describe('the run profile selector says which sessions the choice reaches', () =
     // The way out is named, not left to be guessed.
     assert.ok(html.includes('BRIEFBOARD_SESSION_CMD'));
     assert.ok(html.includes('BRIEFBOARD_WORKER_CMD'));
-    assert.ok(html.includes('BRIEFBOARD_ORCHESTRATOR_CMD'));
+    // T-0305: the documented name of the review session's variable. The legacy
+    // one still works and is not deprecated, but a list of where to put
+    // {profile} is advice, and advice names the current name.
+    assert.ok(html.includes('BRIEFBOARD_REVIEW_CMD'));
   });
 
   it('names the one kind that uses it when only the worker template does', () => {

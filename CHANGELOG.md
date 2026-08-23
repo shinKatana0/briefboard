@@ -7,6 +7,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-23
+
+briefboard can now be driven by something above it. A scope of work can be
+asked about — `list --label` selects the tasks carrying labels of your own — and
+the answer can be read by a program: `--json` prints one document on stdout and
+nothing else. Two questions a supervisor used to guess at from listing output
+have commands of their own: `runnable` says what may be started right now, and
+`summary` says how much of a scope is left and whether it is finished. Nothing
+outside briefboard has to parse `doc/backlog.md` to find out. Beside that, two
+changes that serve people rather than machines: a task's priority can be
+corrected after it was filed, and the review session's variable stops calling
+itself the orchestrator.
+
+**No call that was correct in 0.4.0 behaves differently in 0.5.0.** Everything
+below is either a new subcommand or a new flag, and the refusals introduced —
+`--all` on `runnable` and `summary`, `--status` on `summary`, a `--label` set
+over the cap — are all on commands and flags that did not exist before this
+release.
+
+### Added
+
+- **`list --label` — ask which tasks belong to a scope.** One occurrence is a
+  comma-separated set the task must carry any name of, and `--label` is the one
+  repeatable flag in this CLI: every occurrence has to match, so
+  `--label a,b --label c` is `(a OR b) AND c`. It combines with `--status` and
+  `--all` as AND. **The CLI is AND across repeated flags while the board's
+  `Labels ▾` filter is OR** — both deliberate, and each form's own "either" is
+  one comma away — so the difference is worth knowing before you meet it as a
+  surprisingly short list. A label nothing carries is not an error: an empty
+  result and exit `0`. What exits non-zero is a call naming no label at all
+  (`--label ""`, `--label ,`, `--label` with nothing after it), so a script can
+  tell "no such task" from "I typed it wrong" by the exit code alone (T-0303).
+- **A `--label` set that would be truncated is refused rather than answered.**
+  One occurrence holds at most 8 names — the same number a task's own label list
+  may carry — and a ninth is refused with the usage line and a non-zero exit. A
+  truncated set would answer with *fewer* tasks and exit `0`, which is the one
+  shape of wrong answer a script cannot detect. The cap is per occurrence, so a
+  longer query is still expressible by repeating the flag (T-0309).
+- **`list --json` — the same answer, for a program.** One JSON document
+  `{tasks, count}` on stdout and nothing else; everything `list` has to say goes
+  to stderr, so stdout can be piped into a parser whole. The field names are the
+  ones the product already uses — `show` prints a task under exactly these
+  names, and `blockedBy` is what `GET /api/board` has called the unclosed
+  prerequisites since dependencies existed. Descriptions are deliberately left
+  out of a listing; read one task with `show` (T-0303).
+- **`runnable` — what can be started right now.** `list` narrowed to status
+  `ready` with every prerequisite closed, decided by the same rule the board's
+  blocked marker, the drag from Ready into In Progress and the
+  `status … in_progress` gate all apply — there is no second definition of
+  "startable" to disagree with them. `--label` and `--json` mean what they mean
+  for `list`, and `--json` prints `list --json`'s own document, task for task and
+  field for field. `--status` can only narrow the set, so
+  `runnable --status review` is empty with exit `0` rather than an error;
+  `--all` is refused, because the archive holds closed tasks and nothing closed
+  is `ready` (T-0304).
+- **`summary` — how much of a scope is left.** One document: a count for every
+  status briefboard has (so they sum to `total`), `blocked` as a cross-cutting
+  count of the tasks waiting on a prerequisite, the `runnable` ids, `complete`,
+  and a `scope` echoing the query — `labels` as one array per `--label`
+  occurrence beside a `labelQuery` rendering it, so a stored answer says what it
+  was an answer to. It counts `doc/backlog.md` and the archive together, always:
+  a finished scope is precisely the one `archive` has emptied out of the live
+  file, and reading the live file alone printed for it exactly what a mistyped
+  label prints. An empty scope is deliberately **not** complete, so a dropped
+  hyphen cannot read as a finished phase. `--status` and `--all` are both
+  refused: a summary *is* the count per status, and the archive is already in
+  scope (T-0304, T-0310).
+- **What `--json` promises**, on all three of them: a field that exists keeps
+  its name, its type and its meaning; new fields may appear in any release; a
+  consumer ignores what it does not recognise. That is what makes adding a field
+  a non-event rather than a breaking change, and it is the reason an integrator
+  can build on this at all (T-0304).
+- **`complete` is a statement about briefboard's own tasks and nothing else.**
+  It is not acceptance of a phase, a release or a milestone: briefboard knows
+  nothing about any external project's vocabulary and counts the cards in
+  `doc/backlog.md` carrying the labels you named. What a finished scope entitles
+  you to conclude is decided by whoever integrates this; the CLI does not decide
+  it (T-0304, T-0310).
+- **`priority` — re-triage a task after it was filed.** The same five values
+  `add --priority` takes, with no graph and no `--force`: any priority may follow
+  any other. A change appends one line under a `### Priority changes` heading
+  naming the old value, the new one and when it moved, because a card that
+  silently became `Critical` reads a week later as though it always was. Setting
+  the value it already has writes nothing at all. Until now this was the one
+  field that could be set only at creation, so correcting it meant editing
+  `doc/backlog.md` by hand, on the line the parser is strictest about (T-0302).
+
+### Changed
+
+- **The review session's command template is `BRIEFBOARD_REVIEW_CMD`.**
+  `BRIEFBOARD_ORCHESTRATOR_CMD` is the earlier name of the same setting, it is
+  still read, nothing warns about it and it is **not** deprecated — a board
+  configured with it goes on working untouched; with both set,
+  `BRIEFBOARD_REVIEW_CMD` wins. The old name claimed something untrue: the
+  session it starts reads a diff, runs the checks and writes a verdict, setting
+  no status and merging nothing, while an *orchestrator* is whatever agent sits
+  above briefboard in your own project — which briefboard neither knows nor needs
+  to know about. Both READMEs and all three guides now name the four roles
+  (the board, the worker, the review session, your own orchestrator) in one
+  place (T-0305).
+
+### Upgrading an existing project
+
+Installing the new package is not enough: `briefboard init` copied `server/`,
+`tools/`, `ui/` and `agents/` into your project, and the board runs that copy. Run
+`briefboard update` to see what would change and `briefboard update --apply` to
+receive it.
+
 ## [0.4.0] - 2026-08-22
 
 Connecting the board to a project that **already exists** now works. `init` fills

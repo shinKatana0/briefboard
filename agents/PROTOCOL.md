@@ -26,7 +26,7 @@ contain lists, code, etc. Ends at the next `## T-...`.
 | Field      | Values                                                                |
 |------------|-----------------------------------------------------------------------|
 | `T-NNNN`   | ID — a continuous sequence, 4 digits with leading zeros. Never reused, and the sequence spans the archive as well (see §1a): the next ID is one past the highest in `doc/backlog.md` **and** `doc/backlog-archive.md`. |
-| `Blocker\|Critical\|Major\|Medium\|Minor` | Priority in decreasing order of urgency: Blocker blocks everything, Critical is critical, Major is important, Medium is normal medium urgency, Minor is low. |
+| `Blocker\|Critical\|Major\|Medium\|Minor` | Priority in decreasing order of urgency: Blocker blocks everything, Critical is critical, Major is important, Medium is normal medium urgency, Minor is low. Set at creation with `add --priority` and changed afterwards with `tools/task.mjs priority` — any value may follow any other, and the change appends a line to the description under `### Priority changes` rather than adding a field (T-0302). |
 | `type`     | `feature` \| `bug` \| `external`. `external` is work owned by a third party — access, keys, an answer from the client, someone else's release: we cannot schedule it, we can only wait for it. Anything unknown or missing reads back as `feature`. |
 | `status`   | `backlog` \| `open` \| `ready` \| `in_progress` \| `review` \| `done` \| `cancelled` |
 | `created`  | Date and time of creation, `YYYY-MM-DD HH:MM:SS` (machine local time). Earlier versions wrote the date alone, so `YYYY-MM-DD` is accepted as well; anything else is an error. |
@@ -401,8 +401,10 @@ What is in / what is out.
      `review` (anything else is 409, an unknown id 404), and all the endpoint does is start the
      review session in the project directory — never in a worktree, because the diff it reads
      belongs to the branch the worker created and the verdict goes to the shared backlog. With
-     `BRIEFBOARD_ORCHESTRATOR_CMD` unset the answer is `session: "disabled"` and the board
-     offers no button at all. The session's own output is the `### Review verdict` section it
+     `BRIEFBOARD_REVIEW_CMD` unset the answer is `session: "disabled"` and the board
+     offers no button at all — `BRIEFBOARD_ORCHESTRATOR_CMD` is the same setting under the name
+     it had until T-0305 and is still read, with `BRIEFBOARD_REVIEW_CMD` winning when both are
+     set. The session's own output is the `### Review verdict` section it
      appends through `tools/task.mjs note`; **no status change** comes from either side.
 
    - `POST /api/task/:id/done` (T-0148) — the **Accept** button in the card's dialog, and the

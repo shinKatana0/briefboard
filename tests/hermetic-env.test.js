@@ -34,6 +34,7 @@ const POLLUTED = {
   BRIEFBOARD_NAME: 'a board that is not this one',
   BRIEFBOARD_ORCHESTRATOR_CMD: 'node -e "0"',
   BRIEFBOARD_PROFILES: 'inherited=--from-the-machine',
+  BRIEFBOARD_REVIEW_CMD: 'node -e "0"',
   BRIEFBOARD_SESSION_CMD: 'node -e "0"',
   BRIEFBOARD_SESSION_MAX: '9',
   BRIEFBOARD_SETUP_CMD: 'node -e "0"',

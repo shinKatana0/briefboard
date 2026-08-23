@@ -65,11 +65,42 @@ const LOG_DIR_PARTS = ['.briefboard', 'sessions'];
 const BACKLOG_PARTS = ['doc', 'backlog.md'];
 const REGISTRY_FILE = 'registry.json';
 const REGISTRY_VERSION = 1;
+// The documented name of the review session's variable (T-0305). The session
+// KIND stays `orchestrator`: it is written into the registry, into log file
+// names and into what `tools/task.mjs sessions` prints, so renaming it would
+// change records that already exist on users' disks. Renaming a variable does
+// not.
+const REVIEW_ENV = 'BRIEFBOARD_REVIEW_CMD';
+// The name that variable carried when the review session was added (T-0122),
+// kept working and deliberately not deprecated: it is a supported alias, and
+// nothing warns about it. What it got renamed for is that "orchestrator" reads
+// as a claim about the agent above the worker, which collides with the
+// orchestrator of any project that embeds briefboard underneath itself.
+const LEGACY_REVIEW_ENV = 'BRIEFBOARD_ORCHESTRATOR_CMD';
 const ENV_NAMES = {
   briefing: 'BRIEFBOARD_SESSION_CMD',
   worker: 'BRIEFBOARD_WORKER_CMD',
-  orchestrator: 'BRIEFBOARD_ORCHESTRATOR_CMD',
+  orchestrator: REVIEW_ENV,
 };
+
+/**
+ * Where the review session's command comes from, and the ONE place the
+ * precedence between the two variables is decided (T-0305). Returns the command
+ * together with the variable it actually came from: a hint naming the documented
+ * variable to someone who configured the legacy one sends them searching their
+ * setup for a name that is not in it.
+ *
+ * A blank value counts as unset, which is what every other BRIEFBOARD_*_CMD
+ * already does — compileTemplate disables a kind on any blank template — so
+ * clearing BRIEFBOARD_REVIEW_CMD falls back to the legacy variable instead of
+ * turning the session off while the legacy one is still set.
+ */
+function resolveReviewCommand(env = process.env) {
+  const configured = [REVIEW_ENV, LEGACY_REVIEW_ENV].find((name) => (env[name] || '').trim());
+  // With neither set the documented name is the one to report: nothing is
+  // configured, and that is the variable whoever reads it should be setting.
+  return { command: configured ? env[configured] : '', envName: configured || REVIEW_ENV };
+}
 const PROFILES_ENV = 'BRIEFBOARD_PROFILES';
 const TOKENS_ENV = 'BRIEFBOARD_TOKENS_RE';
 const TOKENS_MODE_ENV = 'BRIEFBOARD_TOKENS_MODE';
@@ -1282,8 +1313,10 @@ function compileTemplate(template, envName, { loopback, logger, profiles }) {
  *   command       — the BRIEFBOARD_SESSION_CMD template (the briefing session);
  *                   empty/absent = that kind is disabled
  *   workerCommand — the BRIEFBOARD_WORKER_CMD template (the worker session)
- *   orchestratorCommand — the BRIEFBOARD_ORCHESTRATOR_CMD template (the review
- *                   session, T-0122)
+ *   orchestratorCommand — the review session's template (T-0122), whichever of
+ *                   the two variables supplied it; see resolveReviewCommand
+ *   orchestratorEnvName — which variable that was, so a start-up warning or a
+ *                   spawn hint names the one the user actually set (T-0305)
  *   setupCommand  — the BRIEFBOARD_SETUP_CMD template, run once in a new
  *                   worktree before the session that will work in it (T-0150);
  *                   empty/absent = nothing is run and nothing is said
@@ -1327,6 +1360,7 @@ function createSessionRunner({
   command,
   workerCommand,
   orchestratorCommand,
+  orchestratorEnvName = ENV_NAMES.orchestrator,
   setupCommand,
   setupTimeoutMs = SETUP_TIMEOUT_MS,
   maxSessions,
@@ -1374,10 +1408,15 @@ function createSessionRunner({
   // already broken, so one restart shows every mistake in the pair.
   const tokenRe = compileTokenPattern(tokensPattern, logger);
 
+  // Per runner rather than the module-wide map, because the review session's
+  // command may have come from either of its two variables and every message
+  // about it has to name the one that is really set (T-0305).
+  const envNames = { ...ENV_NAMES, orchestrator: orchestratorEnvName || ENV_NAMES.orchestrator };
+
   const templates = {
-    briefing: compileTemplate(command, ENV_NAMES.briefing, { loopback, logger, profiles }),
-    worker: compileTemplate(workerCommand, ENV_NAMES.worker, { loopback, logger, profiles }),
-    orchestrator: compileTemplate(orchestratorCommand, ENV_NAMES.orchestrator, {
+    briefing: compileTemplate(command, envNames.briefing, { loopback, logger, profiles }),
+    worker: compileTemplate(workerCommand, envNames.worker, { loopback, logger, profiles }),
+    orchestrator: compileTemplate(orchestratorCommand, envNames.orchestrator, {
       loopback,
       logger,
       profiles,
@@ -2151,7 +2190,7 @@ function createSessionRunner({
     }
 
     const failedSpawn = (e) => {
-      const hint = spawnFailureHint(e, platform, ENV_NAMES[kind]);
+      const hint = spawnFailureHint(e, platform, envNames[kind]);
       logger.error(`session ${taskId}: failed to start: ${e.message}`);
       if (hint) logger.error(`session ${taskId}: ${hint}`);
       out.end(
@@ -2280,7 +2319,7 @@ function createSessionRunner({
     // a clean exit that changed nothing is the case this exists for.
     child.on('close', () => {
       if (!sessionChangedTask(before, taskSnapshot(project, taskId))) {
-        out.write(emptyRunHint(taskId, ENV_NAMES[kind]));
+        out.write(emptyRunHint(taskId, envNames[kind]));
       }
       out.end();
     });
@@ -2486,6 +2525,9 @@ function createSessionRunner({
 
 module.exports = {
   createSessionRunner,
+  resolveReviewCommand,
+  REVIEW_ENV,
+  LEGACY_REVIEW_ENV,
   readSessionRegistry,
   isProcessAlive,
   killChild,

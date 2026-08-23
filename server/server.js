@@ -67,7 +67,7 @@ const {
   checkLabels,
   LOCK_TIMEOUT_CODE,
 } = require('./parser');
-const { createSessionRunner } = require('./sessions');
+const { createSessionRunner, resolveReviewCommand } = require('./sessions');
 const { createGitOps } = require('./git');
 const {
   createWatchdog,
@@ -161,13 +161,18 @@ const MAX_DESCRIPTION_LEN = 4000;
 // Opt-in per kind: with neither command set nothing is ever spawned. Both are
 // read from the environment here and only here — no request can supply, extend
 // or override them.
+// Two variables configure the review session and the newer one wins; which is
+// decided inside sessions.js and asked for here, so the board and the runner can
+// never answer differently about whether that session exists (T-0305).
+const review = resolveReviewCommand(process.env);
 const sessionRunner = createSessionRunner({
   project: PROJECT,
   command: process.env.BRIEFBOARD_SESSION_CMD,
   workerCommand: process.env.BRIEFBOARD_WORKER_CMD,
   // The review session (T-0122). Unset = the board offers no such action at all,
   // exactly as an unset worker command starts nothing.
-  orchestratorCommand: process.env.BRIEFBOARD_ORCHESTRATOR_CMD,
+  orchestratorCommand: review.command,
+  orchestratorEnvName: review.envName,
   // What turns a bare worktree into one the project's own tests can run in
   // (T-0150). Unset is the normal case for a project with no dependencies, and
   // then nothing is run and nothing is said about it.

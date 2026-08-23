@@ -22,9 +22,16 @@ const { startBoard } = require('./helpers/board.js');
 const { parseBacklog } = require('../server/parser.js');
 const { removeTree } = require('./helpers/rm.js');
 const { tempDir } = require('./helpers/tmp.js');
+const timing = require('./helpers/timing.js');
 
 function git(args, cwd) {
+  // Timed, because this file's fixtures are ten git processes each and the
+  // board answers /api/git/:id with four more: whether this file's tests grow
+  // faster than the suite is a question about what a git process costs on this
+  // machine, not about anything briefboard computes (T-0272).
+  const at = timing.now();
   const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
+  timing.record('git', { ms: timing.now() - at, what: args[0] });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);

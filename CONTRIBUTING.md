@@ -76,6 +76,31 @@ with it — the previous pair was taken at 759 tests and had gone stale by a
 factor of two and a half (T-0257). The ratio is what they are quoted for, and
 that one does not shrink.
 
+### Measure a budget before you argue about it
+
+Every deadline in `tests/helpers/` and `tools/test-run.mjs` was set from a
+measurement, and measurements go stale because the machine and the suite both
+move. `--timing-dir` takes them again:
+
+```bash
+node tools/test-run.mjs --timing-dir=/some/directory/outside/the/repository
+```
+
+It changes nothing about the run and does nothing without the flag. Each test
+process writes what every bounded wait cost to `<dir>/<pid>.jsonl` — `fetch`,
+`waitFor`, `waitForExit`, `waitUntilReady`, spawn to a board answering — and the
+wrapper writes `<dir>/run-<pid>.json` with the run's wall time, the ten longest
+stretches with no mark printed, and how long every test took. Keep the directory
+outside the working copy, or the run's own dirty check will fail it, and rightly.
+
+What settles an argument is a RATIO, never a threshold: run it once quiet and
+once under load — four concurrent suites is the rig this repository argues about
+— and compare how much the disputed operation grew against how much an operation
+nobody disputes grew (starting a process; running one `git`). An operation
+growing in step with those is the machine and there is nothing to fix; one
+growing faster is a finding. Wall-clock on one machine is not comparable with
+wall-clock on another, and not reliably with itself an hour later.
+
 When something fails, re-run just the file it names:
 
 ```bash
@@ -140,6 +165,17 @@ habits caused it, and five rules keep it impossible:
   would leave the child it handed the test file to still running. The report of
   a killed run dies with it, so the message points at `npm run test:verbose`,
   whose last line before the silence is the test to look at.
+
+  What that silence really bounds is not a slow test: node:test reports a file's
+  results from that file's own process, so an uninterrupted run of SYNCHRONOUS
+  tests prints nothing until it ends. Measured on three two-second tests, three
+  `await`ed ones print their marks at 2.3s / 4.3s / 6.3s while three blocking
+  ones print all four at 6.4s. Across this suite the longest silent stretch is
+  168s quiet and 249-260s under four concurrent suites, against a budget of 360s
+  (2026-08-23, 2502 tests) — so the budget is nearly half spent before any load,
+  and by one file (T-0311). Raising it is not the answer: it is the only guard
+  against a test that holds the event loop open after its own end, which no
+  per-test limit can catch.
 
   Silence is counted from the run's first output, not from its spawn, and the
   span before that has a budget of its own (`BRIEFBOARD_STARTUP_MS`, against

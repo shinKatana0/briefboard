@@ -198,6 +198,16 @@ it('runs after the hanging one', () => {});
 // cannot end that test any way but on the limit; if the limit never fires, the
 // third test never runs, the release never happens, and the run hangs exactly as
 // the fixture above does.
+// The hang of T-0245 in its second shape: every test passes and the RUN cannot
+// leave, because a test left a live timer behind. The runner reports the file
+// complete and then sits there — so at the kill there is genuinely nothing
+// running, and the message has to say that rather than name the last test to
+// finish.
+const LEAKED_TIMER_TEST = `'use strict';
+const { it } = require('node:test');
+it('leaves a timer behind and passes', () => { setInterval(() => {}, 50); });
+`;
+
 const RELEASING_HANG_TEST = `'use strict';
 const { it } = require('node:test');
 let held;
@@ -295,6 +305,52 @@ describe('no test can run forever (T-0124)', () => {
     // run printed before the kill, which is the only report a killed run leaves
     // and the reason the message points at `test:verbose` rather than nowhere.
     assert.match(out, /runs before the hanging one/, 'what the run printed before the kill');
+  });
+
+  // T-0272/T-0278: the kill used to relay a count with no name — "273 marks,
+  // then nothing" — and send the reader to `test:verbose`, which only helps for a
+  // failure that reproduces on demand. This one does not: it needs a loaded
+  // machine and turned up twice in a month.
+  //
+  // What makes it nameable is which node:test event is listened to. `test:start`
+  // is a REPORTING event and arrives with the test's result, so a test that never
+  // finishes is never announced by it (measured: a four-second test's start
+  // reached a reporter at 4319ms, a hanging test's start never in six seconds).
+  // `test:dequeue` arrives when the test really begins. The fixture is the same
+  // hang as above, so a wrapper reading the wrong event prints the same message
+  // as before and fails here alone.
+  it('the kill names what was still running, not just how many marks were printed', () => {
+    const { out } = runGuard(makeRepo(HANGING_TEST), {
+      BRIEFBOARD_TEST_TIMEOUT_MS: '60000',
+      BRIEFBOARD_SILENCE_MS: '2000',
+    });
+    assert.match(out, /Still running when it was killed/, out);
+    assert.match(out, /never finishes/, `the hanging test has to be named: ${out}`);
+    // The one that finished before it is not still running, and a list that
+    // carries it is a list that names everything the file ever started.
+    assert.doesNotMatch(
+      out.slice(out.indexOf('Still running when it was killed')),
+      /runs before the hanging one/,
+      'a finished test must leave the list'
+    );
+  });
+
+  // The other kind of hang, and what keeps the list honest: every test PASSED
+  // and the RUN still could not leave, because a test left a live timer behind
+  // (T-0245). No test is running then — the file is, and never completes — so
+  // the file is what the list has to name. Naming the last test to finish
+  // instead would send the reader to a test that passed.
+  it('names the file, not a finished test, when the hang outlives every test', () => {
+    const { status, out } = runGuard(makeRepo(LEAKED_TIMER_TEST), {
+      BRIEFBOARD_TEST_TIMEOUT_MS: '60000',
+      BRIEFBOARD_SILENCE_MS: '2000',
+    });
+    assert.notStrictEqual(status, 0, out);
+    assert.match(out, /printed nothing for 2000ms and was killed/, out);
+    const list = out.slice(out.indexOf('Still running when it was killed'));
+    assert.match(list, /fixture\.test\.js \(the file itself\)/, out);
+    assert.doesNotMatch(list, /leaves a timer behind/, `a finished test must leave the list: ${out}`);
+    assert.doesNotMatch(out, /undefined/, `a name nobody knew must not be printed: ${out}`);
   });
 
   // The same kill, on a run that was slow to START. A budget spent before the
@@ -688,6 +744,40 @@ describe('the run has no temporary directory to leave behind (T-0276)', () => {
     assert.match(out, /printed nothing for 2000ms and was killed/, 'the path under test');
     assert.notStrictEqual(status, 0);
     assert.deepStrictEqual(countDirsIn(root), [], out);
+  });
+
+  // T-0272: the budgets above were each set from a measurement and then argued
+  // about for months, because nothing in the repository could take the
+  // measurement again. `--timing-dir` is what re-derives them, and the thing it
+  // must never do is change the run it is measuring.
+  describe('--timing-dir writes down what the run cost (T-0272)', () => {
+    it('records the run, and is not passed on to node as a test pattern', () => {
+      const dir = path.join(tempDir('briefboard-timing-'), 'round');
+      const { status, out } = runGuard(makeRepo(CLEAN_TEST), {}, [`--timing-dir=${dir}`]);
+      assert.strictEqual(status, 0, out);
+      // Taken for a pattern it would match no file, and the wrapper's own
+      // "the run executed no tests" guard would fire instead of a green run.
+      assert.doesNotMatch(out, /executed no tests|Nothing matched/, out);
+      const written = fs.readdirSync(dir).filter((name) => name.startsWith('run-'));
+      assert.strictEqual(written.length, 1, `expected one summary, got ${written.join(', ')}`);
+      const summary = JSON.parse(fs.readFileSync(path.join(dir, written[0]), 'utf8'));
+      assert.strictEqual(summary.executed, 1, JSON.stringify(summary));
+      assert.strictEqual(summary.silenceBudgetMs, 360000);
+      assert.ok(summary.wallMs > 0, 'a run that took no time was not measured');
+      // The names come from the same ipc channel as the count, so a summary
+      // with no test in it means the relay is broken, not that nothing ran.
+      assert.ok(
+        summary.tests.some((t) => t.name === 'writes nothing'),
+        `the run's own test is missing from ${JSON.stringify(summary.tests)}`
+      );
+    });
+
+    it('writes nothing at all when it is not asked to', () => {
+      const dir = path.join(tempDir('briefboard-timing-off-'), 'round');
+      const { status } = runGuard(makeRepo(CLEAN_TEST));
+      assert.strictEqual(status, 0);
+      assert.strictEqual(fs.existsSync(dir), false, 'a run nobody measured left a directory');
+    });
   });
 
   // The second watchdog. There are two of them since T-0266, and a directory

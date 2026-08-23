@@ -217,7 +217,21 @@ backlog ──▶ open ──▶ ready ──▶ in_progress ──▶ review �
 
 エージェントセッションを開始できるドロップは2つあり、それぞれ専用のコマンドを
 持ちます。カードを「Open」に落としたときの**ブリーフィング**セッションと、
-「In progress」に落としたときの**ワーカー**セッションです。
+「In progress」に落としたときの**ワーカー**セッションです。「Review」にあるカードの
+ボタンは3つ目、**レビュー**セッションを開始します。
+
+紛らわしいので、呼び名を一度だけ整理します。
+
+- **ボード** — briefboard そのもの。バックログ、ブリーフ、ライフサイクルを持ち、
+  セッションを開始しますが、コードは決して書きません;
+- **ワーカー** — 1つのタスクを隔離して実装する側。専用のブランチと専用の worktree
+  を持ちます;
+- **レビューセッション** — 差分を読み、チェックを走らせ、判定を書きます。
+  ステータスは書かず、マージもしません;
+- **あなた自身のオーケストレーター** — その全体の上に立つエージェント。あなたの
+  プロジェクトで使っているなら、の話です。briefboard はその存在を知らないし、
+  知る必要もありません。レビューセッションの変数が `BRIEFBOARD_REVIEW_CMD` に
+  なり、もう「orchestrator」と名乗らないのはそのためです。
 
 ブリーフィングセッションが行うのは1つだけです。タスクをリファインし、
 `doc/brief/` にブリーフを書き、タスクを `ready` にして終了します（あるいは質問を
@@ -390,10 +404,12 @@ If that section is already there and now carries answers: take them into account
 - `BRIEFBOARD_WORKER_CMD` — ワーカーセッション（In progress へのドロップ）の
   コマンドテンプレート。ブリーフィング用とは別に設定・表示されます。下記の
   [ワーカーセッション](#ワーカーセッションready--in-progress)を参照してください。
-- `BRIEFBOARD_ORCHESTRATOR_CMD` — レビューセッション（すでに Review にあるカードの
+- `BRIEFBOARD_REVIEW_CMD` — レビューセッション（すでに Review にあるカードの
   ボタン）のコマンドテンプレート。未設定ならボタン自体が現れません。下記の
   [レビューセッション](#レビューセッションすでに-review-にあるタスク)を参照して
-  ください。
+  ください。`BRIEFBOARD_ORCHESTRATOR_CMD` は同じ設定の以前の名前で、いまも読まれ
+  ます。すでに動いているボードは何も直さずそのまま動きます。両方が設定されている
+  場合に使われるのは `BRIEFBOARD_REVIEW_CMD` です。
 - `BRIEFBOARD_SETUP_CMD` — 新しい worktree を使える状態にするコマンド。たとえば
   `npm ci`、`flutter pub get`、`uv sync` です。隔離されたセッションが受け取るのは
   *チェックアウト*であって、`node_modules` もパッケージも venv もありません。
@@ -452,7 +468,7 @@ PATH に `.cmd` シムを置きますが、Node の CVE-2024-27980 対応以降�
 2つ目が動くのは、`cmd.exe` が本物の実行ファイルで、`/c` 以下は通常の引数として
 渡されるからです。シェルを使うのはあなたがテンプレートで明示的に選んだ結果で
 あって、ランナーが黙って差し込むものではありません。`BRIEFBOARD_WORKER_CMD` と
-`BRIEFBOARD_ORCHESTRATOR_CMD` についても同じです。
+`BRIEFBOARD_REVIEW_CMD` についても同じです。
 
 ### 隔離セッション（専用のブランチと作業ツリー）
 
@@ -653,7 +669,7 @@ node tools/screenshot.mjs --lang en"
 
 ```bash
 # Claude Code — そのままコピーできます:
-BRIEFBOARD_ORCHESTRATOR_CMD='claude -p "Review task {id} of this project and write a verdict.
+BRIEFBOARD_REVIEW_CMD='claude -p "Review task {id} of this project and write a verdict.
 The board started you in the project directory — do not create a worktree and do not switch branches. Its path is in AGENTBOARD_ROOT: printenv AGENTBOARD_ROOT
 The --full below is what prints the worker report, which you are reviewing; without it show leaves reports out:
 node tools/task.mjs show {id} --full
@@ -725,7 +741,7 @@ node tools/screenshot.mjs --lang en"
    **あなたのもの**で、先頭の値が既定になります。自分のプロファイルを持たない
    タスクは、それで実行されます。
 2. **自分のコマンドテンプレートに `{profile}` を入れる** — `BRIEFBOARD_SESSION_CMD`、
-   `BRIEFBOARD_WORKER_CMD`、`BRIEFBOARD_ORCHESTRATOR_CMD` のいずれか、あるいは
+   `BRIEFBOARD_WORKER_CMD`、`BRIEFBOARD_REVIEW_CMD` のいずれか、あるいは
    すべてに。値だけ宣言してテンプレートに手を入れなければ、代入する先がありません。
    選択はタスクに保存されるだけで、どのコマンドにも届きません。
 
@@ -1062,6 +1078,12 @@ node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|
                                   # コマンドと同じく、カンマ区切りの1つの引数で渡す
 node tools/task.mjs status T-0007 <backlog|open|ready|in_progress|review|done|cancelled>
                                   # タスクのステータスを変更する（遷移の妥当性を検証）
+node tools/task.mjs priority T-0007 <Blocker|Critical|Major|Medium|Minor>
+                                  # 起票済みのタスクを再トリアージする。どの値の後にどの値でも
+                                  # 置ける — ここにグラフは無く、--force も無い — うえで、変更は
+                                  # 説明の "### Priority changes" 見出しの下に記録される。
+                                  # Critical になったカードが、あとから最初からそうだったように
+                                  # 読まれないようにするため
 node tools/task.mjs depends T-0007 T-0005,T-0006   # T-0007 が待つタスクを設定する
 node tools/task.mjs depends T-0007 --clear         # その一覧を消す
 node tools/task.mjs labels T-0007 ui,docs          # このタスクのラベルを設定する
@@ -1094,9 +1116,46 @@ node tools/task.mjs show T-0007 --full
                                   # 同じものを、既定では省かれるワーカーの報告も含めて表示する。
                                   # フラグ無しの場合、JSON には何件省いたかと取得方法を伝える
                                   # "omitted" フィールドが入る
-node tools/task.mjs list [--status ready] [--all]
+node tools/task.mjs list [--status ready] [--label ui,docs] [--all] [--json]
                                   # 生きているタスクを一覧表示する（任意でステータスにより
                                   # フィルター）。--all はアーカイブ済み（クローズ）も加える
+                                  # --label は、この CLI で唯一くり返せるフラグ。1回の指定は
+                                  # カンマ区切りの集合で、タスクはそのうち「いずれか」を持って
+                                  # いればよく、指定した回数ぶんすべてが一致しなければならない。
+                                  # つまり `--label a,b --label c` は (a OR b) AND c。ボードの
+                                  # `Labels ▾` フィルターは OR で、両方の規則はガイドで並べて
+                                  # 説明している
+                                  # 1回の指定に入れられる名前は最大8個（タスク自身が持てる数と
+                                  # 同じ）。9個目は黙って切り捨てず、拒否する — 切り詰められた
+                                  # 集合は、より少ないタスクを終了コード 0 で返してしまうから
+                                  # --json は標準出力に {tasks, count} という文書を1つだけ、
+                                  # 他には何も出さずに印字する。フィールド名は `show` と
+                                  # GET /api/board がすでに使っているもの。プログラムが
+                                  # doc/backlog.md を解析せずにバックログを読めるようにするため
+node tools/task.mjs runnable [--label ui,docs] [--status ready] [--json]
+                                  # いま「着手できる」タスク: ステータスが `ready` で、未完了の
+                                  # 前提タスクが1つも無いもの。判断の規則は、ボードのブロック
+                                  # マーカーや ready → in_progress のガードが使うものと同じ。
+                                  # --status はその集合を狭めることしかできないので、
+                                  # `runnable --status review` はエラーではなく空の答えになる
+                                  # --json は `list --json` と同じ {tasks, count} を印字する
+                                  # --all は拒否される: アーカイブにあるのはクローズ済みだけで、
+                                  # クローズ済みが `ready` であることはない
+node tools/task.mjs summary [--label ui,docs] [--json]
+                                  # ある範囲がどれだけ残っているかを1つの文書で: ステータスごとの
+                                  # 件数（すべてのステータス。だから合計が `total` になる）、
+                                  # `blocked`、`runnable` の id、そして `complete`。つねに両方の
+                                  # ファイルを数える — 終わった範囲とは、まさに `archive` が
+                                  # doc/backlog.md から出してしまった範囲であり、生きている
+                                  # ファイルだけを数えると、ラベルの打ち間違いと同じ答えを
+                                  # 印字してしまった
+                                  # --status と --all はどちらも拒否される: サマリーとは
+                                  # ステータスごとの件数そのものであり、アーカイブはすでに範囲内
+                                  # 空の範囲は意図的に「完了」としない。ラベルの打ち間違いが、
+                                  # 終わったフェーズとして読まれないようにするため
+                                  # `scope` は問い合わせをそのまま返す。`labels` は --label の
+                                  # 指定1回につき1つの配列（集合の中の名前は選択肢、集合どうしは
+                                  # AND）で、その隣に文字列にした `labelQuery` が並ぶ
 node tools/task.mjs archive [--dry-run]
                                   # done/cancelled のタスクをすべて doc/backlog-archive.md へ移す
 node tools/task.mjs board        # このプロジェクトでボードが動いているか、どのポートか — pid、

@@ -38,6 +38,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const { waitUntilReady, waitForExit, stopProcess } = require('./bounded.js');
+const timing = require('./timing.js');
 const { SPAWN_WAIT_BUDGET_MS } = require('./wait.js');
 const { AUTO_PORT_VALUE } = require('../../server/listen.js');
 
@@ -125,6 +126,7 @@ async function waitForBanner(proc, read, timeoutMs = BANNER_TIMEOUT_MS) {
  * themselves, as with every other opt-in feature here.
  */
 async function startBoard(root, env = {}, { serverPath = SERVER_PATH, timeoutMs } = {}) {
+  const spawnedAt = timing.now();
   const proc = spawn(process.execPath, [serverPath], {
     env: {
       ...process.env,
@@ -146,11 +148,17 @@ async function startBoard(root, env = {}, { serverPath = SERVER_PATH, timeoutMs 
   let port;
   try {
     port = await waitForBanner(proc, out, timeoutMs);
+    timing.record('banner', { ms: timing.now() - spawnedAt, pidOf: proc.pid, port });
     await waitUntilReady(`http://${HOST}:${port}`);
   } catch (err) {
+    timing.record('banner', { ms: timing.now() - spawnedAt, pidOf: proc.pid, outcome: 'failed' });
     await stopProcess(proc); // a board nobody got hold of must not outlive the test
     throw err;
   }
+  // When each board was up and when it was told to go. A request that met a
+  // board already being torn down is the first of T-0270's three candidates,
+  // and it can only be told from the others against these two moments.
+  timing.record('board-up', { ms: timing.now() - spawnedAt, pidOf: proc.pid, port });
 
   return {
     proc,
@@ -163,7 +171,10 @@ async function startBoard(root, env = {}, { serverPath = SERVER_PATH, timeoutMs 
     // A function, not a promise: a server that is meant to stay up must not
     // leave a rejected timeout promise behind for nobody to catch.
     exited: (ms) => waitForExit(proc, ms),
-    stop: () => stopProcess(proc),
+    stop: () => {
+      timing.record('board-stop', { pidOf: proc.pid, port });
+      return stopProcess(proc);
+    },
   };
 }
 

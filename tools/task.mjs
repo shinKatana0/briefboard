@@ -21,6 +21,12 @@
  *       # done/cancelled; --force allows any transition between valid statuses and
  *       # overrides that dependency gate (prints a WARNING for both), but never
  *       # bypasses the "ready requires a brief" invariant.
+ *   node tools/task.mjs priority T-0007 <Blocker|Critical|Major|Medium|Minor>
+ *       # no lifecycle graph and no --force: any priority may follow any other,
+ *       # so there is nothing to check beyond membership of the same list
+ *       # `add --priority` uses. A change appends one line under
+ *       # "### Priority changes" in the description - a card that silently
+ *       # becomes Critical reads later as though it always was (T-0302).
  *   node tools/task.mjs depends T-0007 T-0001,T-0002  # set the prerequisite list (replaces it)
  *   node tools/task.mjs depends T-0007 --clear        # drop the prerequisite list
  *   node tools/task.mjs labels T-0007 ui,docs         # set the whole label list (replaces it)
@@ -53,8 +59,42 @@
  *       # the task as JSON. Worker reports are left out by default (T-0161) and
  *       # the JSON says so in its `omitted` field; --full prints the description
  *       # exactly as it is stored.
- *   node tools/task.mjs list [--status ready] [--all]
+ *   node tools/task.mjs list [--status ready] [--label ui,docs] [--all] [--json]
  *       # the live backlog only; --all adds the archived (closed) tasks.
+ *       # --label is the one flag that may be REPEATED: each occurrence is one
+ *       # comma-separated set the task must carry ANY name of, and every
+ *       # occurrence must match - so `--label a,b --label c` is (a OR b) AND c.
+ *       # The board's own Labels filter is OR; the two are described side by
+ *       # side in doc/guide/guide.en.md (T-0303). One occurrence holds at most
+ *       # MAX_LABELS names - what a task itself may carry - and a longer set is
+ *       # REFUSED rather than truncated (T-0309).
+ *       # --json prints ONE document {tasks, count} on stdout and nothing else,
+ *       # using the field names `show` and GET /api/board already use.
+ *   node tools/task.mjs runnable [--label ui,docs] [--status ready] [--json]
+ *       # the tasks that can be STARTED now: status `ready` and no unsatisfied
+ *       # prerequisite, decided by the same blockingDependencies() the board's
+ *       # blocked marker and the ready -> in_progress guard use - never a second
+ *       # definition of "startable" (T-0304). --status can only narrow that set,
+ *       # so `runnable --status review` is empty rather than an error, and --json
+ *       # prints `list --json`'s own {tasks, count} document. --all is REFUSED:
+ *       # the archive holds closed tasks only and none of them can be `ready`,
+ *       # so the flag has no way to change this answer (T-0310).
+ *   node tools/task.mjs summary [--label ui,docs] [--json]
+ *       # how much of a scope is left, in one document: a count per status (all
+ *       # of STATUSES, so they sum to `total`), `blocked` as a cross-cutting
+ *       # count over the same dependency rule, the `runnable` ids, and
+ *       # `complete`. Counts BOTH files always (T-0310): a FINISHED scope is
+ *       # exactly the one `archive` has emptied out of doc/backlog.md, so
+ *       # reading the live file alone made it print what a label nobody ever
+ *       # used prints. --status and --all are both REFUSED: a summary IS the
+ *       # count per status, and the archive is already in scope.
+ *       # `complete` is total > 0 AND every task done/cancelled - an EMPTY scope
+ *       # is deliberately not complete, so a typo'd label does not read as a
+ *       # finished phase. It is a statement about briefboard's own tasks and
+ *       # never acceptance of anything outside them. `scope` echoes the query
+ *       # as it was asked: `labels` is one array per --label occurrence (names
+ *       # inside a set are alternatives, the sets are ANDed) and `labelQuery`
+ *       # is that same query rendered for a human.
  *   node tools/task.mjs archive [--dry-run]
  *       # moves every done/cancelled task to doc/backlog-archive.md, same format.
  *       # The archive is read-only afterwards; the board keeps showing those
@@ -81,11 +121,14 @@ const {
   parseBacklog,
   nowStamp,
   STATUSES,
+  PRIORITIES,
   TRANSITIONS,
   TASK_ID_RE,
   BRIEF_ID_RE,
   blockingDependencies,
   checkLabels,
+  normalizeLabels,
+  MAX_LABELS,
   dependencyCycles,
   appendDescriptionSection,
   stripWorkerReports,
@@ -93,6 +136,7 @@ const {
   addTask,
   localStamp,
   archiveClosedTasks,
+  CLOSED_STATUSES,
   readArchivedTasks,
   archivePathFor,
   findBriefFile,
@@ -139,6 +183,33 @@ function readTasks() {
 // Only the dependency rules need this; everything the CLI writes stays live.
 function withArchived(tasks) {
   return tasks.concat(readArchivedTasks(BACKLOG));
+}
+
+// One task as `list --json` prints it (T-0303). The field NAMES are the ones
+// `show` and GET /api/board already use - id/title/type/status/priority/labels/
+// depends/briefs/created/closed, plus `blockedBy` from blockingDependencies(),
+// which is the board API's own name for exactly this. Renaming any of them here
+// would give the product a third task shape to keep in step.
+//
+// The description is left out on purpose: this is a listing, and descriptions
+// are most of the backlog's bulk (63% of this one). The stability this promises
+// is written in the guide: a field that exists keeps its name, its type and its
+// meaning, new fields may appear in any release, and a consumer ignores what it
+// does not recognise.
+function listEntry(task, known) {
+  return {
+    id: task.id,
+    title: task.title,
+    type: task.type,
+    status: task.status,
+    priority: task.priority,
+    labels: task.labels,
+    depends: task.depends,
+    briefs: task.briefs,
+    created: task.created,
+    closed: task.closed,
+    blockedBy: blockingDependencies(task, known),
+  };
 }
 
 // Abort a mutation aimed at a task that is not in the live backlog. An archived
@@ -288,7 +359,9 @@ function readStdinValue(name, flag) {
 //
 //   args  - the positional arguments, named as they appear in the usage line.
 //           Anything beyond them is a refusal.
-//   flags - 'value' consumes the next token, 'bool' consumes nothing. An unknown
+//   flags - 'value' consumes the next token, 'bool' consumes nothing, 'values'
+//           consumes the next token like 'value' but KEEPS every occurrence
+//           instead of letting the last one win (T-0303). An unknown
 //           flag is a refusal as well: `archive --dryrun` is not a dry run, it is
 //           an archive run, and nothing in the output used to say so. The sibling
 //           CLI (bin/briefboard-init.mjs) has refused unknown options all along.
@@ -307,6 +380,14 @@ const SPECS = {
     args: ['T-0007', `<${STATUSES.join('|')}>`],
     flags: { force: 'bool' },
     usage: `node tools/task.mjs status T-0007 <${STATUSES.join('|')}> [--force]`,
+  },
+  // Its neighbour above in every way that matters - one task id, one value out
+  // of a closed list - minus the graph: any priority may follow any other, so
+  // there is no transition to bypass and deliberately no --force (T-0302).
+  priority: {
+    args: ['T-0007', `<${PRIORITIES.join('|')}>`],
+    flags: {},
+    usage: `node tools/task.mjs priority T-0007 <${PRIORITIES.join('|')}>`,
   },
   depends: {
     args: ['T-0007', 'T-0001,T-0002'],
@@ -386,9 +467,36 @@ const SPECS = {
   },
   list: {
     args: [],
-    flags: { status: 'value', all: 'bool' },
-    usage: 'node tools/task.mjs list [--status ready] [--all]',
+    flags: { status: 'value', label: 'values', all: 'bool', json: 'bool' },
+    usage: 'node tools/task.mjs list [--status ready] [--label ui,docs] [--all] [--json]',
     hint: (positional) => `the status is a flag, not a position: --status ${positional[0]}`,
+  },
+  // `list`'s flags MINUS --all, because it IS `list` narrowed by the lifecycle
+  // (T-0304). --status stays because it can only narrow a set the lifecycle has
+  // already defined, which is harmless and occasionally useful. --all could do
+  // neither: the archive holds closed tasks only and `runnable` requires
+  // `ready`, so the flag would have advertised an effect it has no way to have
+  // (T-0310). It is refused exactly as summary's --status is - by being declared
+  // nowhere, which sends parseArgs down its unknown-flag path.
+  runnable: {
+    args: [],
+    flags: { status: 'value', label: 'values', json: 'bool' },
+    usage: 'node tools/task.mjs runnable [--label ui,docs] [--status ready] [--json]',
+    hint: (positional) => `the label is a flag, not a position: --label ${positional[0]}`,
+  },
+  // The same set of flags MINUS --status and --all, and each absence is a
+  // decision. --status: a summary IS the count per status, so narrowing by one
+  // would leave every other number in the document wrong. --all: `summary` reads
+  // both files whatever it is given (T-0310), so the flag can no longer change
+  // the answer - and on a command built for a machine to act on, a flag that
+  // cannot change an answer is a flag claiming that it can. Declaring them
+  // nowhere is what refuses them - the unknown-flag path of parseArgs prints the
+  // usage line, as it does for every flag a command has no place for (T-0220).
+  summary: {
+    args: [],
+    flags: { label: 'values', json: 'bool' },
+    usage: 'node tools/task.mjs summary [--label ui,docs] [--json]',
+    hint: (positional) => `the label is a flag, not a position: --label ${positional[0]}`,
   },
   archive: { args: [], flags: { 'dry-run': 'bool' }, usage: 'node tools/task.mjs archive [--dry-run]' },
   board: { args: [], flags: {}, usage: 'node tools/task.mjs board' },
@@ -426,7 +534,11 @@ function parseArgs(name, argv) {
     // Object.prototype and would otherwise pass for flags the command declares.
     if (!Object.hasOwn(spec.flags, flag)) {
       const known = Object.entries(spec.flags)
-        .map(([f, kind]) => (kind === 'value' ? `--${f} <value>` : `--${f}`))
+        .map(([f, kind]) => {
+          if (kind === 'value') return `--${f} <value>`;
+          if (kind === 'values') return `--${f} <value> (repeatable)`;
+          return `--${f}`;
+        })
         .join(', ');
       dieUsage(
         name,
@@ -435,12 +547,18 @@ function parseArgs(name, argv) {
       );
     }
     const next = argv[i + 1];
-    if (spec.flags[flag] === 'value' && next !== undefined && !next.startsWith('--')) {
-      flags[flag] = next;
+    const takesValue = spec.flags[flag] === 'value' || spec.flags[flag] === 'values';
+    let value = '';
+    if (takesValue && next !== undefined && !next.startsWith('--')) {
+      value = next;
       i++;
-    } else {
-      flags[flag] = '';
     }
+    // A repeatable flag collects; every other kind keeps the last occurrence, as
+    // it always has. Collecting is the parser's job and not the case block's:
+    // the next subcommand that needs a repeatable flag takes it from here
+    // instead of writing a second, slightly different accumulator (T-0303).
+    if (spec.flags[flag] === 'values') (flags[flag] ||= []).push(value);
+    else flags[flag] = value;
   }
   if (positional.length > spec.args.length) {
     const takes = spec.args.length
@@ -454,6 +572,130 @@ function parseArgs(name, argv) {
     );
   }
   return { flags, positional };
+}
+
+// Every --label occurrence of a query command, read into one set of alternatives
+// each; the sets are ANDed by the caller. It lives here rather than in `list`
+// because `runnable` and `summary` take the same flag (T-0304), and a check
+// written three times is a check that will hold in two places (T-0309).
+//
+// normalizeLabels is the reader the label field, the `labels` subcommand and the
+// endpoint all share - a fourth way of splitting a label list is how the four
+// would come to disagree about "UI " (T-0279). What it also does is enforce
+// MAX_LABELS, and that cap is a rule about what a TASK may carry, not about how
+// many alternatives a query may ask about: asking "any of these nine" is
+// meaningful, and truncating it to eight returns FEWER tasks with exit 0 and
+// nothing said - the one shape of wrong answer a machine consumer cannot detect.
+// So the invariant is: no alternative that COULD have matched a task may be
+// dropped without saying so.
+//
+// Hence the count below is of names that could have matched, and the rule for
+// "could have matched" is normalizeLabels's own, applied per item: a name it
+// drops for being over MAX_LABEL_LEN is not counted, because the write side caps
+// length too, so no task carries such a name and dropping it changes no result.
+// Duplicates and blanks collapse for the same reason - `--label ui,ui` is one
+// alternative and always was. Only the comma is read here, and only because the
+// format defines it as the separator (a name may not contain one).
+function labelSetsOf(name, values) {
+  const sets = [];
+  for (const raw of values || []) {
+    const kept = normalizeLabels(raw);
+    // A label that matches nothing is a valid query with an empty answer; a
+    // --label carrying no name at all is a malformed call, and the difference
+    // matters to a script that checks the exit code (T-0220).
+    if (kept.length === 0)
+      dieUsage(
+        name,
+        `--label needs at least one label name, got ${quote(raw)}`,
+        'each --label is a comma-separated set of names: --label ui,docs; repeat the flag to require both sets'
+      );
+    const usable = new Set();
+    for (const item of String(raw).split(',')) {
+      const [only] = normalizeLabels(item);
+      if (only) usable.add(only);
+    }
+    if (usable.size > kept.length)
+      dieUsage(
+        name,
+        `--label takes at most ${MAX_LABELS} names in one set, got ${usable.size}: ${quote(raw)}`,
+        `${MAX_LABELS} is what a task's own label list may carry, and this filter reads a set by the ` +
+          'same rules; a longer one would be truncated, and a truncated set answers with fewer tasks and exit 0'
+      );
+    sets.push(kept);
+  }
+  return sets;
+}
+
+// The label query written out in one line. `summary`'s document carries the
+// query twice on purpose (T-0310): `labels` is the machine's copy, nested so
+// that `--label a --label b` and `--label a,b` cannot collapse onto the same
+// document, and this is the copy a human can read once it has been printed into
+// a report, where [["a"],["b"]] and [["a","b"]] are two shapes nobody tells
+// apart at a glance. Parentheses go only where they change the reading.
+function renderLabelQuery(labelSets) {
+  if (labelSets.length === 0) return 'every task';
+  return labelSets
+    .map((set) => {
+      const alternatives = set.join(' OR ');
+      return labelSets.length > 1 && set.length > 1 ? `(${alternatives})` : alternatives;
+    })
+    .join(' AND ');
+}
+
+// The tasks a query command answers about. `list`, `runnable` and `summary` all
+// select through this one function (T-0304), so --label and --status cannot come
+// to mean three slightly different things.
+//
+// `known` is BOTH files whatever was selected: a `depends` entry may point across
+// the archive border, and resolving a prerequisite that was closed and then
+// archived against the live backlog alone would report it as blocking forever.
+// It is the same set withArchived() builds for the ready -> in_progress guard.
+function selectTasks(name, f, includeArchived) {
+  const labelSets = labelSetsOf(name, f.label);
+  const archived = fs.existsSync(ARCHIVE) ? readArchivedTasks(BACKLOG) : [];
+  const live = readTasks();
+  // Whether the archive is in scope is the CALLER's decision and no longer a
+  // flag's (T-0310): `list` leaves it to --all, `runnable` never wants it because
+  // nothing closed is `ready`, and `summary` always does because a finished
+  // scope is precisely where the archive is. What has not changed is why the
+  // planning commands leave it out - everything in it is closed, and no one
+  // plans work from a done task. The board, read by a human, shows all of them.
+  const tasks = (includeArchived ? archived : []).concat(live);
+  const selected = tasks.filter(
+    (t) =>
+      (!f.status || t.status === f.status) &&
+      // Compared as written, as everywhere else: `ui` and `UI` are two labels.
+      labelSets.every((set) => t.labels.some((label) => set.includes(label)))
+  );
+  return { tasks: selected, known: live.concat(archived), archived, labelSets };
+}
+
+// The one thing `list` says besides its answer. Said out loud, not silently
+// omitted (T-0161's rule): with the closed tasks moved out, `list --status done`
+// prints nothing at all, and a reader who is not told why would conclude the
+// tasks are gone. On stderr, where it has always been, so --json leaves stdout
+// parseable whole.
+//
+// `runnable` and `summary` no longer print it, for opposite reasons and neither
+// of them an omission (T-0310): `summary` counts the archive, so there is
+// nothing it is leaving out; `runnable` could never have answered with a closed
+// task, so archiving changes its answer by nothing at all. The note also names
+// --all, which both commands now refuse.
+function warnArchived(f, archived) {
+  if ('all' in f || archived.length === 0) return;
+  const s = archived.length === 1 ? '' : 's';
+  console.error(`(${archived.length} closed task${s} in ${rel(ARCHIVE)}; --all includes them)`);
+}
+
+// "May this task be started", asked of a set. There is exactly ONE definition of
+// it in this product and this is not a second: `ready` is the lifecycle's own
+// name for "briefed and waiting", and blockingDependencies() is the function the
+// board's blocked marker, the drag of T-0084 and this CLI's own ready ->
+// in_progress guard already go through. A rule restated here would be the
+// fourth copy, which is how two answers to one question start to disagree
+// (T-0171).
+function runnableTasks(tasks, known) {
+  return tasks.filter((t) => t.status === 'ready' && blockingDependencies(t, known).length === 0);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -575,6 +817,54 @@ switch (cmd) {
       t.closed = status === 'done' || status === 'cancelled' ? today() : '';
     });
     console.log(`${id} -> ${status}`);
+    break;
+  }
+
+  // The one field that could not be corrected after filing (T-0302), and the
+  // one most likely to be wrong there: a priority is chosen when the least is
+  // known about a task - often by a worker filing a finding it cannot stop to
+  // investigate - while refinement is where it is understood, and "this is
+  // worse than it looked" is a normal outcome of understanding it. Until this
+  // existed, raising one meant `sed -i` over the task header, on the line
+  // parseBacklog is strictest about.
+  case 'priority': {
+    const { positional } = parseArgs(cmd, rest);
+    const [id, priority] = positional;
+    // Id first, so a bare `priority` names the argument that is missing instead
+    // of answering about a value the reader never reached - the distinction
+    // T-0273 drew for `status`, which this command is modelled on.
+    if (!id) dieUsage(cmd, 'priority needs the task whose priority is being set');
+    // The same list `add --priority` validates against, imported rather than
+    // retyped: a second copy of the five names is a copy that drifts.
+    if (!PRIORITIES.includes(priority))
+      dieUsage(cmd, `priority must be one of: ${PRIORITIES.join(', ')}`);
+    const before = withUpdate((tasks) => {
+      const t = tasks.find((x) => x.id === id);
+      if (!t) failMissing(id);
+      const previous = t.priority;
+      // Setting the value it already has changes nothing, so it records
+      // nothing: a trace line reading `Major -> Major` is noise in the one
+      // place that has to stay readable. Not an error either - the caller asked
+      // for a state the task is already in.
+      if (previous === priority) return previous;
+      t.priority = priority;
+      // Where the tool already puts its traces, through the same append path
+      // `note` uses - so an isolated worker writing to the shared backlog
+      // behaves identically. Text in the description and not a new backlog
+      // field: a field is a compatibility question between two parser versions,
+      // and PROTOCOL already requires unknown text to survive a round-trip.
+      t.description = appendDescriptionSection(
+        t.description,
+        'Priority changes',
+        `${previous} -> ${priority} (${today()})`
+      );
+      return previous;
+    });
+    console.log(
+      before === priority
+        ? `${id} priority: ${priority} (unchanged)`
+        : `${id} priority: ${before} -> ${priority}`
+    );
     break;
   }
 
@@ -879,21 +1169,99 @@ switch (cmd) {
 
   case 'list': {
     const { flags: f } = parseArgs(cmd, rest);
-    // The archive is out by default because `list` is read by an agent and
-    // everything in it is closed: no one plans work from a done task. The
-    // board, which is read by a human, keeps showing all of them (server.js).
-    const all = 'all' in f;
-    const archived = fs.existsSync(ARCHIVE) ? readArchivedTasks(BACKLOG) : [];
-    const tasks = (all ? archived : []).concat(readTasks());
-    const filtered = f.status ? tasks.filter((t) => t.status === f.status) : tasks;
-    for (const t of filtered)
-      console.log(`${t.id}  ${t.priority}  ${t.status.padEnd(11)}  ${t.title}`);
-    // Said out loud, not silently omitted (T-0161's rule): with the closed tasks
-    // moved out, `list --status done` prints nothing at all, and a reader who is
-    // not told why would conclude the tasks are gone.
-    if (!all && archived.length) {
-      const s = archived.length === 1 ? '' : 's';
-      console.error(`(${archived.length} closed task${s} in ${rel(ARCHIVE)}; --all includes them)`);
+    const { tasks, known, archived } = selectTasks(cmd, f, 'all' in f);
+    if ('json' in f) {
+      console.log(
+        JSON.stringify({ tasks: tasks.map((t) => listEntry(t, known)), count: tasks.length }, null, 2)
+      );
+    } else {
+      for (const t of tasks) console.log(`${t.id}  ${t.priority}  ${t.status.padEnd(11)}  ${t.title}`);
+    }
+    warnArchived(f, archived);
+    break;
+  }
+
+  // `list` narrowed to the tasks that can actually be started now (T-0304). It
+  // writes nothing, and the document --json prints is `list --json`'s own: a
+  // second task shape for the same tasks would be one more thing to keep in step.
+  case 'runnable': {
+    const { flags: f } = parseArgs(cmd, rest);
+    // Never the archive: it holds closed tasks only, and nothing closed is
+    // `ready`. That is also why --all is refused rather than ignored (T-0310).
+    const { tasks, known } = selectTasks(cmd, f, false);
+    // --status narrows and cannot widen: selectTasks has already applied it, and
+    // nothing it leaves is runnable unless it is `ready`. So `runnable --status
+    // review` is an empty answer with exit 0, not a refusal - the caller asked a
+    // question with no members, which is different from asking a wrong one.
+    const runnable = runnableTasks(tasks, known);
+    if ('json' in f) {
+      console.log(
+        JSON.stringify({ tasks: runnable.map((t) => listEntry(t, known)), count: runnable.length }, null, 2)
+      );
+    } else {
+      // No status column: every row here is `ready` by construction, and a
+      // column that is always the same word is noise in a list meant to be read.
+      for (const t of runnable) console.log(`${t.id}  ${t.priority}  ${t.title}`);
+    }
+    break;
+  }
+
+  // How much of a scope is left, in one document a supervisor can act on
+  // (T-0304). Writes nothing either.
+  case 'summary': {
+    const { flags: f } = parseArgs(cmd, rest);
+    // BOTH files, always (T-0310). Counting is not planning work, and a scope
+    // that is FINISHED is exactly the one `archive` has emptied out of the live
+    // file: counted live-only it printed `total: 0, complete: false`, which is
+    // byte for byte what a mistyped label prints - so the two cases the
+    // `total > 0` rule exists to keep apart produced one document, and the
+    // wrong reading was "not finished" about work that was finished.
+    const { tasks, known, labelSets } = selectTasks(cmd, f, true);
+    // From STATUSES, never from seven literals: a status added to the lifecycle
+    // later must not silently vanish from the summary, and the counts must go on
+    // summing to `total`. parseBacklog reads an unknown status back as `backlog`,
+    // so every task lands in exactly one of these.
+    const counts = Object.fromEntries(STATUSES.map((s) => [s, 0]));
+    for (const t of tasks) counts[t.status]++;
+    const runnable = runnableTasks(tasks, known);
+    const doc = {
+      // What was selected, so a stored result says what it was a result of -
+      // and enough of it that two different queries cannot store the same answer
+      // (T-0310). `labels` IS the query: one inner array per --label occurrence,
+      // the names inside it alternatives, the occurrences ANDed. So
+      // `--label a --label b` echoes [["a"],["b"]] and `--label a,b` echoes
+      // [["a","b"]], where a flat list of names printed both the same way.
+      scope: { labels: labelSets, labelQuery: renderLabelQuery(labelSets) },
+      total: tasks.length,
+      ...counts,
+      // A cross-cutting fact, not an eighth status: a task is counted here AND
+      // in its own status, which is not double-counting because the status
+      // counts alone sum to `total`. The same blockingDependencies() call
+      // `runnable` makes, never a second rule - and the lifecycle half beside
+      // it, without which the archive coming into scope would start counting
+      // FINISHED work as blocked: a closed task keeps its `depends`, and a
+      // prerequisite that never closed stays unsatisfied for good (T-0310).
+      // Blocked means waiting, and nothing done or cancelled is waiting.
+      blocked: tasks.filter(
+        (t) => !CLOSED_STATUSES.includes(t.status) && blockingDependencies(t, known).length > 0
+      ).length,
+      runnable: runnable.map((t) => t.id),
+      // `total > 0` looks like a bug until you have thought about a typo'd label.
+      // Set theory says a scope with no unfinished tasks is finished; a
+      // supervisor acting on that reads `--label phase4` as "phase 4 is done".
+      // This output exists for a machine to act on, so it takes the reading that
+      // fails safe: an empty scope is NOT complete, and `total: 0` is printed
+      // beside it to say why.
+      complete: tasks.length > 0 && tasks.every((t) => CLOSED_STATUSES.includes(t.status)),
+    };
+    if ('json' in f) {
+      console.log(JSON.stringify(doc, null, 2));
+    } else {
+      const scope = labelSets.length ? `labels ${doc.scope.labelQuery}` : doc.scope.labelQuery;
+      console.log(`scope: ${scope}`);
+      console.log(`total: ${doc.total}   complete: ${doc.complete ? 'yes' : 'no'}`);
+      console.log('  ' + STATUSES.map((s) => `${s} ${doc[s]}`).join('  '));
+      console.log(`  blocked ${doc.blocked}   runnable ${doc.runnable.length}${doc.runnable.length ? ': ' + doc.runnable.join(', ') : ''}`);
     }
     break;
   }
@@ -1005,7 +1373,7 @@ switch (cmd) {
     // a single word — `task.mjs stauts T-0007 review` printed this same list and
     // exited 0, which in a script reads as the status having been set (T-0220).
     const help =
-      'commands: add | status | depends | labels | profile | brief | link | note | show | list | archive | board | sessions | validate  (see the file header)';
+      'commands: add | status | priority | depends | labels | profile | brief | link | note | show | list | runnable | summary | archive | board | sessions | validate  (see the file header)';
     // `help` and its flag spellings are the same question as no command at all,
     // and refusing the one word every CLI answers would be a refusal of the kind
     // this task exists to remove. It is deliberately not in the list it prints:

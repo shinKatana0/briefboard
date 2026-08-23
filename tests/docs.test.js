@@ -967,15 +967,24 @@ describe('the shipped session prompts are the same English text everywhere (T-02
   // The guides carry no ready-to-copy review command; the READMEs do. Naming the
   // documents each block belongs to is what makes a block that quietly went
   // missing fail here instead of passing by absence.
+  // A block may be identified under a legacy name in some documents — T-0305
+  // renamed the review command's variable in the English README while the
+  // translations kept the old one until the release's translation pass
+  // (CONTRIBUTING.md, T-0106), which T-0306 carried out. What is compared stays
+  // what it always was: the prompt body, which the variable's name is not part of.
   const BLOCKS = [
     { name: 'BRIEFBOARD_SESSION_CMD', files: [...READMES, ...GUIDES] },
     { name: 'BRIEFBOARD_WORKER_CMD', files: [...READMES, ...GUIDES] },
-    { name: 'BRIEFBOARD_ORCHESTRATOR_CMD', files: READMES },
+    { name: 'BRIEFBOARD_REVIEW_CMD', files: READMES },
   ];
 
   const TAIL = "' \\\n  node server/server.js";
 
-  const promptBody = (file, name) => {
+  const nameIn = (block, file) =>
+    (block.legacyFiles || []).includes(file) ? block.legacyName : block.name;
+
+  const promptBody = (block, file) => {
+    const name = nameIn(block, file);
     const text = read(file);
     const start = text.indexOf(`${name}='`);
     assert.notStrictEqual(start, -1, `${file} must ship a ready-to-copy ${name}`);
@@ -984,13 +993,14 @@ describe('the shipped session prompts are the same English text everywhere (T-02
     return text.slice(start + name.length + 2, end);
   };
 
-  for (const { name, files } of BLOCKS) {
+  for (const block of BLOCKS) {
+    const { name, files } = block;
     const [reference, ...rest] = files;
     for (const file of rest) {
-      it(`${file}: ${name} is character-for-character ${reference}'s`, () => {
+      it(`${file}: ${nameIn(block, file)} is character-for-character ${reference}'s`, () => {
         assert.equal(
-          promptBody(file, name),
-          promptBody(reference, name),
+          promptBody(block, file),
+          promptBody(block, reference),
           `${name} in ${file} must be the English text of ${reference}, byte for byte — ` +
             'the prose around the block is what carries the document\'s language'
         );
@@ -1001,8 +1011,8 @@ describe('the shipped session prompts are the same English text everywhere (T-02
     // English source too would keep them agreeing. Scripts no English prompt can
     // contain are what says which language they agree in.
     for (const file of files) {
-      it(`${file}: ${name} carries no Cyrillic and no Japanese`, () => {
-        const offenders = promptBody(file, name).match(/[Ѐ-ӿ぀-ヿ一-鿿]+/g);
+      it(`${file}: ${nameIn(block, file)} carries no Cyrillic and no Japanese`, () => {
+        const offenders = promptBody(block, file).match(/[Ѐ-ӿ぀-ヿ一-鿿]+/g);
         assert.equal(
           offenders,
           null,

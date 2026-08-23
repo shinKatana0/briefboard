@@ -34,6 +34,16 @@ record the accepted decision in the task description. Once the decision is made:
 node tools/task.mjs status T-0007 open
 ```
 
+**If understanding the task changed how urgent it is, correct the priority here**
+(T-0302). It was chosen at intake, which is the moment the least was known —
+often by a worker filing a finding it could not stop to investigate — and "this
+is worse than it looked" is a normal outcome of refinement:
+```
+node tools/task.mjs priority T-0007 Critical
+```
+The change records itself under `### Priority changes` in the description, so the
+card does not later read as though it was always Critical.
+
 ### 3. Briefing (open → ready)
 Write a brief (or several) using the template from PROTOCOL.md:
 ```

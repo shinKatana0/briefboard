@@ -573,7 +573,8 @@ Step by step:
 
 All task changes go through `node tools/task.mjs`. It guarantees the file
 format, sequential IDs, and atomic writes. The subcommands documented below are
-`add`, `status`, `depends`, `labels`, `brief`, `link`, `note`, `show`, `list`, `archive`,
+`add`, `status`, `priority`, `depends`, `labels`, `brief`, `link`, `note`, `show`, `list`,
+`runnable`, `summary`, `archive`,
 `board`, `sessions` and `validate`; `profile` is one too, and lives with the feature it
 belongs to — [The run profile](#the-run-profile-which-mode-an-agent-runs-in).
 For the list as the tool itself knows it, run `node tools/task.mjs` with no
@@ -656,6 +657,43 @@ One more gate applies to `ready → in_progress`: a task whose `depends` list st
 holds unfinished tasks cannot be started. The error names every blocking task
 with its current status, so you can see what to wait for. `--force` performs the
 transition anyway and prints a `WARNING` naming the same tasks.
+
+### `priority` — re-triage a task after it was filed
+
+```bash
+node tools/task.mjs priority T-0007 Critical
+```
+
+Sets the priority to one of `Blocker`, `Critical`, `Major`, `Medium`, `Minor` —
+the same five [`add --priority`](#add--create-a-new-task) takes, refused the same
+way when the value is not one of them. Unlike `status` there is no graph and no
+`--force`: any priority may follow any other, and there is nothing to bypass.
+
+It exists because a priority is chosen when the least is known about a task —
+often by whoever ran into it while doing something else — and understanding a
+task is what changes the answer. Until this command existed it was the one field
+that could be set only at creation, so correcting one meant editing
+`doc/backlog.md` by hand, on the line the parser is strictest about.
+
+**A change leaves a trace.** It appends one line to the task's description under
+a `### Priority changes` heading, naming the old value, the new one and when it
+moved:
+
+```
+### Priority changes
+Minor -> Major (2026-08-22 21:57:03)
+```
+
+A later change adds to the same section rather than replacing it, exactly as
+`note` adds to a report. The reason is that a card which silently became
+`Critical` reads, a week later, as though it always was — and why it moved is
+usually the more interesting half. There is deliberately no `--reason` flag: a
+required reason gets answered with one word, an optional one gets skipped, and
+the refinement notes next to the line are where the reasoning already lives.
+
+Setting the priority to the value it already has is not an error and writes
+nothing at all — no field, no trace line: nothing changed, and `Major -> Major`
+would be noise in the one place that has to stay readable.
 
 ### `depends` — set what a task waits for
 
@@ -840,7 +878,10 @@ exactly as it is stored, which is what a review at acceptance time wants.
 ```bash
 node tools/task.mjs list
 node tools/task.mjs list --status ready
+node tools/task.mjs list --label phase-4
+node tools/task.mjs list --label phase-4 --status ready
 node tools/task.mjs list --all
+node tools/task.mjs list --label phase-4 --json
 ```
 
 Lists tasks, optionally filtered by status via `--status`.
@@ -849,6 +890,219 @@ Archived tasks (see below) are left out by default: everything in the archive is
 closed, and this command is read by an agent planning work. `--all` includes
 them. When a project has an archive, `list` says so on stderr with the number of
 tasks in it — an omission the reader is not told about is worse than a long list.
+
+#### `--label` — which tasks belong to a scope
+
+`--label` is the one flag in this CLI that may be **repeated**, and the two ways
+of writing several labels mean different things:
+
+| call | selects |
+|------|---------|
+| `--label phase-4` | tasks carrying `phase-4` |
+| `--label phase-4,macro` | tasks carrying **either** |
+| `--label phase-4 --label macro` | tasks carrying **both** |
+| `--label a,b --label c` | tasks matching `(a OR b) AND c` |
+
+One occurrence is a comma-separated **set**, read exactly as
+[`labels`](#labels--your-own-classification-of-a-task) reads its argument:
+trimmed, empty names dropped, compared **as written** (`ui` and `UI` are two
+labels). Repeated occurrences all have to match. A task carrying no labels is
+never selected by any `--label`.
+
+**The CLI is AND across repeated flags; the board's `Labels ▾` filter is OR.**
+Both are deliberate, and they are here in one place so that nobody meets the
+difference as a surprising short list. Clicking chips in a multi-select reads as
+"any of these" — that is the board, and picking `phase-4` and `macro` there shows
+every task carrying either. Typing a constraint twice on a command line reads as
+"and also" — that is the CLI, and `--label phase-4 --label macro` shows only the
+tasks carrying both. The interaction models genuinely differ, and each form's own
+"either" is one comma away: `--label phase-4,macro` is the board's answer, and on
+the board you get the CLI's by picking one label at a time.
+
+`--status` takes a single value and combines with `--label` as AND, as does
+`--all`.
+
+A label nothing carries is **not** an error: the result is empty and the exit
+code is `0`. What exits non-zero is a call that is malformed — `--label ""`,
+`--label ,` or `--label` with nothing after it, all of which name no label at
+all. A script can therefore tell "no such task" from "I typed it wrong" by the
+exit code alone. No form of `list` ever writes to `doc/backlog.md`.
+
+**One occurrence holds at most 8 names**, the same number a task's own label list
+may carry — a set is read by exactly the rules the field is. A ninth name is
+**refused**, with the usage line and a non-zero exit, rather than quietly
+dropped: a truncated set answers with *fewer* tasks and exit `0`, which is the
+one shape of wrong answer a script cannot detect. The cap is per occurrence, so
+`--label a,…,h --label i,…,p` is a legal query (and, being AND, a narrow one).
+Repeated names and a trailing comma are not extra alternatives — `--label ui,ui`
+is one alternative and always was. A name longer than 32 characters is dropped
+silently and on purpose: no task can carry such a name, so it could never have
+matched, and dropping it changes no result — alone in a set it leaves no name at
+all and is refused as one of the malformed calls above.
+
+#### `--json` — the same answer, for a program
+
+```bash
+node tools/task.mjs list --label phase-4 --json
+```
+
+Prints **one** JSON document on stdout and nothing else — no header, no count
+line, no warning. Anything `list` has to say (the archived-tasks note above)
+goes to stderr, so stdout can be piped into a parser whole:
+
+```json
+{
+  "tasks": [
+    {
+      "id": "T-0021",
+      "title": "Label filter for the CLI",
+      "type": "feature",
+      "status": "ready",
+      "priority": "Major",
+      "labels": ["phase-4"],
+      "depends": ["T-0020"],
+      "briefs": ["T-0021-01"],
+      "created": "2026-08-22 22:34:57",
+      "closed": "",
+      "blockedBy": []
+    }
+  ],
+  "count": 1
+}
+```
+
+The field names are the ones the product already uses:
+[`show`](#show--print-a-whole-task) prints a task under exactly these names, and
+`blockedBy` — the prerequisites that are not closed yet — is what `GET /api/board`
+has called them since dependencies existed. `--json` composes with `--label`,
+`--status` and `--all`, and the order is the backlog's own, unchanged.
+
+The description is deliberately **not** in it. This is a listing, and
+descriptions are most of a backlog's bulk — the same reason `archive` exists.
+Read one task with `show`.
+
+**What `--json` promises.** A field that exists keeps its name, its type and its
+meaning. New fields may appear in any release. A consumer must ignore what it
+does not recognise — that is what makes the addition of a field a non-event
+rather than a breaking change.
+
+### `runnable` — what can be started right now
+
+```bash
+node tools/task.mjs runnable
+node tools/task.mjs runnable --label phase-4
+node tools/task.mjs runnable --label phase-4 --json
+```
+
+`list` narrowed to the tasks that can actually be picked up: status `ready`
+**and** every prerequisite in `depends` closed. Both halves are the product's
+own — `ready` is the lifecycle's name for "briefed and waiting", and the
+dependency half is the same rule the board's blocked marker, the drag from Ready
+into In Progress and the `status … in_progress` gate all apply. There is no
+second definition of "startable" to disagree with them, and an archived
+prerequisite counts as satisfied like any other closed one.
+
+`--label` and `--json` mean what they mean for
+[`list`](#list--list-tasks), and `--json` prints `list --json`'s own
+`{tasks, count}` document, task for task and field for field — the same task
+described twice under two shapes is a thing to keep in step, and this avoids it.
+
+`--all` is **refused**, with the usage line and a non-zero exit. The archive
+holds closed tasks and nothing else, and `runnable` answers with `ready` ones —
+so the flag could never have changed this answer, whatever it was given. A flag
+that cannot change an answer, on a command written for a machine to act on, is a
+flag claiming that it can. `list --all` is untouched: there the archive really
+is a set of tasks the listing would otherwise leave out.
+
+`--status` can only **narrow** a set the lifecycle has already defined, never
+widen it: `runnable --status ready` is the same answer, and
+`runnable --status review` is an empty one with exit `0`. That is a question with
+no members, not a wrong question, and the exit code says which it was.
+
+### `summary` — how much of a scope is left
+
+```bash
+node tools/task.mjs summary
+node tools/task.mjs summary --label phase-4
+node tools/task.mjs summary --label phase-4 --json
+```
+
+```json
+{
+  "scope": { "labels": [["phase-4"]], "labelQuery": "phase-4" },
+  "total": 8,
+  "backlog": 0,
+  "open": 0,
+  "ready": 1,
+  "in_progress": 1,
+  "review": 1,
+  "done": 5,
+  "cancelled": 0,
+  "blocked": 0,
+  "runnable": ["T-0021"],
+  "complete": false
+}
+```
+
+- **one key per status**, and every status briefboard has — so the counts sum to
+  `total`, and a status added to the lifecycle later cannot quietly go missing.
+- **`blocked`** counts the tasks that are **waiting**: not closed, and with at
+  least one unsatisfied prerequisite — the dependency half by the same call
+  `runnable` makes. It is a **cross-cutting** fact, not an eighth status: a task
+  is counted here *and* under its own status. That is not double counting — the
+  status counts alone are what sum to `total`. A closed task keeps its
+  `depends`, and a prerequisite that was never closed stays unsatisfied for
+  good; counting that as blocked would report finished work as waiting.
+- **`runnable`** is the ids [`runnable`](#runnable--what-can-be-started-right-now)
+  would print, in the backlog's own order.
+- **`scope`** echoes the query, so a stored answer says what it was an answer
+  to — and says it precisely enough that two different queries cannot store the
+  same document. `labels` is one array per `--label` occurrence: the names
+  inside a set are alternatives, and the sets are ANDed, exactly as the flag
+  reads them. So `--label a --label b` echoes `[["a"],["b"]]` and
+  `--label a,b` echoes `[["a","b"]]`. `labelQuery` is the same query written
+  out — `a AND b`, `a OR b`, `(a OR b) AND c`, or `every task` when no
+  `--label` was given — because nested arrays are not what a human reads in a
+  report. It is the line the plain-text output prints after `scope:`.
+- **`complete`** is `total > 0` **and** every task in scope `done` or
+  `cancelled`. Both statuses close a task in briefboard, and a scope whose last
+  card was cancelled is finished.
+
+**An empty scope is deliberately not complete.** Set theory says a scope with no
+unfinished tasks is finished; a supervisor acting on that reads `--label phase4`
+as "phase 4 is done" because somebody dropped a hyphen. This document is built
+for a machine to act on, so it takes the reading that fails safe — `total: 0`
+sits right beside `complete: false` to say why.
+
+**`complete` is a statement about briefboard's own tasks and nothing else.** It
+is not acceptance of a phase, a release or a milestone, and briefboard knows
+nothing about any external project's vocabulary — it counts the cards in
+`doc/backlog.md` that carry the labels you named. Whoever integrates this decides
+what a finished scope entitles them to conclude; the CLI does not.
+
+**`summary` counts both files, always.** `doc/backlog.md` and the archive
+together, whatever flags it is given. Counting is not planning work, and a scope
+that is **finished** is precisely the one [`archive`](#archive--move-the-closed-tasks-out-of-the-backlog)
+has emptied out of the live file. Read live-only, such a scope printed
+`total: 0, complete: false` — byte for byte the document a label nobody ever
+used prints, so the two cases the `total > 0` rule exists to keep apart became
+one, and the wrong reading was "not finished" about work that was finished. With
+the archive in scope, `total: 0` means one thing only: nothing carries that
+label, ever.
+
+`--status` and `--all` are both **refused**, with the usage line and a non-zero
+exit. `--status`: a summary IS the count per status, so narrowing by one would
+leave every other number in the document wrong, and a flag that quietly does
+that is worse than no flag. `--all`: the archive is already counted, so the flag
+has nothing left to add — see the same refusal on
+[`runnable`](#runnable--what-can-be-started-right-now) for why a flag that
+cannot change an answer is worse than no flag on a command a machine reads.
+`list --all` keeps its meaning and its behaviour.
+
+Neither command ever writes: not the backlog, not the archive, not a session
+record. Both make the same promise `list --json` does — a field that exists keeps
+its name, its type and its meaning; new fields may appear in any release; a
+consumer ignores what it does not recognise.
 
 ### `archive` — move the closed tasks out of the backlog
 
@@ -1213,7 +1467,23 @@ command:
 | drop into **Open** (a task with no brief) | `BRIEFBOARD_SESSION_CMD` | the briefing session, in the project |
 | button on a card in **Open** | `BRIEFBOARD_SESSION_CMD` | the same briefing session, started by hand |
 | drop into **In Progress**| `BRIEFBOARD_WORKER_CMD` | the worker session, in its own worktree |
-| button on a card in **Review** | `BRIEFBOARD_ORCHESTRATOR_CMD` | the review session, in the project |
+| button on a card in **Review** | `BRIEFBOARD_REVIEW_CMD` | the review session, in the project |
+
+`BRIEFBOARD_REVIEW_CMD` used to be called `BRIEFBOARD_ORCHESTRATOR_CMD`. That
+name is still read and nothing warns about it, so a board configured with it goes
+on working exactly as before; if both are set, `BRIEFBOARD_REVIEW_CMD` is the one
+used. The rename is worth a paragraph because these four words are easy to
+confuse:
+
+- **the board** — briefboard itself: the backlog, the briefs, the lifecycle. It
+  starts sessions and writes no code;
+- **the worker** — one task implemented in isolation, on its own branch in its
+  own worktree;
+- **the review session** — reads the diff, runs the checks, writes a verdict, and
+  sets no status and merges nothing;
+- **your own orchestrator** — the agent that sits above all of this in your
+  project, if you run one. briefboard neither knows nor needs to know about it,
+  and the old variable name claimed otherwise.
 
 **What the briefing session does.** Exactly one step of the workflow: it refines
 the task, writes a brief into `doc/brief/`, sets the task to `ready`, and stops —
@@ -1386,7 +1656,7 @@ because the runner quietly added one. For the same reason briefboard does not tr
 to resolve `claude` into `claude.cmd` through `PATHEXT` — that would bring back
 exactly the behaviour the CVE closed, and do it invisibly.
 
-The same applies to `BRIEFBOARD_WORKER_CMD` and `BRIEFBOARD_ORCHESTRATOR_CMD`.
+The same applies to `BRIEFBOARD_WORKER_CMD` and `BRIEFBOARD_REVIEW_CMD`.
 
 ### When the session has questions
 
@@ -2284,7 +2554,8 @@ accept check above then has to catch.
 Steps 1 and 2 above — reading the diff and running the tests — are work, and they
 are work an agent can do. A card in **Review** therefore carries a **Review
 session** block: what the session does, and a *Start the review session* button
-if you set `BRIEFBOARD_ORCHESTRATOR_CMD`. With that variable unset the button is
+if you set `BRIEFBOARD_REVIEW_CMD` (or its earlier name,
+`BRIEFBOARD_ORCHESTRATOR_CMD`). With neither variable set the button is
 not there — starting the session is the whole of what it does, so with no command
 there is nothing left for it to be — but the block is, and it names the variable
 that would bring the button back. The button is missing for a second reason as
@@ -2358,7 +2629,7 @@ profile value can change the contents of one argument and never add another.
    which is why an empty field can never leave a dangling flag in the command;
 2. **put `{profile}` into the command template** you want the value to reach:
    `BRIEFBOARD_SESSION_CMD`, `BRIEFBOARD_WORKER_CMD`,
-   `BRIEFBOARD_ORCHESTRATOR_CMD`, or any of them. There is no
+   `BRIEFBOARD_REVIEW_CMD`, or any of them. There is no
    implicit place for it — declare the values, leave the templates untouched, and
    the profile chosen on a card is written to the task and substituted into
    nothing.
@@ -2595,7 +2866,7 @@ read [SECURITY.md](../../SECURITY.md) first.
 **I dropped a card but no session started.** Check the server's start-up output
 first: it prints `sessions: on ...` or `sessions: off (<reason>)` for the
 briefing command, a `worker: ...` line for `BRIEFBOARD_WORKER_CMD` and a
-`review: ...` line for `BRIEFBOARD_ORCHESTRATOR_CMD` — a drop into In Progress
+`review: ...` line for `BRIEFBOARD_REVIEW_CMD` — a drop into In Progress
 reads the second line, not the first, and the review button the third.
 `not configured` means the command is unset or empty;
 `non-loopback bind` means you started the board with `HOST`/`AGENTBOARD_HOST`

@@ -674,12 +674,17 @@ describe('the review action on a card in review', () => {
   });
 
   // T-0144: the button used to be simply absent, and it was searched for.
-  it('names BRIEFBOARD_ORCHESTRATOR_CMD instead of falling silent when nothing is configured', () => {
+  // T-0305: the name it teaches is the documented one. The legacy variable goes
+  // on configuring the session and is not deprecated, but a board telling a user
+  // what to set names the one they should be setting — and names only it, or the
+  // sentence stops being an instruction.
+  it('names BRIEFBOARD_REVIEW_CMD instead of falling silent when nothing is configured', () => {
     const { html } = dialog({ orchestrator: false });
     assert.ok(!html.includes('data-review-session'), 'still no button: it could do nothing');
     assert.ok(html.includes('Review session'), 'the block stays, so the absence is explained');
     assert.ok(html.includes('Not configured on this board'));
-    assert.ok(html.includes('BRIEFBOARD_ORCHESTRATOR_CMD'));
+    assert.ok(html.includes('BRIEFBOARD_REVIEW_CMD'));
+    assert.ok(!html.includes('BRIEFBOARD_ORCHESTRATOR_CMD'));
   });
 
   it('offers nothing on a task that is not in review', () => {
@@ -693,7 +698,7 @@ describe('the review action on a card in review', () => {
     for (const orchestrator of [true, false]) {
       const { html } = dialog({ taskSrc: TASK, orchestrator });
       assert.ok(!html.includes('Review session'), 'no caption outside review');
-      assert.ok(!html.includes('BRIEFBOARD_ORCHESTRATOR_CMD'), 'no variable name outside review');
+      assert.ok(!html.includes('BRIEFBOARD_REVIEW_CMD'), 'no variable name outside review');
     }
   });
 

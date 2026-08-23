@@ -16,9 +16,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 
-const { parseBacklog, MAX_LABEL_LEN, MAX_LABELS } = require('../server/parser.js');
+const { parseBacklog, MAX_LABEL_LEN, MAX_LABELS, STATUSES } = require('../server/parser.js');
 const { REGISTRY_FILE, REGISTRY_VERSION } = require('../server/sessions.js');
 const { tempDir } = require('./helpers/tmp.js');
+// One test below asks GET /api/board what it calls a field, so it needs a real
+// board: the only spawn in this file that is not the CLI itself. `fetch` comes
+// from helpers/bounded.js, bounded, like every fetch in the suite (T-0124).
+const { fetch } = require('./helpers/bounded.js');
+const { readJson, answerOf } = require('./helpers/response.js');
+const { startBoard } = require('./helpers/board.js');
 
 const CLI_PATH = path.join(__dirname, '..', 'tools', 'task.mjs');
 
@@ -41,6 +47,10 @@ function backlogPath(root) {
 
 function briefDir(root) {
   return path.join(root, 'doc', 'brief');
+}
+
+function archivePath(root) {
+  return path.join(root, 'doc', 'backlog-archive.md');
 }
 
 /** Read + parse doc/backlog.md for the given tmp root; [] if the file was never created. */
@@ -392,6 +402,144 @@ describe('task.mjs status', () => {
     assert.notStrictEqual(res.status, 0);
     assert.match(res.stderr, /ERROR/);
     assert.strictEqual(readTasks(root)[0].status, 'backlog'); // unchanged
+  });
+});
+
+// T-0302. Priority used to be settable only on `add` — the moment the least is
+// known about a task — so re-triaging one meant hand-editing the task header,
+// the line parseBacklog is strictest about.
+describe('task.mjs priority (T-0302)', () => {
+  const STAMP = String.raw`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`;
+
+  /** The task as the CLI itself reads it back — i.e. through parseBacklog, not through a grep. */
+  function showTask(root, id) {
+    const res = runCli(root, ['show', id, '--full']);
+    assert.strictEqual(res.status, 0, `show failed: ${res.stderr}`);
+    return JSON.parse(res.stdout);
+  }
+
+  it('changes the priority, and the new value survives the round-trip through the file', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Filed in a hurry', '--priority', 'Minor']);
+
+    const res = runCli(root, ['priority', id, 'Critical']);
+
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.match(res.stdout, new RegExp(`${id} priority: Minor -> Critical`));
+    assert.strictEqual(showTask(root, id).priority, 'Critical');
+  });
+
+  it('accepts every one of the five, in both directions', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Up and down', '--priority', 'Medium']);
+    for (const p of ['Blocker', 'Critical', 'Major', 'Medium', 'Minor']) {
+      const res = runCli(root, ['priority', id, p]);
+      assert.strictEqual(res.status, 0, `${p} refused: ${res.stderr}`);
+      assert.strictEqual(showTask(root, id).priority, p);
+    }
+  });
+
+  // The trace is the half of this task that was actually argued about: a card
+  // that silently becomes Critical reads, a week later, as though it always was.
+  it('records the change in the description, naming both values and the date', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Re-triaged', '--priority', 'Minor', '--desc', 'What the card says.']);
+
+    assert.strictEqual(runCli(root, ['priority', id, 'Major']).status, 0);
+
+    const { description } = showTask(root, id);
+    assert.match(description, /^### Priority changes$/m);
+    assert.match(description, new RegExp(String.raw`^Minor -> Major \(${STAMP}\)$`, 'm'));
+    // The fixture must not be able to prove this on its own: the text the task
+    // was filed with is still there, so what the assertion above found was
+    // appended rather than written over the description (T-0098).
+    assert.match(description, /^What the card says\.$/m);
+  });
+
+  it('appends a second change under the same heading instead of replacing the first', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Twice re-triaged', '--priority', 'Minor']);
+
+    assert.strictEqual(runCli(root, ['priority', id, 'Major']).status, 0);
+    assert.strictEqual(runCli(root, ['priority', id, 'Blocker']).status, 0);
+
+    const { description } = showTask(root, id);
+    const headings = description.split('\n').filter((l) => l.trim() === '### Priority changes');
+    assert.strictEqual(headings.length, 1, 'one section, as `note` keeps one Worker report');
+    assert.match(description, new RegExp(String.raw`^Minor -> Major \(${STAMP}\)$`, 'm'));
+    assert.match(description, new RegExp(String.raw`^Major -> Blocker \(${STAMP}\)$`, 'm'));
+  });
+
+  // Setting what is already set changed nothing, so it records nothing: a line
+  // reading `Major -> Major` is noise in the one place that has to stay readable.
+  it('setting the value it already has is not an error and writes nothing at all', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Already there', '--priority', 'Major']);
+    const before = fs.readFileSync(backlogPath(root), 'utf8');
+
+    const res = runCli(root, ['priority', id, 'Major']);
+
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.match(res.stdout, new RegExp(`${id} priority: Major \\(unchanged\\)`));
+    assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, 'the file is untouched');
+    assert.doesNotMatch(showTask(root, id).description, /Priority changes/);
+  });
+
+  it('refuses a value outside the five, names them, and leaves the file byte-identical', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Untouched', '--priority', 'Minor']);
+    const before = fs.readFileSync(backlogPath(root), 'utf8');
+
+    const res = runCli(root, ['priority', id, 'Extreme']);
+
+    assert.strictEqual(res.status, 1, `accepted: ${res.stdout}`);
+    assert.match(res.stderr, /ERROR: priority must be one of: Blocker, Critical, Major, Medium, Minor/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs priority T-0007 </);
+    assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before);
+  });
+
+  // A bare `priority` and a `priority T-0001` are two different mistakes, and
+  // used to be one message about a value the reader never reached (T-0273).
+  it('a missing value and a missing task are answered separately', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'Untouched']);
+
+    const noArgs = runCli(root, ['priority']);
+    const noValue = runCli(root, ['priority', id]);
+
+    assert.strictEqual(noArgs.status, 1, noArgs.stdout);
+    assert.strictEqual(noValue.status, 1, noValue.stdout);
+    assert.match(noArgs.stderr, /ERROR: priority needs the task/);
+    assert.match(noValue.stderr, /ERROR: priority must be one of/);
+    assert.notStrictEqual(noArgs.stderr, noValue.stderr);
+  });
+
+  // There is no transition graph here, so there is nothing to force — and a
+  // flag that silently does nothing is worse than one that is refused (T-0220).
+  it('takes no flags: --force is refused rather than quietly ignored', () => {
+    const root = makeTmpRoot();
+    const id = add(root, ['--title', 'No forcing', '--priority', 'Minor']);
+    const before = fs.readFileSync(backlogPath(root), 'utf8');
+
+    const res = runCli(root, ['priority', id, 'Blocker', '--force']);
+
+    assert.strictEqual(res.status, 1, `accepted: ${res.stdout}`);
+    assert.match(res.stderr, /priority has no flag --force/);
+    assert.match(res.stderr, /priority takes no flags/);
+    assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before);
+  });
+
+  it('refuses a task id that does not exist, the way status refuses one', () => {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'Only task']); // T-0001, so T-0099 does not exist
+    const res = runCli(root, ['priority', 'T-0099', 'Major']);
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /ERROR: task T-0099 not found/);
+  });
+
+  it('is listed in the CLI header usage block, where the others are documented', () => {
+    const header = fs.readFileSync(CLI_PATH, 'utf8').split('*/')[0];
+    assert.match(header, /node tools\/task\.mjs priority T-0007 </);
   });
 });
 
@@ -1193,6 +1341,486 @@ describe('task.mjs list', () => {
   });
 });
 
+
+// A backlog written by hand rather than by `add`, so the bytes `list` prints are
+// pinned to fixed ids, priorities, statuses and titles instead of to whatever
+// today's stamps and defaults produce (T-0303).
+const FIXTURE_BACKLOG = [
+  '# Backlog',
+  '',
+  '## T-0011 · Major · Labelled task',
+  '- type: feature',
+  '- status: backlog',
+  '- created: 2026-01-01 00:00:00',
+  '- closed: —',
+  '- briefs:',
+  '- labels: a, b',
+  '',
+  'Text.',
+  '',
+  '## T-0012 · Critical · In flight',
+  '- type: bug',
+  '- status: in_progress',
+  '- created: 2026-01-01 00:00:00',
+  '- closed: —',
+  '- briefs: T-0012-01',
+  '- depends: T-0011',
+  '',
+  'Text.',
+  '',
+  '## T-0013 · Minor · Finished',
+  '- type: feature',
+  '- status: done',
+  '- created: 2026-01-01 00:00:00',
+  '- closed: 2026-01-02 00:00:00',
+  '- briefs:',
+  '',
+  'Text.',
+  '',
+].join('\n');
+
+// T-0303. `--label` is the first repeatable flag in this CLI, and the rule it
+// carries is the one a reader has to hold: each occurrence is a comma-separated
+// SET the task must carry ANY name of, and EVERY occurrence must match. The
+// board's own Labels filter is OR (T-0279) — deliberately, and the guide names
+// both side by side.
+describe('task.mjs list --label (T-0303)', () => {
+  // Five tasks whose label sets differ in every way the rule can tell apart,
+  // plus one carrying none at all — the task no --label may ever select.
+  function labelled() {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'Only a', '--labels', 'a']); // T-0001
+    add(root, ['--title', 'Only b', '--labels', 'b']); // T-0002
+    add(root, ['--title', 'Both a and b', '--labels', 'a,b']); // T-0003
+    add(root, ['--title', 'Both a and c', '--labels', 'a,c']); // T-0004
+    add(root, ['--title', 'No labels at all']); // T-0005
+    return root;
+  }
+
+  /** The ids `list` printed, in the order it printed them. */
+  function listed(res) {
+    assert.strictEqual(res.status, 0, `list failed: ${res.stderr}`);
+    const text = res.stdout.trim();
+    return text === '' ? [] : text.split(/\r?\n/).map((line) => line.slice(0, 6));
+  }
+
+  it('all five are there without the flag, so what follows is a filter and not an empty backlog', () => {
+    const root = labelled();
+    assert.deepStrictEqual(listed(runCli(root, ['list'])), [
+      'T-0001',
+      'T-0002',
+      'T-0003',
+      'T-0004',
+      'T-0005',
+    ]);
+  });
+
+  it('--label a selects every task carrying a, and never the task carrying none', () => {
+    const root = labelled();
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'a'])), [
+      'T-0001',
+      'T-0003',
+      'T-0004',
+    ]);
+  });
+
+  it('--label a --label b selects only the task carrying BOTH', () => {
+    const root = labelled();
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'a', '--label', 'b'])), ['T-0003']);
+  });
+
+  it('--label a,b selects every task carrying EITHER', () => {
+    const root = labelled();
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'a,b'])), [
+      'T-0001',
+      'T-0002',
+      'T-0003',
+      'T-0004',
+    ]);
+  });
+
+  it('--label a,b --label c is (a OR b) AND c', () => {
+    const root = labelled();
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'a,b', '--label', 'c'])), ['T-0004']);
+  });
+
+  // The set is read by normalizeLabels, the same function the field, the
+  // `labels` subcommand and the endpoint use. A splitter of its own here would
+  // pass ' a ' to the comparison and match nothing.
+  it('reads the set the way the field does: spaces around a name, and a repeat, change nothing', () => {
+    const root = labelled();
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', ' a , a '])), [
+      'T-0001',
+      'T-0003',
+      'T-0004',
+    ]);
+  });
+
+  // Compared as written (T-0279): folding case here would make the CLI answer a
+  // question the board answers differently.
+  it('compares as written, so --label A selects nothing where the tasks carry a', () => {
+    const root = labelled();
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'A'])), []);
+  });
+
+  it('a task with no labels is never selected, whatever is asked for', () => {
+    const root = labelled();
+    for (const args of [['--label', 'a'], ['--label', 'a,b'], ['--label', 'a', '--label', 'b']]) {
+      assert.ok(
+        !listed(runCli(root, ['list', ...args])).includes('T-0005'),
+        `T-0005 carries no labels and was selected by ${args.join(' ')}`
+      );
+    }
+  });
+
+  // An empty answer is an answer: a script that greps for ids must not have to
+  // tell "no such label" from "the call was wrong" by reading stderr.
+  it('a label nothing carries prints nothing and exits 0', () => {
+    const root = labelled();
+    const res = runCli(root, ['list', '--label', 'nobody-carries-this']);
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.strictEqual(res.stdout.trim(), '');
+  });
+
+  it('combines with --status as AND', () => {
+    const root = labelled();
+    assert.strictEqual(runCli(root, ['status', 'T-0003', 'open']).status, 0);
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'a', '--status', 'open'])), ['T-0003']);
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'a', '--status', 'backlog'])), [
+      'T-0001',
+      'T-0004',
+    ]);
+  });
+
+  it('combines with --all: an archived task is out without it and in with it', () => {
+    const root = labelled();
+    assert.strictEqual(runCli(root, ['status', 'T-0004', 'cancelled']).status, 0);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--label', 'c'])), []);
+    assert.deepStrictEqual(listed(runCli(root, ['list', '--all', '--label', 'c'])), ['T-0004']);
+  });
+
+  // The other half of "an empty result is fine": a --label carrying no name is a
+  // malformed call, and the exit code has to say so (T-0220, T-0273).
+  for (const [name, value] of [['an empty value', ''], ['a lone comma', ',']]) {
+    it(`refuses ${name} with the usage line, and writes nothing`, () => {
+      const root = labelled();
+      const before = fs.readFileSync(backlogPath(root), 'utf8');
+      const res = runCli(root, ['list', '--label', value]);
+      assert.strictEqual(res.status, 1, `accepted --label ${JSON.stringify(value)}: ${res.stdout}`);
+      assert.match(res.stderr, /ERROR: --label needs at least one label name/);
+      assert.match(res.stderr, /usage: node tools\/task\.mjs list .*--label/);
+      assert.strictEqual(res.stdout, '', 'a refused query printed a result anyway');
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, 'the backlog was written');
+    });
+  }
+
+  it('refuses --label with nothing after it rather than reading it as "no filter"', () => {
+    const root = labelled();
+    const res = runCli(root, ['list', '--label']);
+    assert.strictEqual(res.status, 1, `accepted a valueless --label: ${res.stdout}`);
+    assert.match(res.stderr, /ERROR: --label needs at least one label name/);
+  });
+
+  // The backward-compatibility criterion, against a fixture rather than by eye:
+  // these are the exact bytes `list` printed before --label and --json existed,
+  // padding included (verified against main's tools/task.mjs at ffb1c5a).
+  it('list with no new flag prints exactly what it printed before them', () => {
+    const root = makeTmpRoot();
+    fs.mkdirSync(path.join(root, 'doc'), { recursive: true });
+    fs.writeFileSync(backlogPath(root), FIXTURE_BACKLOG);
+    const res = runCli(root, ['list']);
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.strictEqual(
+      res.stdout,
+      'T-0011  Major  backlog      Labelled task\n' +
+        'T-0012  Critical  in_progress  In flight\n' +
+        'T-0013  Minor  done         Finished\n'
+    );
+    assert.strictEqual(res.stderr, '', 'nothing new may appear on stderr either');
+  });
+
+  // Requirement 6 of the refinement decisions, asserted on the bytes and not on
+  // the parse: a rewrite that reorders fields or restamps a date parses the same
+  // and is still a write.
+  it('no query writes: the backlog is byte-identical after all of them', () => {
+    const root = labelled();
+    const before = fs.readFileSync(backlogPath(root), 'utf8');
+    for (const args of [
+      ['list'],
+      ['list', '--label', 'a'],
+      ['list', '--label', 'a', '--label', 'b'],
+      ['list', '--label', 'a,b', '--status', 'backlog'],
+      ['list', '--json'],
+      ['list', '--json', '--all', '--label', 'a'],
+      ['list', '--label', 'nobody-carries-this'],
+    ]) {
+      assert.strictEqual(runCli(root, args).status, 0, args.join(' '));
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, `${args.join(' ')} wrote`);
+    }
+  });
+});
+
+// T-0309. `--label` reads each occurrence with normalizeLabels, which also
+// enforces MAX_LABELS — a rule about what a TASK may carry. A QUERY asking "any
+// of these nine" is meaningful, and truncating it to eight returns FEWER tasks
+// with exit 0 and nothing said, which is the one shape of wrong answer a machine
+// consumer cannot detect. The invariant these tests hold: no alternative that
+// could have matched a task may be dropped without saying so.
+//
+// The array is the point of the last two cases: the check lives in one helper
+// (labelSetsOf), so `runnable` and `summary` inherit it rather than each
+// carrying a copy (T-0304).
+const LABEL_QUERY_COMMANDS = ['list', 'runnable', 'summary'];
+
+describe('task.mjs --label refuses a set it would have to truncate (T-0309)', () => {
+  const NINE_NAMES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
+  const EIGHT = NINE_NAMES.slice(0, MAX_LABELS).join(',');
+  const NINE = NINE_NAMES.join(',');
+  const TOO_LONG = 'x'.repeat(MAX_LABEL_LEN + 1);
+
+  // Nine tasks, each carrying exactly one of nine distinct names, so a set of
+  // eight and a set of nine select measurably different tasks. Nine names cannot
+  // be put on ONE task — MAX_LABELS is exactly the cap under test.
+  function nineLabels() {
+    const root = makeTmpRoot();
+    for (const name of NINE_NAMES) add(root, ['--title', `Carries ${name}`, '--labels', name]);
+    return root;
+  }
+
+  function listed(res) {
+    assert.strictEqual(res.status, 0, `list failed: ${res.stderr}`);
+    const text = res.stdout.trim();
+    return text === '' ? [] : text.split(/\r?\n/).map((line) => line.slice(0, 6));
+  }
+
+  for (const cmd of LABEL_QUERY_COMMANDS) {
+    it(`${cmd}: a set of ${MAX_LABELS + 1} usable names is refused, naming the cap and the count`, () => {
+      const root = nineLabels();
+      const before = fs.readFileSync(backlogPath(root), 'utf8');
+      const res = runCli(root, [cmd, '--label', NINE]);
+      assert.strictEqual(res.status, 1, `answered a truncated set instead of refusing: ${res.stdout}`);
+      assert.match(res.stderr, new RegExp(`--label takes at most ${MAX_LABELS} names in one set, got 9`));
+      assert.match(res.stderr, new RegExp(`usage: node tools/task\\.mjs ${cmd}`));
+      assert.strictEqual(res.stdout, '', 'a refused query printed a result anyway');
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, 'the backlog was written');
+    });
+
+    it(`${cmd}: exactly ${MAX_LABELS} names is not the refusal, so the boundary is the cap itself`, () => {
+      const root = nineLabels();
+      const res = runCli(root, [cmd, '--label', EIGHT]);
+      assert.strictEqual(res.status, 0, `refused a set of exactly the cap: ${res.stderr}`);
+      assert.doesNotMatch(res.stderr, /takes at most/);
+    });
+  }
+
+  it(`a set of exactly ${MAX_LABELS} filters normally: the eight carriers, never the ninth`, () => {
+    const root = nineLabels();
+    assert.deepStrictEqual(
+      listed(runCli(root, ['list', '--label', EIGHT])),
+      ['T-0001', 'T-0002', 'T-0003', 'T-0004', 'T-0005', 'T-0006', 'T-0007', 'T-0008']
+    );
+  });
+
+  // The refusal counts alternatives, not names typed: `ui,ui,ui` was always one
+  // alternative, and duplicates collapsing is not a dropped alternative.
+  it('a name repeated past the cap is one alternative and is answered, not refused', () => {
+    const root = nineLabels();
+    const repeated = new Array(MAX_LABELS + 4).fill('a').join(',');
+    const res = runCli(root, ['list', '--label', repeated]);
+    assert.strictEqual(res.status, 0, `refused ${repeated}: ${res.stderr}`);
+    assert.deepStrictEqual(listed(res), ['T-0001']);
+  });
+
+  // The other half of the decision: a name longer than MAX_LABEL_LEN cannot be
+  // on any task, so dropping it from a set changes no result and must stay
+  // silent. Eight usable names plus one over-long one is NINE names typed and
+  // eight alternatives that could match — accepted, and answering exactly as the
+  // eight alone do.
+  it('an over-long name mixed with a full set is dropped silently, not counted toward the cap', () => {
+    const root = nineLabels();
+    const withLong = runCli(root, ['list', '--label', `${EIGHT},${TOO_LONG}`]);
+    assert.strictEqual(withLong.status, 0, `refused a set of eight plus an unmatchable name: ${withLong.stderr}`);
+    assert.deepStrictEqual(listed(withLong), listed(runCli(root, ['list', '--label', EIGHT])));
+    // Order must not decide it either: normalizeLabels stops at the cap, so the
+    // over-long name in front and behind are different paths through it.
+    const longFirst = runCli(root, ['list', '--label', `${TOO_LONG},${EIGHT}`]);
+    assert.strictEqual(longFirst.status, 0, `refused it when the over-long name came first: ${longFirst.stderr}`);
+    assert.deepStrictEqual(listed(longFirst), listed(withLong));
+  });
+
+  it('nine usable names plus an over-long one is still the cap refusal', () => {
+    const root = nineLabels();
+    const res = runCli(root, ['list', '--label', `${NINE},${TOO_LONG}`]);
+    assert.strictEqual(res.status, 1, `answered ten names as nine: ${res.stdout}`);
+    assert.match(res.stderr, new RegExp(`got 9`));
+  });
+
+  // T-0303's empty-set refusal is the one that fires here, unchanged: the new
+  // check must not take over a case that already had an answer.
+  it('an over-long name ALONE still produces the empty-set refusal, not the cap one', () => {
+    const root = nineLabels();
+    const res = runCli(root, ['list', '--label', TOO_LONG]);
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /ERROR: --label needs at least one label name/);
+    assert.doesNotMatch(res.stderr, /takes at most/);
+  });
+
+  // Blanks from a doubled or trailing comma are not alternatives either.
+  it('trailing and doubled commas do not push a set over the cap', () => {
+    const root = nineLabels();
+    const res = runCli(root, ['list', '--label', `${EIGHT},,`]);
+    assert.strictEqual(res.status, 0, `counted blanks as alternatives: ${res.stderr}`);
+    assert.deepStrictEqual(listed(res), listed(runCli(root, ['list', '--label', EIGHT])));
+  });
+
+  // Each occurrence is its own set: the cap is per occurrence, and repeating the
+  // flag is AND, so two full sets are a legal (and empty) query.
+  it('the cap is per occurrence, so two sets of the cap are accepted', () => {
+    const root = nineLabels();
+    const res = runCli(root, ['list', '--label', EIGHT, '--label', EIGHT]);
+    assert.strictEqual(res.status, 0, `refused two separate sets of the cap: ${res.stderr}`);
+    assert.strictEqual(listed(res).length, 8);
+  });
+});
+
+describe('task.mjs list --json (T-0303)', () => {
+  function twoWithADependency() {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'The prerequisite', '--labels', 'a']);
+    add(root, ['--title', 'Waits for it', '--labels', 'a,b']);
+    assert.strictEqual(runCli(root, ['depends', 'T-0002', 'T-0001']).status, 0);
+    return root;
+  }
+
+  function parsed(res) {
+    assert.strictEqual(res.status, 0, `list --json failed: ${res.stderr}`);
+    // The whole of stdout, not a line of it: the point of the flag is that a
+    // consumer may pipe stdout into a parser without filtering anything out.
+    return JSON.parse(res.stdout);
+  }
+
+  it('prints one document with tasks and count, and nothing else on stdout', () => {
+    const root = twoWithADependency();
+    const doc = parsed(runCli(root, ['list', '--json']));
+    assert.deepStrictEqual(Object.keys(doc).sort(), ['count', 'tasks']);
+    assert.strictEqual(doc.count, 2);
+    assert.strictEqual(doc.tasks.length, doc.count);
+    assert.deepStrictEqual(doc.tasks.map((t) => t.id), ['T-0001', 'T-0002']);
+  });
+
+  it('composes with --label and --status', () => {
+    const root = twoWithADependency();
+    const byLabel = parsed(runCli(root, ['list', '--json', '--label', 'b']));
+    assert.deepStrictEqual(byLabel.tasks.map((t) => t.id), ['T-0002']);
+    assert.strictEqual(byLabel.count, 1);
+    assert.strictEqual(runCli(root, ['status', 'T-0001', 'open']).status, 0);
+    const both = parsed(runCli(root, ['list', '--json', '--label', 'a', '--status', 'open']));
+    assert.deepStrictEqual(both.tasks.map((t) => t.id), ['T-0001']);
+  });
+
+  it('composes with --all, and an empty result is a document too', () => {
+    const root = twoWithADependency();
+    assert.strictEqual(runCli(root, ['status', 'T-0001', 'cancelled']).status, 0);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+    const live = parsed(runCli(root, ['list', '--json']));
+    assert.deepStrictEqual(live.tasks.map((t) => t.id), ['T-0002']);
+    const all = parsed(runCli(root, ['list', '--json', '--all']));
+    assert.deepStrictEqual(all.tasks.map((t) => t.id), ['T-0001', 'T-0002']);
+    const none = parsed(runCli(root, ['list', '--json', '--label', 'nobody-carries-this']));
+    assert.deepStrictEqual(none, { tasks: [], count: 0 });
+  });
+
+  // The archived-tasks note is the one thing `list` writes besides its rows, and
+  // it has always gone to stderr. Under --json that stops being a nicety: a note
+  // on stdout would make the document unparseable.
+  it('the note about archived tasks stays on stderr, so stdout parses whole', () => {
+    const root = twoWithADependency();
+    assert.strictEqual(runCli(root, ['status', 'T-0001', 'cancelled']).status, 0);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+    const res = runCli(root, ['list', '--json']);
+    assert.match(res.stderr, /closed task .*--all includes them/);
+    assert.deepStrictEqual(JSON.parse(res.stdout).count, 1);
+  });
+
+  // blockedBy is resolved against BOTH files, --all or not: a prerequisite that
+  // was closed and then archived is satisfied, and reading the live backlog
+  // alone would report it as blocking forever - the accident withArchived()
+  // exists to prevent, here in a field a consumer acts on.
+  it('an archived prerequisite is satisfied, not a dangling blocker', () => {
+    const root = twoWithADependency();
+    const stillBlocked = parsed(runCli(root, ['list', '--json'])).tasks.find((t) => t.id === 'T-0002');
+    assert.deepStrictEqual(stillBlocked.blockedBy, ['T-0001'], 'the fixture must start out blocked');
+    assert.strictEqual(runCli(root, ['status', 'T-0001', 'cancelled']).status, 0);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+    const freed = parsed(runCli(root, ['list', '--json'])).tasks.find((t) => t.id === 'T-0002');
+    assert.deepStrictEqual(freed.blockedBy, [], 'T-0001 is closed and archived, so it blocks nothing');
+    assert.deepStrictEqual(freed.depends, ['T-0001'], 'and it is still the prerequisite it always was');
+  });
+
+  it('leaves the description out: this is a listing, not a read', () => {
+    const root = makeTmpRoot();
+    add(root, ['--title', 'Has a description', '--desc', 'A long body nobody listing tasks asked for.']);
+    const doc = parsed(runCli(root, ['list', '--json']));
+    assert.ok(!('description' in doc.tasks[0]), 'the description is in the listing');
+  });
+
+  // Decision 3 of the card: one task shape, not a third one. Compared field by
+  // field against `show`, which is the other JSON this CLI prints.
+  it('every field of an entry is the field of the same name in `show`', () => {
+    const root = twoWithADependency();
+    const entry = parsed(runCli(root, ['list', '--json'])).tasks.find((t) => t.id === 'T-0002');
+    const shown = JSON.parse(runCli(root, ['show', 'T-0002']).stdout);
+    for (const [field, value] of Object.entries(entry)) {
+      if (field === 'blockedBy') continue; // derived; the board API is what names it
+      assert.ok(field in shown, `list --json invented the field "${field}": show has no such name`);
+      assert.deepStrictEqual(value, shown[field], `list --json and show disagree about "${field}"`);
+    }
+    // The fixture is a task that actually carries each of them, so a shape that
+    // dropped one would not pass by having nothing to compare.
+    assert.deepStrictEqual(Object.keys(entry).sort(), [
+      'blockedBy',
+      'briefs',
+      'closed',
+      'created',
+      'depends',
+      'id',
+      'labels',
+      'priority',
+      'status',
+      'title',
+      'type',
+    ]);
+    assert.deepStrictEqual(entry.labels, ['a', 'b']);
+    assert.deepStrictEqual(entry.depends, ['T-0001']);
+  });
+
+  // The other half of the same decision, and the reason `blockedBy` is not
+  // called something else: GET /api/board has been sending that name since
+  // T-0087, and a second name for one notion is how the board and the CLI would
+  // come to disagree about what "blocked" means.
+  it('every field of an entry is the field of the same name in GET /api/board', async () => {
+    const root = twoWithADependency();
+    const entry = parsed(runCli(root, ['list', '--json'])).tasks.find((t) => t.id === 'T-0002');
+    // Non-empty on purpose: two empty arrays would compare equal whatever the
+    // server calls the field (T-0182).
+    assert.deepStrictEqual(entry.blockedBy, ['T-0001'], 'the fixture must actually be blocked');
+    const board = await startBoard(root);
+    try {
+      const res = await fetch(`${board.baseUrl}/api/board`);
+      const body = await readJson(res);
+      const fromBoard = body.tasks.find((t) => t.id === 'T-0002');
+      assert.ok(fromBoard, answerOf(body));
+      for (const [field, value] of Object.entries(entry)) {
+        assert.ok(field in fromBoard, `list --json invented the field "${field}": /api/board has no such name`);
+        assert.deepStrictEqual(value, fromBoard[field], `list --json and /api/board disagree about "${field}"`);
+      }
+    } finally {
+      await board.stop();
+    }
+  });
+});
+
 describe('task.mjs validate', () => {
   it('exits 0 and prints OK for a project produced entirely via the CLI', () => {
     const root = makeTmpRoot();
@@ -1312,6 +1940,486 @@ describe('task.mjs sessions', () => {
 
   it('is listed among the commands', () => {
     assert.match(runCli(makeTmpRoot(), ['help']).stdout, /\bsessions\b/);
+  });
+});
+
+// T-0304. `runnable` and `summary` are queries an external supervisor acts on,
+// so what they must not do is as important as what they do: never write, never
+// answer differently on two identical runs, and never carry a second definition
+// of "may this task be started" — that one lives in blockingDependencies() and
+// serves the board, the drag of T-0084 and the CLI's own ready -> in_progress
+// guard already.
+//
+// The fixture covers every branch of that function in one backlog, so a change
+// to it lands in these tests rather than in a supervisor's report.
+function scopedBacklog() {
+  const root = makeTmpRoot();
+  const titles = [
+    'Ready with no prerequisite', // T-0001 runnable
+    'An open prerequisite', // T-0002 open, blocks T-0003
+    'Ready behind an open one', // T-0003 blocked
+    'Ready behind a cancelled one', // T-0004 runnable: cancelled is closed
+    'Cancelled prerequisite', // T-0005 cancelled
+    'Ready behind an id nobody carries', // T-0006 blocked
+    'Already finished', // T-0007 done
+    'In flight', // T-0008 in_progress
+  ];
+  for (const title of titles) add(root, ['--type', 'feature', '--priority', 'Major', '--title', title, '--labels', 'p']);
+  for (const id of ['T-0001', 'T-0003', 'T-0004', 'T-0006', 'T-0007', 'T-0008']) {
+    assert.strictEqual(runCli(root, ['status', id, 'open']).status, 0);
+    addBrief(root, id, 'slug');
+    assert.strictEqual(runCli(root, ['status', id, 'ready']).status, 0);
+  }
+  assert.strictEqual(runCli(root, ['status', 'T-0002', 'open']).status, 0);
+  assert.strictEqual(runCli(root, ['status', 'T-0005', 'cancelled']).status, 0);
+  assert.strictEqual(runCli(root, ['depends', 'T-0003', 'T-0002']).status, 0);
+  assert.strictEqual(runCli(root, ['depends', 'T-0004', 'T-0005']).status, 0);
+  assert.strictEqual(runCli(root, ['depends', 'T-0006', 'T-0007']).status, 0);
+  for (const to of ['in_progress', 'review', 'done']) {
+    assert.strictEqual(runCli(root, ['status', 'T-0007', to]).status, 0);
+  }
+  assert.strictEqual(runCli(root, ['status', 'T-0008', 'in_progress']).status, 0);
+  // `depends` refuses an id no task carries, so T-0006's ghost prerequisite is
+  // written by hand — which is the only way one gets into a backlog, and exactly
+  // the case blockingDependencies() calls blocking because an unresolvable
+  // prerequisite cannot be shown to be finished.
+  const file = backlogPath(root);
+  const text = fs.readFileSync(file, 'utf8');
+  assert.ok(text.includes('- depends: T-0007'), 'the fixture no longer has the line it rewrites');
+  fs.writeFileSync(file, text.replace('- depends: T-0007', '- depends: T-0099'));
+  return root;
+}
+
+describe('task.mjs runnable (T-0304)', () => {
+  function ids(res) {
+    assert.strictEqual(res.status, 0, `runnable failed: ${res.stderr}`);
+    const text = res.stdout.trim();
+    return text === '' ? [] : text.split(/\r?\n/).map((line) => line.slice(0, 6));
+  }
+
+  // The four cases of the acceptance criteria in one assertion, which is also
+  // what makes it a test of blockingDependencies() and not of a list of ids: the
+  // two that are IN are in for different reasons, and so are the two that are out.
+  it('is the ready tasks with no unsatisfied prerequisite, and nothing else', () => {
+    const root = scopedBacklog();
+    assert.deepStrictEqual(ids(runCli(root, ['runnable'])), ['T-0001', 'T-0004']);
+  });
+
+  it('the backlog really does hold the tasks it leaves out, so the answer is a filter', () => {
+    const root = scopedBacklog();
+    const ready = JSON.parse(runCli(root, ['list', '--json', '--status', 'ready']).stdout);
+    assert.deepStrictEqual(
+      ready.tasks.map((t) => t.id),
+      ['T-0001', 'T-0003', 'T-0004', 'T-0006'],
+      'the fixture does not contain the blocked ready tasks the filter must remove'
+    );
+  });
+
+  it('--json is list --json\'s own document, not a second task shape', () => {
+    const root = scopedBacklog();
+    const doc = JSON.parse(runCli(root, ['runnable', '--json']).stdout);
+    assert.deepStrictEqual(Object.keys(doc).sort(), ['count', 'tasks']);
+    assert.strictEqual(doc.count, 2);
+    assert.deepStrictEqual(doc.tasks.map((t) => t.id), ['T-0001', 'T-0004']);
+    const listed = JSON.parse(runCli(root, ['list', '--json', '--status', 'ready']).stdout);
+    const same = listed.tasks.find((t) => t.id === 'T-0001');
+    assert.deepStrictEqual(doc.tasks[0], same, 'runnable and list describe the same task differently');
+  });
+
+  // T-0004 is runnable only because a CANCELLED prerequisite counts as closed;
+  // asserting blockedBy is empty is asserting that rule and not the status.
+  it('a cancelled prerequisite is satisfied, and blockedBy says so', () => {
+    const root = scopedBacklog();
+    const doc = JSON.parse(runCli(root, ['runnable', '--json']).stdout);
+    const t4 = doc.tasks.find((t) => t.id === 'T-0004');
+    assert.deepStrictEqual(t4.depends, ['T-0005']);
+    assert.deepStrictEqual(t4.blockedBy, []);
+  });
+
+  it('--status narrows and cannot widen: a non-ready status is an empty answer, not an error', () => {
+    const root = scopedBacklog();
+    const res = runCli(root, ['runnable', '--status', 'review']);
+    assert.strictEqual(res.status, 0, `--status review was refused: ${res.stderr}`);
+    assert.deepStrictEqual(ids(res), []);
+    assert.deepStrictEqual(ids(runCli(root, ['runnable', '--status', 'ready'])), ['T-0001', 'T-0004']);
+    // in_progress exists in this backlog (T-0008) and is still not runnable.
+    assert.deepStrictEqual(ids(runCli(root, ['runnable', '--status', 'in_progress'])), []);
+  });
+
+  it('--label narrows the scope the same way it narrows list', () => {
+    const root = scopedBacklog();
+    assert.strictEqual(runCli(root, ['labels', 'T-0001', 'p,q']).status, 0);
+    assert.deepStrictEqual(ids(runCli(root, ['runnable', '--label', 'q'])), ['T-0001']);
+    assert.deepStrictEqual(ids(runCli(root, ['runnable', '--label', 'nobody-carries-this'])), []);
+  });
+});
+
+describe('task.mjs summary (T-0304)', () => {
+  function doc(root, args = []) {
+    const res = runCli(root, ['summary', '--json', ...args]);
+    assert.strictEqual(res.status, 0, `summary failed: ${res.stderr}`);
+    return JSON.parse(res.stdout);
+  }
+
+  it('counts every status, and they sum to total — cancelled included', () => {
+    const root = scopedBacklog();
+    const d = doc(root);
+    assert.strictEqual(d.total, 8);
+    const sum = STATUSES.reduce((n, s) => n + d[s], 0);
+    assert.strictEqual(sum, d.total, `the status counts sum to ${sum}, not to ${d.total}`);
+    assert.strictEqual(d.cancelled, 1, 'the cancelled task fell out of the counts');
+    assert.strictEqual(d.done, 1);
+    assert.strictEqual(d.ready, 4);
+    assert.strictEqual(d.in_progress, 1);
+  });
+
+  // Taken from STATUSES rather than from seven literals, so a status added to
+  // the lifecycle later cannot silently vanish from the document.
+  it('carries one key per status in STATUSES, plus the cross-cutting fields', () => {
+    const root = scopedBacklog();
+    assert.deepStrictEqual(
+      Object.keys(doc(root)),
+      ['scope', 'total', ...STATUSES, 'blocked', 'runnable', 'complete']
+    );
+  });
+
+  it('blocked is the same call runnable makes, and crosses the status counts', () => {
+    const root = scopedBacklog();
+    const d = doc(root);
+    // T-0003 (open prerequisite) and T-0006 (an id nobody carries) — both also
+    // counted under `ready`, which is not double-counting: the status counts
+    // alone sum to total, and this is a fact about them.
+    assert.strictEqual(d.blocked, 2);
+    const blockedByList = JSON.parse(runCli(root, ['list', '--json']).stdout).tasks.filter(
+      (t) => t.blockedBy.length > 0
+    );
+    assert.deepStrictEqual(blockedByList.map((t) => t.id), ['T-0003', 'T-0006']);
+    assert.strictEqual(d.blocked, blockedByList.length, 'summary and list disagree about what is blocked');
+  });
+
+  it('runnable is the ids runnable prints, in the backlog order', () => {
+    const root = scopedBacklog();
+    const fromCommand = JSON.parse(runCli(root, ['runnable', '--json']).stdout).tasks.map((t) => t.id);
+    assert.deepStrictEqual(doc(root).runnable, fromCommand);
+    assert.deepStrictEqual(doc(root).runnable, ['T-0001', 'T-0004']);
+  });
+
+  // The shape changed in T-0310 (a flat list could not tell an AND query from an
+  // OR one); what this test holds is T-0304's own claim, that the document says
+  // what it was an answer to. The distinction itself is tested in that block.
+  it('scope echoes the query the answer belongs to', () => {
+    const root = scopedBacklog();
+    assert.deepStrictEqual(doc(root).scope, { labels: [], labelQuery: 'every task' });
+    assert.deepStrictEqual(doc(root, ['--label', 'p']).scope, { labels: [['p']], labelQuery: 'p' });
+  });
+
+  // The decision that looks like a bug until you have thought about a typo'd
+  // label: vacuous truth would let `--label phase4` read as "phase 4 is done".
+  it('an empty scope is total 0 and NOT complete', () => {
+    const root = scopedBacklog();
+    const d = doc(root, ['--label', 'nobody-carries-this']);
+    assert.strictEqual(d.total, 0);
+    assert.strictEqual(d.complete, false, 'an empty scope was reported as a finished one');
+    assert.strictEqual(STATUSES.reduce((n, s) => n + d[s], 0), 0);
+  });
+
+  it('a scope whose tasks are all done or cancelled is complete', () => {
+    const root = scopedBacklog();
+    assert.strictEqual(runCli(root, ['labels', 'T-0007', 'closed-scope']).status, 0);
+    assert.strictEqual(doc(root, ['--label', 'closed-scope']).complete, true);
+    assert.strictEqual(runCli(root, ['labels', 'T-0005', 'closed-scope']).status, 0);
+    const both = doc(root, ['--label', 'closed-scope']);
+    assert.strictEqual(both.total, 2);
+    assert.strictEqual(both.complete, true, 'a cancelled task is closed and does not hold a scope open');
+    // One task that is not closed is enough to take it back.
+    assert.strictEqual(runCli(root, ['labels', 'T-0001', 'closed-scope']).status, 0);
+    assert.strictEqual(doc(root, ['--label', 'closed-scope']).complete, false);
+  });
+
+  it('refuses --status with the usage line and a non-zero exit', () => {
+    const root = scopedBacklog();
+    const res = runCli(root, ['summary', '--status', 'ready']);
+    assert.strictEqual(res.status, 1, `summary accepted --status: ${res.stdout}`);
+    assert.match(res.stderr, /ERROR: summary has no flag --status/);
+    assert.match(res.stderr, /usage: node tools\/task\.mjs summary/);
+    assert.strictEqual(res.stdout, '', 'a refused summary printed a document anyway');
+  });
+
+  // T-0304 had --all decide whether the archive was in scope here, and printed
+  // the archived-tasks note when it was not. T-0310 took the flag away and made
+  // the archive unconditional: a finished scope was printing the document a
+  // mistyped label prints. The counting rules above are untouched by that; the
+  // archive half lives in the T-0310 block below.
+});
+
+describe('task.mjs runnable/summary are queries and nothing else (T-0304)', () => {
+  const CALLS = [
+    ['runnable'],
+    ['runnable', '--json'],
+    ['runnable', '--label', 'p'],
+    ['runnable', '--status', 'ready'],
+    ['summary'],
+    ['summary', '--json'],
+    ['summary', '--json', '--label', 'p'],
+    // Was ['summary', '--all'] until T-0310 refused the flag; a repeated --label
+    // keeps a two-set query in the determinism check, which is what the entry
+    // was here for.
+    ['summary', '--json', '--label', 'p', '--label', 'q'],
+  ];
+
+  it('leaves doc/backlog.md byte-identical', () => {
+    const root = scopedBacklog();
+    const before = fs.readFileSync(backlogPath(root), 'utf8');
+    for (const args of CALLS) {
+      assert.strictEqual(runCli(root, args).status, 0, `${args.join(' ')}: refused`);
+      assert.strictEqual(fs.readFileSync(backlogPath(root), 'utf8'), before, `${args.join(' ')} wrote`);
+    }
+  });
+
+  // Compared on the bytes, not on the parse: a document whose keys reorder
+  // between runs parses the same and is not a stable contract.
+  it('--json answers the same bytes on two runs over the same backlog', () => {
+    const root = scopedBacklog();
+    for (const args of CALLS.filter((a) => a.includes('--json'))) {
+      const first = runCli(root, args);
+      const second = runCli(root, args);
+      assert.strictEqual(first.status, 0, first.stderr);
+      assert.strictEqual(first.stdout, second.stdout, `${args.join(' ')} is not deterministic`);
+      JSON.parse(first.stdout); // one document, nothing else on stdout
+    }
+  });
+
+  it('both are listed among the commands', () => {
+    const help = runCli(makeTmpRoot(), ['help']).stdout;
+    assert.match(help, /\brunnable\b/);
+    assert.match(help, /\bsummary\b/);
+  });
+});
+
+// T-0310. `summary` counted only doc/backlog.md, so a scope that was FINISHED —
+// every task closed, and `archive` therefore having moved every one of them out —
+// printed `total: 0, complete: false`: byte for byte the document a label nobody
+// ever used prints. The rule that an empty scope is not complete exists to stop a
+// mistyped label reading as a finished phase, and it had started failing safe in
+// the other direction too, on the case that is the more common one wherever
+// `archive` is used at all.
+//
+// Four decisions land together, all four changing the document's shape or meaning
+// while it is still cheap: the archive is always counted, `--all` is refused on
+// the two commands it can no longer move, `blocked` gains the lifecycle half, and
+// `scope` grows enough structure to tell two queries apart.
+describe('task.mjs summary counts the archive (T-0310)', () => {
+  function doc(root, args = []) {
+    const res = runCli(root, ['summary', '--json', ...args]);
+    assert.strictEqual(res.status, 0, `summary failed: ${res.stderr}`);
+    return JSON.parse(res.stdout);
+  }
+
+  function driveToDone(root, id) {
+    assert.strictEqual(runCli(root, ['status', id, 'open']).status, 0);
+    addBrief(root, id, 'slug');
+    for (const to of ['ready', 'in_progress', 'review', 'done']) {
+      assert.strictEqual(runCli(root, ['status', id, to]).status, 0, `${id} -> ${to} was refused`);
+    }
+  }
+
+  // The card's own reproduction, built with the CLI so that the lifecycle and
+  // `archive` are the things under test rather than a hand-written file.
+  function finishedPhase() {
+    const root = makeTmpRoot();
+    const ids = ['First of phase 4', 'Second of phase 4'].map((title) =>
+      add(root, ['--type', 'feature', '--priority', 'Major', '--title', title, '--labels', 'phase-4'])
+    );
+    for (const id of ids) driveToDone(root, id);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+    // Without this the counts below could be coming from the live file, and the
+    // test would say nothing at all about the archive.
+    assert.deepStrictEqual(readTasks(root).map((t) => t.id), [], 'archive left the tasks in doc/backlog.md');
+    return { root, ids };
+  }
+
+  it('a finished-and-archived scope is complete, and a mistyped label is still not', () => {
+    const { root } = finishedPhase();
+    const finished = doc(root, ['--label', 'phase-4']);
+    assert.strictEqual(finished.total, 2, 'the archived tasks were not counted');
+    assert.strictEqual(finished.done, 2);
+    assert.strictEqual(finished.complete, true, 'a finished scope still reads as unfinished');
+
+    const typo = doc(root, ['--label', 'phase4-typo']);
+    assert.strictEqual(typo.total, 0);
+    assert.strictEqual(typo.complete, false, 'a label nobody carries read as a finished phase');
+
+    // The two must differ in more than the label they were asked about — that
+    // identity is the bug, and comparing everything BUT the scope is what says so.
+    const counts = (d) => {
+      const c = { ...d };
+      delete c.scope;
+      return c;
+    };
+    assert.notDeepStrictEqual(
+      counts(finished),
+      counts(typo),
+      'a finished scope and a typo still print the same document'
+    );
+  });
+
+  it('the counts cover both files when a scope is split across them', () => {
+    const root = makeTmpRoot();
+    const closed = add(root, ['--title', 'Done half', '--labels', 'split']);
+    const live = add(root, ['--title', 'Live half', '--labels', 'split']);
+    driveToDone(root, closed);
+    assert.strictEqual(runCli(root, ['status', live, 'open']).status, 0);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+    // The split is real: one task on each side of the border.
+    assert.deepStrictEqual(readTasks(root).map((t) => t.id), [live]);
+    assert.deepStrictEqual(
+      parseBacklog(fs.readFileSync(archivePath(root), 'utf8')).map((t) => t.id),
+      [closed]
+    );
+
+    const d = doc(root, ['--label', 'split']);
+    assert.strictEqual(d.total, 2, 'one side of the border was left out');
+    assert.strictEqual(d.done, 1);
+    assert.strictEqual(d.open, 1);
+    assert.strictEqual(
+      STATUSES.reduce((n, s) => n + d[s], 0),
+      d.total,
+      'the status counts stopped summing to total once the archive came into scope'
+    );
+    assert.strictEqual(d.complete, false, 'one unfinished task is enough to hold a scope open');
+  });
+
+  it('says nothing on stderr about an archive it has already counted', () => {
+    const { root } = finishedPhase();
+    const res = runCli(root, ['summary', '--json', '--label', 'phase-4']);
+    assert.strictEqual(res.stderr, '', `summary still reports an omission it is not making: ${res.stderr}`);
+    JSON.parse(res.stdout);
+  });
+
+  it('summary --all and runnable --all are refused with the usage line and a non-zero exit', () => {
+    const { root } = finishedPhase();
+    for (const cmd of ['summary', 'runnable']) {
+      const res = runCli(root, [cmd, '--all']);
+      assert.strictEqual(res.status, 1, `${cmd} accepted --all: ${res.stdout}`);
+      assert.match(res.stderr, new RegExp(`ERROR: ${cmd} has no flag --all`));
+      assert.match(res.stderr, new RegExp(`usage: node tools/task\\.mjs ${cmd}`));
+      assert.strictEqual(res.stdout, '', 'a refused query printed an answer anyway');
+      // The usage line must stop advertising the flag it refuses.
+      assert.doesNotMatch(res.stderr, new RegExp(`usage:.*\\[--all\\]`));
+    }
+  });
+
+  it('list --all is untouched: it still puts the archived tasks back in the listing', () => {
+    const { root, ids } = finishedPhase();
+    const all = runCli(root, ['list', '--all']);
+    assert.strictEqual(all.status, 0, `list --all was refused: ${all.stderr}`);
+    assert.deepStrictEqual(
+      all.stdout.trim().split(/\r?\n/).map((line) => line.slice(0, 6)),
+      ids
+    );
+    // And without it, the listing is empty and the note still names --all,
+    // because there it is a flag that means something.
+    const live = runCli(root, ['list']);
+    assert.strictEqual(live.stdout, '');
+    assert.match(live.stderr, /closed task.*--all includes them/);
+  });
+
+  it('runnable neither mentions --all nor changes its answer when the archive appears', () => {
+    const root = scopedBacklog();
+    const before = runCli(root, ['runnable']);
+    assert.strictEqual(before.status, 0, before.stderr);
+    assert.strictEqual(runCli(root, ['archive']).status, 0);
+    const after = runCli(root, ['runnable']);
+    assert.strictEqual(after.status, 0, after.stderr);
+    assert.strictEqual(after.stdout, before.stdout, 'archiving changed what can be started');
+    assert.doesNotMatch(after.stderr, /--all/, 'runnable pointed the reader at a flag it refuses');
+
+    // Said rather than reasoned about: what `archive` moved is closed, and no
+    // closed status is `ready`, so no archived task could ever be runnable.
+    const archived = parseBacklog(fs.readFileSync(archivePath(root), 'utf8'));
+    assert.ok(archived.length > 0, 'nothing was archived, so the claim above is vacuous');
+    assert.deepStrictEqual(
+      archived.filter((t) => t.status === 'ready').map((t) => t.id),
+      [],
+      'the archive holds a ready task, and runnable is right to be asked about it'
+    );
+  });
+
+  // Decision 3. The dependency half is unchanged and still comes from
+  // blockingDependencies(); this is the lifecycle half beside it.
+  it('a closed task with an unsatisfied prerequisite is not blocked, and an open one with the same prerequisite is', () => {
+    const root = makeTmpRoot();
+    const prerequisite = add(root, ['--title', 'Never finished', '--labels', 'lc']);
+    const waiting = add(root, ['--title', 'Waiting on it', '--labels', 'lc']);
+    const finished = add(root, ['--title', 'Finished anyway', '--labels', 'lc']);
+    assert.strictEqual(runCli(root, ['status', prerequisite, 'open']).status, 0);
+    assert.strictEqual(runCli(root, ['status', waiting, 'open']).status, 0);
+    addBrief(root, waiting, 'slug');
+    assert.strictEqual(runCli(root, ['status', waiting, 'ready']).status, 0);
+    driveToDone(root, finished);
+    // After it is done, so the ready -> in_progress guard is not what decides
+    // this test; both tasks then carry the SAME unsatisfied prerequisite.
+    assert.strictEqual(runCli(root, ['depends', waiting, prerequisite]).status, 0);
+    assert.strictEqual(runCli(root, ['depends', finished, prerequisite]).status, 0);
+
+    // The fixture cannot make the assertion true by itself: the dependency half
+    // holds for both tasks, and only the lifecycle half tells them apart.
+    const listed = JSON.parse(runCli(root, ['list', '--json']).stdout).tasks;
+    const blockedBy = Object.fromEntries(listed.map((t) => [t.id, t.blockedBy]));
+    assert.deepStrictEqual(blockedBy[waiting], [prerequisite]);
+    assert.deepStrictEqual(blockedBy[finished], [prerequisite], 'the closed task lost its prerequisite');
+
+    assert.strictEqual(doc(root, ['--label', 'lc']).blocked, 1, 'finished work is being counted as waiting');
+    // And it is the open one that is counted, not just any one of the two.
+    assert.strictEqual(runCli(root, ['status', waiting, 'in_progress']).status, 1, 'the guard let a blocked task start');
+    assert.strictEqual(doc(root, ['--label', 'lc']).ready, 1);
+  });
+
+  // Decision 4. Two different queries may not store the same answer.
+  describe('scope round-trips the query it was an answer to', () => {
+    function labelled() {
+      const root = makeTmpRoot();
+      add(root, ['--title', 'Carries a', '--labels', 'a']);
+      add(root, ['--title', 'Carries b', '--labels', 'b']);
+      add(root, ['--title', 'Carries both', '--labels', 'a,b']);
+      add(root, ['--title', 'Carries a and c', '--labels', 'a,c']);
+      return root;
+    }
+
+    it('a repeated --label and a comma-separated one are two documents, not one', () => {
+      const root = labelled();
+      const and = doc(root, ['--label', 'a', '--label', 'b']);
+      const or = doc(root, ['--label', 'a,b']);
+      assert.deepStrictEqual(and.scope, { labels: [['a'], ['b']], labelQuery: 'a AND b' });
+      assert.deepStrictEqual(or.scope, { labels: [['a', 'b']], labelQuery: 'a OR b' });
+      assert.notDeepStrictEqual(and.scope, or.scope, 'two different queries stored the same scope');
+      // The distinction is not cosmetic: the two select different tasks, which is
+      // exactly why a stored answer has to say which one it was.
+      assert.strictEqual(and.total, 1, 'only the task carrying both labels matches a AND b');
+      assert.strictEqual(or.total, 4, 'every task carrying either label matches a OR b');
+    });
+
+    it('a mixed query keeps both halves, and the rendering says where the OR ends', () => {
+      const root = labelled();
+      const mixed = doc(root, ['--label', 'a,b', '--label', 'c']);
+      assert.deepStrictEqual(mixed.scope, { labels: [['a', 'b'], ['c']], labelQuery: '(a OR b) AND c' });
+      assert.strictEqual(mixed.total, 1, '(a OR b) AND c selects the one task carrying a and c');
+    });
+
+    it('no --label at all is every task, and says so in words', () => {
+      const root = labelled();
+      assert.deepStrictEqual(doc(root).scope, { labels: [], labelQuery: 'every task' });
+      assert.strictEqual(doc(root).total, 4);
+    });
+
+    it('the human-readable form is what the plain-text output prints', () => {
+      const root = labelled();
+      const line = (args) => runCli(root, ['summary', ...args]).stdout.split(/\r?\n/)[0];
+      assert.strictEqual(line([]), 'scope: every task');
+      assert.strictEqual(line(['--label', 'a,b']), 'scope: labels a OR b');
+      assert.strictEqual(line(['--label', 'a', '--label', 'b']), 'scope: labels a AND b');
+      assert.strictEqual(line(['--label', 'a,b', '--label', 'c']), 'scope: labels (a OR b) AND c');
+    });
   });
 });
 
@@ -1663,6 +2771,7 @@ describe('task.mjs refuses what a subcommand has no place for (T-0220)', () => {
   const TOO_MANY = {
     add: ['add', 'Fix the thing', '--title', 'Fix the thing'],
     status: ['status', '{id}', 'open', 'now'],
+    priority: ['priority', '{id}', 'Critical', 'now'],
     depends: ['depends', '{id}', '{other}', '{other}'],
     labels: ['labels', '{id}', 'ui', 'docs'],
     profile: ['profile', '{id}', 'deep', 'now'],
@@ -1671,6 +2780,8 @@ describe('task.mjs refuses what a subcommand has no place for (T-0220)', () => {
     note: ['note', '{id}', '--section', 'S', '--text', 'hello', 'again'],
     show: ['show', '{id}', '{other}'],
     list: ['list', 'ready'],
+    runnable: ['runnable', 'ready'],
+    summary: ['summary', 'phase-4'],
     archive: ['archive', 'now'],
     board: ['board', 'now'],
     sessions: ['sessions', 'now'],
@@ -1814,7 +2925,7 @@ describe('task.mjs names the task argument it was not given (T-0269)', () => {
   // joined them in T-0273: a bare call was refused there too, but by the check
   // on the SECOND argument, so the message was about a status value nobody had
   // reached and carried no usage line.
-  const NEEDS_A_TASK = ['brief', 'show', 'note', 'depends', 'labels', 'profile', 'status'];
+  const NEEDS_A_TASK = ['brief', 'show', 'note', 'depends', 'labels', 'profile', 'status', 'priority'];
 
   for (const name of NEEDS_A_TASK) {
     it(`${name}: a call with no task names the missing argument and prints the usage`, () => {

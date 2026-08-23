@@ -346,3 +346,140 @@ describe('the review session runs only where there is something to review', () =
     assert.strictEqual((await readJson(await review(server))).session, 'already-running');
   });
 });
+
+// ---------- the two variables that configure it (T-0305) ----------
+
+// Every test above configures the session with BRIEFBOARD_ORCHESTRATOR_CMD and
+// none of them was edited for this: that they still pass IS the compatibility
+// requirement. What follows is the documented name and what happens when both
+// are set. The unit tests for the precedence itself are in tests/sessions.test.js
+// — it is decided in one function, and this is that function reaching a real
+// board through a real server.
+describe('BRIEFBOARD_REVIEW_CMD, with BRIEFBOARD_ORCHESTRATOR_CMD kept working', () => {
+  it('the documented variable alone configures the session', async () => {
+    const root = makeRoot();
+    const server = await startServer(root, {
+      BRIEFBOARD_REVIEW_CMD: nodeCmd("console.log('reviewing {id}')"),
+    });
+
+    const board = await readJson(await fetch(server.baseUrl + '/api/board'));
+    assert.strictEqual(board.sessions.orchestrator, true, answerOf(board));
+
+    assert.strictEqual((await readJson(await review(server))).session, 'started');
+    await waitFor(
+      () => /reviewing T-0014/.test(readSessionLogs(root)),
+      SPAWN_WAIT_BUDGET_MS,
+      'session stdout'
+    );
+  });
+
+  it('with both set the documented one runs — asserted on what the session printed', async () => {
+    const root = makeRoot();
+    const server = await startServer(root, {
+      BRIEFBOARD_REVIEW_CMD: nodeCmd("console.log('the documented variable ran {id}')"),
+      BRIEFBOARD_ORCHESTRATOR_CMD: nodeCmd("console.log('the legacy variable ran {id}')"),
+    });
+
+    assert.strictEqual((await readJson(await review(server))).session, 'started');
+    await waitFor(
+      () => /the documented variable ran T-0014/.test(readSessionLogs(root)),
+      SPAWN_WAIT_BUDGET_MS,
+      'session stdout'
+    );
+    // Which command ran, not which branch of the code did: the legacy one is a
+    // whole other process, and its output would be in this same log.
+    assert.ok(!/the legacy variable ran/.test(readSessionLogs(root)), readSessionLogs(root));
+  });
+
+  it('cleared to empty it falls back to the legacy variable rather than turning the session off', async () => {
+    // The decision T-0305 left open, and the one every other BRIEFBOARD_*_CMD
+    // already makes: a blank value is unset, not "off".
+    const root = makeRoot();
+    const server = await startServer(root, {
+      BRIEFBOARD_REVIEW_CMD: '',
+      BRIEFBOARD_ORCHESTRATOR_CMD: nodeCmd("console.log('the legacy variable ran {id}')"),
+    });
+
+    const board = await readJson(await fetch(server.baseUrl + '/api/board'));
+    assert.strictEqual(board.sessions.orchestrator, true, answerOf(board));
+
+    assert.strictEqual((await readJson(await review(server))).session, 'started');
+    await waitFor(
+      () => /the legacy variable ran T-0014/.test(readSessionLogs(root)),
+      SPAWN_WAIT_BUDGET_MS,
+      'session stdout'
+    );
+  });
+
+  it('blank in both leaves the session unconfigured, and the route still answers', async () => {
+    const root = makeRoot();
+    const server = await startServer(root, {
+      BRIEFBOARD_REVIEW_CMD: '',
+      BRIEFBOARD_ORCHESTRATOR_CMD: '',
+    });
+
+    const board = await readJson(await fetch(server.baseUrl + '/api/board'));
+    assert.strictEqual(board.sessions.orchestrator, false, answerOf(board));
+    assert.strictEqual((await readJson(await review(server))).session, 'disabled');
+  });
+
+  // The hint is the one place a running board prints the variable's name at the
+  // user, so it has to be the name that is really set — not the documented one
+  // read out of a table.
+  it('a hint about the configuration names the variable that was used', async () => {
+    for (const [name, expected] of [
+      ['BRIEFBOARD_REVIEW_CMD', 'BRIEFBOARD_REVIEW_CMD'],
+      ['BRIEFBOARD_ORCHESTRATOR_CMD', 'BRIEFBOARD_ORCHESTRATOR_CMD'],
+    ]) {
+      const root = makeRoot();
+      const server = await startServer(root, {
+        [name]: nodeCmd("console.log('read it, said nothing')"),
+      });
+
+      await review(server);
+      await waitFor(
+        () => EMPTY_RUN_HINT.test(readSessionLogs(root)),
+        SPAWN_WAIT_BUDGET_MS,
+        'the empty-run hint'
+      );
+      const log = readSessionLogs(root);
+      assert.ok(log.includes(expected), `configured with ${name}, the hint says: ${log}`);
+      const other =
+        expected === 'BRIEFBOARD_REVIEW_CMD'
+          ? 'BRIEFBOARD_ORCHESTRATOR_CMD'
+          : 'BRIEFBOARD_REVIEW_CMD';
+      assert.ok(!log.includes(other), `the hint must not name ${other}: ${log}`);
+    }
+  });
+
+  // T-0305 renames how the session is configured and nothing about what it may
+  // do. The boundary itself is asserted above — "changes no status and writes
+  // nothing to the backlog itself" and "the session sets no status, done least
+  // of all" — and here under the new variable, so the rename cannot carry it
+  // away with it. Merging has no route at all (T-0117); nothing in the server
+  // can be made to do it.
+  it('under the documented variable it still sets no status and merges nothing', async () => {
+    const root = makeRoot();
+    const server = await startServer(root, {
+      BRIEFBOARD_REVIEW_CMD: writeVerdictCmd('Tests green. I would merge it.'),
+    });
+
+    assert.strictEqual((await readJson(await review(server))).session, 'started');
+    await waitFor(
+      () => /### Review verdict/.test(backlogText(root)),
+      SPAWN_WAIT_BUDGET_MS,
+      'the verdict in the description'
+    );
+
+    const task = taskIn(root, 'T-0014');
+    assert.strictEqual(task.status, 'review', 'the session sets no status, done least of all');
+    assert.strictEqual(task.closed, '', 'and nothing stamps a closing date');
+    assert.match(task.description, /Tests green\. I would merge it\./);
+
+    // The verdict is its whole output: no route exists that would merge, and the
+    // session is not given one by being configured under a new name.
+    const res = await fetch(server.baseUrl + '/api/task/T-0014/merge', { method: 'POST' });
+    await res.arrayBuffer();
+    assert.strictEqual(res.status, 404, 'there is no merge route, and this task adds none');
+  });
+});

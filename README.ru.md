@@ -213,7 +213,20 @@ backlog ──▶ open ──▶ ready ──▶ in_progress ──▶ review �
 
 Агентскую сессию запускают два дропа на доске, и у каждого своя команда:
 **брифинг**-сессия при дропе карточки в «Открыта» и **воркер**-сессия при дропе в
-«В работе».
+«В работе». Кнопка на карточке в «Ревью» запускает третью — **ревью**-сессию.
+
+Названия — один раз, потому что их легко перепутать:
+
+- **доска** — сам briefboard: бэклог, брифы, жизненный цикл. Она запускает
+  сессии и никогда не пишет код;
+- **воркер** — одна задача, реализованная в изоляции, на своей ветке и в своём
+  worktree;
+- **ревью-сессия** — читает диф, прогоняет проверки, пишет вердикт. Никакого
+  статуса не ставит и ничего не мержит;
+- **ваш собственный оркестратор** — тот агент, который стоит над всем этим в
+  вашем проекте, если он у вас есть. briefboard про него не знает и знать не
+  обязан — именно поэтому переменная ревью-сессии называется
+  `BRIEFBOARD_REVIEW_CMD` и больше не говорит «orchestrator».
 
 Брифинг-сессия делает ровно одно: проводит рефайнмент, пишет бриф в
 `doc/brief/`, ставит задаче `ready` и завершается — либо возвращается с
@@ -384,9 +397,12 @@ If that section is already there and now carries answers: take them into account
 - `BRIEFBOARD_WORKER_CMD` — шаблон команды воркер-сессии (дроп в «В работе»),
   настраивается и учитывается отдельно от брифинг-команды. См.
   [воркер-сессию](#воркер-сессия-готова--в-работе) ниже.
-- `BRIEFBOARD_ORCHESTRATOR_CMD` — шаблон команды ревью-сессии (кнопка на
+- `BRIEFBOARD_REVIEW_CMD` — шаблон команды ревью-сессии (кнопка на
   карточке, которая уже в «Ревью»). Не задано — кнопки нет вовсе. См.
   [ревью-сессию](#ревью-сессия-задача-уже-в-ревью) ниже.
+  `BRIEFBOARD_ORCHESTRATOR_CMD` — прежнее имя той же настройки, и оно
+  по-прежнему читается, так что уже настроенная доска продолжает работать без
+  единой правки; если заданы обе, используется `BRIEFBOARD_REVIEW_CMD`.
 - `BRIEFBOARD_SETUP_CMD` — команда, которая делает свежий worktree пригодным для
   работы: `npm ci`, `flutter pub get`, `uv sync` и т.п. Изолированная сессия
   получает *checkout*, в котором нет ни `node_modules`, ни пакетов, ни venv, так
@@ -444,7 +460,7 @@ If that section is already there and now carries answers: take them into account
 Второй вариант работает потому, что `cmd.exe` — настоящий исполняемый файл, а
 `/c` и всё остальное уходят ему обычными аргументами: оболочку выбираете вы в
 своём шаблоне, а не подставляет незаметно раннер. То же касается
-`BRIEFBOARD_WORKER_CMD` и `BRIEFBOARD_ORCHESTRATOR_CMD`.
+`BRIEFBOARD_WORKER_CMD` и `BRIEFBOARD_REVIEW_CMD`.
 
 ### Изолированные сессии (своя ветка, своё рабочее дерево)
 
@@ -641,7 +657,7 @@ node tools/screenshot.mjs --lang en"
 
 ```bash
 # Claude Code — готовая строка:
-BRIEFBOARD_ORCHESTRATOR_CMD='claude -p "Review task {id} of this project and write a verdict.
+BRIEFBOARD_REVIEW_CMD='claude -p "Review task {id} of this project and write a verdict.
 The board started you in the project directory — do not create a worktree and do not switch branches. Its path is in AGENTBOARD_ROOT: printenv AGENTBOARD_ROOT
 The --full below is what prints the worker report, which you are reviewing; without it show leaves reports out:
 node tools/task.mjs show {id} --full
@@ -712,7 +728,7 @@ node tools/screenshot.mjs --lang en"
    **ваш**, и первое значение считается умолчанием: с ним работает задача, у
    которой своего профиля нет;
 2. **вставьте `{profile}` в свой шаблон команды** — `BRIEFBOARD_SESSION_CMD`,
-   `BRIEFBOARD_WORKER_CMD`, `BRIEFBOARD_ORCHESTRATOR_CMD` или в любой из них.
+   `BRIEFBOARD_WORKER_CMD`, `BRIEFBOARD_REVIEW_CMD` или в любой из них.
    Объявите значения и не тронь шаблоны — подставлять будет некуда: выбор
    сохранится на задаче и не дойдёт ни до одной команды.
 
@@ -1044,6 +1060,12 @@ node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|
                                   # через запятую, ровно как их принимает команда `labels`
 node tools/task.mjs status T-0007 <backlog|open|ready|in_progress|review|done|cancelled>
                                   # сменить статус задачи (с проверкой допустимости перехода)
+node tools/task.mjs priority T-0007 <Blocker|Critical|Major|Medium|Minor>
+                                  # переставить приоритет уже заведённой задачи. Любое значение
+                                  # может следовать за любым — графа здесь нет, и --force тоже
+                                  # нет, — а сама смена записывается в описание под заголовком
+                                  # "### Priority changes", чтобы карточка, ставшая Critical,
+                                  # не читалась потом так, будто всегда такой была
 node tools/task.mjs depends T-0007 T-0005,T-0006   # задать задачи, которых ждёт T-0007
 node tools/task.mjs depends T-0007 --clear         # очистить этот список
 node tools/task.mjs labels T-0007 ui,docs          # задать метки этой задачи
@@ -1079,9 +1101,48 @@ node tools/task.mjs show T-0007 --full
                                   # то же самое, вместе с отчётами воркеров, которые по умолчанию
                                   # опущены; без флага в JSON есть поле "omitted" — сколько их
                                   # пропущено и как их получить
-node tools/task.mjs list [--status ready] [--all]
+node tools/task.mjs list [--status ready] [--label ui,docs] [--all] [--json]
                                   # список живых задач, опционально отфильтрованный по статусу;
                                   # --all добавляет заархивированные (закрытые)
+                                  # --label — единственный флаг, который можно ПОВТОРЯТЬ: одно
+                                  # вхождение это набор через запятую, из которого задача должна
+                                  # нести ЛЮБОЕ имя, и совпасть обязаны все вхождения — так что
+                                  # `--label a,b --label c` означает (a OR b) AND c. Фильтр
+                                  # `Labels ▾` на доске работает как OR; оба правила разобраны
+                                  # рядом в руководстве
+                                  # в одном вхождении не больше 8 имён (столько же может нести
+                                  # сама задача); девятое ОТКЛОНЯЕТСЯ, а не отбрасывается —
+                                  # урезанный набор ответил бы меньшим числом задач и кодом 0
+                                  # --json печатает в stdout ОДИН документ {tasks, count} и
+                                  # больше ничего, под теми же именами полей, которые уже
+                                  # используют `show` и GET /api/board — чтобы программа могла
+                                  # читать бэклог, не разбирая doc/backlog.md
+node tools/task.mjs runnable [--label ui,docs] [--status ready] [--json]
+                                  # задачи, которые можно ВЗЯТЬ прямо сейчас: статус `ready` и
+                                  # ни одного незакрытого пререквизита — по тому же правилу, по
+                                  # которому доска рисует маркер «заблокирована», а переход
+                                  # ready → in_progress не пускает. --status этот набор может
+                                  # только сузить, поэтому `runnable --status review` — пустой
+                                  # ответ, а не ошибка;
+                                  # --json печатает тот же документ {tasks, count}, что и
+                                  # `list --json`
+                                  # --all ОТКЛОНЯЕТСЯ: в архиве лежат только закрытые задачи, а
+                                  # ни одна закрытая не бывает `ready`
+node tools/task.mjs summary [--label ui,docs] [--json]
+                                  # сколько от среза осталось, одним документом: счётчик на
+                                  # каждый статус (на все, поэтому они дают в сумме `total`),
+                                  # `blocked`, идентификаторы `runnable` и `complete`. Считает
+                                  # ВСЕГДА оба файла: законченный срез — это ровно тот, который
+                                  # `archive` вынес из doc/backlog.md, а счёт по одному живому
+                                  # файлу печатал для него ровно то же, что печатает опечатка
+                                  # в метке
+                                  # --status и --all ОТКЛОНЯЮТСЯ оба: сводка И ЕСТЬ счёт по
+                                  # статусам, а архив и так посчитан
+                                  # ПУСТОЙ срез намеренно НЕ считается завершённым, чтобы
+                                  # опечатка в метке не читалась как законченная фаза
+                                  # `scope` повторяет запрос: `labels` — по массиву на каждое
+                                  # вхождение --label (имена внутри набора альтернативы, сами
+                                  # наборы соединены AND), рядом `labelQuery` в виде строки
 node tools/task.mjs archive [--dry-run]
                                   # перенести все done/cancelled в doc/backlog-archive.md
 node tools/task.mjs board        # идёт ли по этому проекту доска и на каком порту — pid, адрес,

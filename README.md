@@ -208,7 +208,21 @@ the backlog (335 KB → 28 KB here, roughly 89k tokens → 7k).
 
 Two drops on the board can start an agent session, and each has its own command:
 the **briefing** session when a card is dropped into Open, and the **worker**
-session when a card is dropped into In progress.
+session when a card is dropped into In progress. A button on a card in Review
+starts a third, the **review** session.
+
+The names, once, because they are easy to confuse:
+
+- **the board** — briefboard itself: the backlog, the briefs, the lifecycle. It
+  starts sessions and never writes code;
+- **the worker** — one task implemented in isolation, on its own branch in its
+  own worktree;
+- **the review session** — reads the diff, runs the checks, writes a verdict. It
+  sets no status and merges nothing;
+- **your own orchestrator** — whatever agent sits above all of this in your
+  project, if you run one. briefboard neither knows nor needs to know about it,
+  which is why the review session's variable is `BRIEFBOARD_REVIEW_CMD` and no
+  longer says "orchestrator".
 
 The briefing session does exactly one thing: refine the task, write a brief into
 `doc/brief/`, set the task to `ready`, and stop — or come back with questions
@@ -381,9 +395,12 @@ Open: the task left `backlog` when it was opened the first time.
 - `BRIEFBOARD_WORKER_CMD` — the worker command template (the drop into In
   progress), configured and reported separately from the briefing one. See
   [the worker session](#the-worker-session-ready--in-progress) below.
-- `BRIEFBOARD_ORCHESTRATOR_CMD` — the review command template (the button on a
+- `BRIEFBOARD_REVIEW_CMD` — the review command template (the button on a
   card already in Review). Unset = the button is not there at all. See
   [the review session](#the-review-session-a-task-already-in-review) below.
+  `BRIEFBOARD_ORCHESTRATOR_CMD` is the earlier name of the same setting and is
+  still read, so an existing board keeps working untouched; with both set,
+  `BRIEFBOARD_REVIEW_CMD` is the one used.
 - `BRIEFBOARD_SETUP_CMD` — the command that makes a fresh worktree usable, e.g.
   `npm ci`, `flutter pub get`, `uv sync`. An isolated session gets a *checkout*,
   which has no `node_modules`, no packages and no venv, so a project with
@@ -441,7 +458,7 @@ out, both of which live in your own template:
 The second one works because `cmd.exe` is a real executable, and `/c` and the rest
 reach it as ordinary arguments — the shell is your explicit choice in your
 template, not something the runner slips in behind you. The same holds for
-`BRIEFBOARD_WORKER_CMD` and `BRIEFBOARD_ORCHESTRATOR_CMD`.
+`BRIEFBOARD_WORKER_CMD` and `BRIEFBOARD_REVIEW_CMD`.
 
 ### Isolated sessions (own branch, own worktree)
 
@@ -647,7 +664,7 @@ it is looking at.
 
 ```bash
 # Claude Code — ready to copy:
-BRIEFBOARD_ORCHESTRATOR_CMD='claude -p "Review task {id} of this project and write a verdict.
+BRIEFBOARD_REVIEW_CMD='claude -p "Review task {id} of this project and write a verdict.
 The board started you in the project directory — do not create a worktree and do not switch branches. Its path is in AGENTBOARD_ROOT: printenv AGENTBOARD_ROOT
 The --full below is what prints the worker report, which you are reviewing; without it show leaves reports out:
 node tools/task.mjs show {id} --full
@@ -719,7 +736,7 @@ boundary of its own.
    **yours**, and the first one is the default — the profile a task with no
    profile of its own runs with;
 2. **put `{profile}` into your command template** — `BRIEFBOARD_SESSION_CMD`,
-   `BRIEFBOARD_WORKER_CMD`, `BRIEFBOARD_ORCHESTRATOR_CMD`, or any of them.
+   `BRIEFBOARD_WORKER_CMD`, `BRIEFBOARD_REVIEW_CMD`, or any of them.
    Declare the values and leave the templates alone, and there is nowhere to
    substitute them: the choice is stored on the task and reaches no command.
 
@@ -1052,6 +1069,12 @@ node tools/task.mjs add --type feature|bug|external --priority Blocker|Critical|
                                   # ONE comma-separated argument the `labels` command takes
 node tools/task.mjs status T-0007 <backlog|open|ready|in_progress|review|done|cancelled>
                                   # change a task's status (validates the transition)
+node tools/task.mjs priority T-0007 <Blocker|Critical|Major|Medium|Minor>
+                                  # re-triage a task after it was filed. Any value may follow
+                                  # any other — there is no graph here and no --force — and the
+                                  # change is recorded in the description under
+                                  # "### Priority changes", so a card that became Critical does
+                                  # not read later as though it always was
 node tools/task.mjs depends T-0007 T-0005,T-0006   # set the tasks T-0007 waits for
                                   # the whole list in ONE comma-separated argument, and it
                                   # REPLACES the previous one — a second call naming only
@@ -1090,9 +1113,44 @@ node tools/task.mjs show T-0007 --full
                                   # the same, with the worker reports the default leaves
                                   # out; without the flag the JSON carries an "omitted"
                                   # field saying how many were left out and how to get them
-node tools/task.mjs list [--status ready] [--all]
+node tools/task.mjs list [--status ready] [--label ui,docs] [--all] [--json]
                                   # list the live tasks, optionally filtered by status;
                                   # --all adds the archived (closed) ones
+                                  # --label is the one repeatable flag: each occurrence is a
+                                  # comma-separated set the task must carry ANY name of, and
+                                  # every occurrence must match — so `--label a,b --label c`
+                                  # is (a OR b) AND c. The board's `Labels ▾` filter is OR;
+                                  # the two are described side by side in the guide
+                                  # one occurrence holds at most 8 names (what a task itself
+                                  # may carry); a ninth is refused rather than dropped —
+                                  # a truncated set answers with fewer tasks and exit 0
+                                  # --json prints ONE document {tasks, count} on stdout and
+                                  # nothing else, under the field names `show` and
+                                  # GET /api/board already use — so a program can read the
+                                  # backlog without parsing doc/backlog.md
+node tools/task.mjs runnable [--label ui,docs] [--status ready] [--json]
+                                  # the tasks that can be STARTED now: status `ready` and no
+                                  # unsatisfied prerequisite, decided by the same rule the
+                                  # board's blocked marker and the ready → in_progress guard
+                                  # use. --status can only narrow that set, so
+                                  # `runnable --status review` is empty rather than an error;
+                                  # --json prints `list --json`'s own {tasks, count}
+                                  # --all is REFUSED: the archive holds closed tasks only,
+                                  # and nothing closed is `ready`
+node tools/task.mjs summary [--label ui,docs] [--json]
+                                  # how much of a scope is left, as one document: a count per
+                                  # status (all of them, so they sum to `total`), `blocked`,
+                                  # the `runnable` ids and `complete`. Counts BOTH files
+                                  # always — a finished scope is exactly the one `archive`
+                                  # has emptied out of doc/backlog.md, and counting the live
+                                  # file alone made it print what a mistyped label prints
+                                  # --status and --all are both REFUSED: a summary IS the
+                                  # count per status, and the archive is already in scope
+                                  # An EMPTY scope is deliberately NOT complete, so a
+                                  # mistyped label cannot read as a finished phase
+                                  # `scope` echoes the query: `labels` is one array per
+                                  # --label occurrence (names in a set are alternatives, the
+                                  # sets are ANDed) beside `labelQuery` rendering it
 node tools/task.mjs archive [--dry-run]
                                   # move every done/cancelled task to doc/backlog-archive.md
 node tools/task.mjs board        # is a board running for this project, and on which port —

@@ -6,7 +6,9 @@
 // and the next run then reads the polluted file as the "original".
 
 import { spawn, spawnSync } from 'node:child_process';
-import { COUNT_MESSAGE } from './test-count-reporter.mjs';
+import path from 'node:path';
+import fs from 'node:fs';
+import { COUNT_MESSAGE, RUNNING_MESSAGE } from './test-count-reporter.mjs';
 
 // An upper bound on a single test, so a wait nobody bounded ends the test
 // instead of the run: without it the suite hung forever three times in ~30 runs
@@ -33,17 +35,40 @@ const TIMEOUT_ARG = `--test-timeout=${TEST_TIMEOUT_MS}`;
 // briefboard supports Node 21.
 //
 // The budget is silence, not total time: a whole-run budget would have to clear
-// the slowest honest run (265s here idle, 971s with another suite on the same
-// machine) and would still be a guess, while every finished test prints a mark.
+// the slowest honest run (343s here quiet and 828s under four concurrent
+// suites, measured 2026-08-23 at 2502 tests) and would still be a guess, while
+// every finished test prints a mark.
 //
-// Three times the per-test limit, because the longest a healthy run may say
-// nothing is a `before` hook and then the first test under it — each bounded by
-// that limit, so twice it is the theoretical maximum and the budget has to be
-// above that, not equal to it. Measured, the real numbers are far lower: 17.5s
-// for the slowest test and 71s for the slowest whole file. The budget below
-// derives from the same reasoning, and it is the reason there are two of them:
-// a hook and a first test with nothing printed is what a run does while it is
-// STARTING, and that span used to be charged to this one (T-0266).
+// Three times the per-test limit. The reasoning that number was chosen by — a
+// `before` hook and the first test under it, each bounded by the limit, so
+// twice the limit is the theoretical worst and the budget must be above it —
+// is arithmetically fine and describes the wrong thing, which T-0272 measured
+// (`--timing-dir`, 2026-08-23, Windows 11 / node v24.18.0 / 24 cores):
+//
+//   longest stretch with no mark printed   quiet 168.3s   four concurrent suites 249-260s
+//
+// Against a budget of 360s that is 47% spent before any load, and 72% under the
+// rig this suite is argued about on. The old note said "the real numbers are far
+// lower: 17.5s for the slowest test and 71s for the slowest whole file", and
+// both are still true — they are simply not what bounds the silence.
+//
+// What bounds it is a run of SYNCHRONOUS tests. node:test reports a file's
+// results from that file's own process, so a test that blocks its event loop
+// cannot report, and neither can the tests before it in the same uninterrupted
+// stretch: measured on three 2s tests, three `await`ed ones print their marks at
+// 2.3s / 4.3s / 6.3s and three blocking ones print all four at 6.4s. So
+// tests/task-cli.test.js, whose tests drive the CLI with spawnSync, prints
+// nothing for the length of a whole describe — 168.3s for `task.mjs list
+// --json` alone, with no test in it anywhere near the per-test limit. No
+// per-test limit can bound that, and this budget is the only thing that does.
+//
+// Two consequences, and neither is a reason to raise the number (T-0259, and
+// what would stop being caught is in the message below):
+//   * the pressure on it comes from the SUITE growing, not from the machine —
+//     under four concurrent suites the stretch grew x1.53 while the suite grew
+//     x2.41, so a file that gains synchronous tests spends this budget faster
+//     than any load does;
+//   * the margin is 1.39x, not the ~5x the "slowest test" reading suggests.
 const SILENCE_LIMIT_MS = Number(process.env.BRIEFBOARD_SILENCE_MS || Number(TEST_TIMEOUT_MS) * 3);
 
 // Silence begins when the run first speaks. Before that the run is not silent,
@@ -57,20 +82,70 @@ const SILENCE_LIMIT_MS = Number(process.env.BRIEFBOARD_SILENCE_MS || Number(TEST
 // what the kill relayed was a run that had reported nothing (T-0266).
 const STARTUP_LIMIT_MS = Number(process.env.BRIEFBOARD_STARTUP_MS || Number(TEST_TIMEOUT_MS) * 3);
 
-// Two spans, two messages, because they are two different diagnoses. A run
-// killed once it had spoken has a last line to look at; a run killed before it
-// ever spoke has none, and pointing at one would send the reader looking for a
-// test that never ran.
-const SILENCE_KILLED = [
+// What was still running when the trigger was pulled, longest first — and the
+// first line is the answer, because anything healthy that started alongside it
+// has since completed and left the set. The names come from the counting
+// reporter over the same ipc channel as the count (see test-count-reporter.mjs
+// for which node:test events carry a name in time to be of any use).
+//
+// Capped: a run of this suite has 24 files open at once, and a wall of them
+// would bury the one line that matters. The cap is on what is PRINTED — the set
+// itself is complete, and the count says how much of it was left out.
+const RUNNING_SHOWN = 8;
+
+function runningLines(inFlight, at) {
+  const all = [...inFlight.values()];
+  // The runner dequeues each FILE as a test of its own, named by its path, and
+  // that entry is always older than anything inside it — so left in, it would
+  // take the first line, which is the one line that has to carry the answer. It
+  // is kept only for a file with nothing else open, where it is all there is to
+  // say: the file is in a `before` hook, in its own top-level body, or finished
+  // holding the event loop open.
+  //
+  // A file is named by the pattern the runner was given, so that name is its
+  // path spelled either absolutely or relatively to the cwd; both are the file.
+  const isFile = (e) =>
+    e.nesting === 0 && (e.name === e.file || path.resolve(e.name) === path.resolve(e.file));
+  const detailed = new Set(all.filter((e) => !isFile(e)).map((e) => e.file));
+  const open = all
+    .filter((entry) => !isFile(entry) || !detailed.has(entry.file))
+    .sort((a, b) => a.since - b.since);
+  if (open.length === 0) {
+    return ['', 'Nothing was running when it was killed: every test that started had finished.'];
+  }
+  const name = (entry) => {
+    const file = path.relative(process.cwd(), entry.file) || entry.file;
+    // A file is dequeued as a test of its own, named by its path; printing that
+    // path twice would say nothing.
+    return isFile(entry) ? `${file} (the file itself)` : `${file} > ${entry.name}`;
+  };
+  const shown = open.slice(0, RUNNING_SHOWN);
+  return [
+    '',
+    `Still running when it was killed (${open.length}), longest first:`,
+    ...shown.map((entry) => `  ${((at - entry.since) / 1000).toFixed(1)}s  ${name(entry)}`),
+    ...(open.length > shown.length ? [`  ... and ${open.length - shown.length} more, all younger`] : []),
+    'The first line is where to look: the runner runs many files at once, and',
+    'everything healthy that started alongside it has finished by now.',
+  ];
+}
+
+const silenceKilled = (inFlight, at) => [
   '',
   `briefboard: the test run printed nothing for ${SILENCE_LIMIT_MS}ms and was killed.`,
   `Every test is bounded (${TIMEOUT_ARG}), so silence this long is not a slow test:`,
   'it is a test that hung while holding the event loop open. The run had already',
   'ended that test and could not leave (T-0124, T-0245).',
+  ...runningLines(inFlight, at),
   'The report of the run dies with it. `npm run test:verbose` names every test as it',
   'finishes, so its last line before the silence is where to look.',
 ].join('\n');
 
+// Two spans, two messages, because they are two different diagnoses. A run
+// killed once it had spoken has a last line to look at, and now a list of what
+// was open when it stopped speaking; a run killed before it ever spoke has
+// neither, and pointing at one would send the reader looking for a test that
+// never ran.
 const STARTUP_KILLED = [
   '',
   `briefboard: the test run said nothing at all in the ${STARTUP_LIMIT_MS}ms it had to start, and was killed.`,
@@ -80,6 +155,72 @@ const STARTUP_KILLED = [
   'the suite decides — BRIEFBOARD_STARTUP_MS is what moves it (T-0266).',
 ].join('\n');
 
+// Measurement scaffolding: `--timing-dir=PATH` writes what the run cost into
+// that directory, and does nothing at all without it. What it keeps is the
+// run's silent stretches — the ten longest, each with what was running while
+// nothing was printed — and how long every test took.
+//
+// This is how the two budgets above are re-derived rather than argued about.
+// Both were set from a measurement (T-0177, T-0266) and the machine has moved
+// since: on 2026-08-23 a QUIET run of this suite went 166.9s without printing a
+// mark, against a budget of 360s whose own comment justifies it with "17.5s for
+// the slowest test". A number nobody can re-measure goes stale in silence.
+//
+// A flag and not an environment variable, which is not a matter of taste:
+// tests/hermetic-env.test.js collects every environment variable named in
+// server/, tools/ and bin/ (prose included — it reads the bytes, so do not
+// spell one in a comment) and requires it to be listed in
+// tests/helpers/env.js — which DELETES it
+// from every test process, so a variable declared there could never reach the
+// suite's own half of the same measurement (tests/helpers/timing.js). The
+// directory is handed down to the runner from here instead, spelled once.
+const TIMING_FLAG = '--timing-dir=';
+const timingArg = process.argv.slice(2).find((arg) => arg.startsWith(TIMING_FLAG));
+const TIMING_DIR = timingArg ? timingArg.slice(TIMING_FLAG.length) : '';
+
+const silence = (() => {
+  const dir = TIMING_DIR;
+  if (!dir) return { on: false, gap: () => {}, done: () => {}, write: () => {} };
+  const worst = [];
+  // The item that finished most recently. A gap is noticed only when output
+  // arrives, i.e. just after something completed — so by then the thing that
+  // spent the silence has usually left the in-flight set, and without this the
+  // longest gaps would all be attributed to the enclosing suite.
+  let lastDone = null;
+  const tests = [];
+  return {
+    on: true,
+    done(entry) {
+      lastDone = { name: `${entry.file} > ${entry.name}`, at: Date.now() };
+      tests.push({ file: entry.file, name: entry.name, ms: Date.now() - entry.since });
+    },
+    gap(ms, inFlight) {
+      const startedAt = Date.now() - ms;
+      worst.push({
+        ms,
+        finishedIt: lastDone && lastDone.at >= startedAt ? lastDone.name : null,
+        running: [...inFlight.values()]
+          .sort((a, b) => a.since - b.since)
+          .slice(0, 4)
+          .map((entry) => `${entry.file} > ${entry.name}`),
+      });
+      worst.sort((a, b) => b.ms - a.ms);
+      worst.length = Math.min(worst.length, 10);
+    },
+    write(extra) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, `run-${process.pid}.json`),
+        JSON.stringify(
+          { silenceBudgetMs: SILENCE_LIMIT_MS, worstSilenceMs: worst, ...extra, tests },
+          null,
+          1
+        )
+      );
+    },
+  };
+})();
+
 const DEFAULT_TEST_ARGS = [
   '--test',
   TIMEOUT_ARG,
@@ -87,7 +228,7 @@ const DEFAULT_TEST_ARGS = [
   'tests/**/*.test.js',
 ];
 
-const argv = process.argv.slice(2);
+const argv = process.argv.slice(2).filter((arg) => arg !== timingArg);
 const testArgs = argv.length ? ['--test', TIMEOUT_ARG, ...argv] : DEFAULT_TEST_ARGS;
 
 // A run that executed nothing is not a pass (T-0250). Measured on an unpacked
@@ -181,15 +322,37 @@ function runSuite() {
     const child = spawn(process.execPath, withCounter(testArgs), {
       stdio: ['inherit', 'pipe', 'pipe', 'ipc'],
       detached: process.platform !== 'win32',
+      // Left alone without the flag, so an ordinary run spawns exactly as before.
+      ...(TIMING_DIR ? { env: { ...process.env, BRIEFBOARD_TIMING_DIR: TIMING_DIR } } : {}),
     });
 
     // null until the counting reporter speaks, and still null if it never does:
     // a run that cannot account for a single test is no more green than one that
     // ran none. There is no second way to learn this number, deliberately.
     let executed = null;
+    // What is running right now: key -> { file, name, nesting, since }, one entry
+    // per test, suite and file the runner has dequeued and not yet completed.
+    // Keyed by all three because a file and the tests directly inside it are all
+    // at nesting 0 — the file's own entry is the one whose name is its path, and
+    // it is what tells the reader which file to open.
+    const inFlight = new Map();
     child.on('message', (message) => {
       if (message?.type === COUNT_MESSAGE && Number.isInteger(message.executed)) {
         executed = message.executed;
+      } else if (message?.type === RUNNING_MESSAGE) {
+        const key = `${message.file}\u0000${message.nesting}\u0000${message.name}`;
+        if (message.open) {
+          inFlight.set(key, {
+            file: message.file,
+            name: message.name,
+            nesting: message.nesting,
+            since: Date.now(),
+          });
+        } else {
+          const entry = inFlight.get(key);
+          if (entry && silence.on) silence.done(entry);
+          inFlight.delete(key);
+        }
       }
     });
 
@@ -202,14 +365,21 @@ function runSuite() {
       clearTimeout(timer);
       timer = setTimeout(() => {
         hung = true;
-        console.error(message);
+        console.error(typeof message === 'function' ? message(inFlight, Date.now()) : message);
         killTree(child.pid);
       }, ms);
     };
 
+    // The longest the run actually went without printing, against the budget
+    // that bounds it. A budget is only worth what it is compared with, and this
+    // one had never been compared with anything but itself (T-0272).
+    let spokeAt = 0;
     const heard = (chunk, out) => {
+      const at = Date.now();
+      if (spokeAt !== 0) silence.gap(at - spokeAt, inFlight);
+      spokeAt = at;
       out.write(chunk);
-      bound(SILENCE_LIMIT_MS, SILENCE_KILLED);
+      bound(SILENCE_LIMIT_MS, silenceKilled);
     };
 
     child.stdout.on('data', (chunk) => heard(chunk, process.stdout));
@@ -229,7 +399,9 @@ function runSuite() {
 }
 
 const before = workingCopy();
+const startedAt = Date.now();
 const run = await runSuite();
+const wallMs = Date.now() - startedAt;
 const after = workingCopy();
 const executed = run.executed;
 
@@ -262,5 +434,7 @@ if (!failed && !(executed > 0)) {
       'The suite runs from a clone of the repository (CONTRIBUTING.md).'].join('\n')
   );
 }
+
+silence.write({ wallMs, executed, status: run.status, hung: run.hung });
 
 process.exit(failed || dirty || ranNothing ? run.status || 1 : 0);

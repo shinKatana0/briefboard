@@ -34,6 +34,8 @@ const SPAWN_WAIT_BUDGET_MS = 30000;
 // budget above.
 const POLL_MS = 25;
 
+const timing = require('./timing.js');
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -63,10 +65,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 async function waitFor(predicate, timeoutMs = SPAWN_WAIT_BUDGET_MS, what = 'condition') {
   const deadline = Date.now() + timeoutMs;
+  const started = timing.now();
   for (;;) {
     const value = await predicate();
-    if (value) return value;
-    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    if (value) {
+      timing.record('wait', { ms: timing.now() - started, budgetMs: timeoutMs, what, outcome: 'ok' });
+      return value;
+    }
+    if (Date.now() >= deadline) {
+      timing.record('wait', { ms: timing.now() - started, budgetMs: timeoutMs, what, outcome: 'budget' });
+      throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    }
     await sleep(POLL_MS);
   }
 }

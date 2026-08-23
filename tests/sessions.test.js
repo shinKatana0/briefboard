@@ -15,6 +15,9 @@ const { spawn } = require('node:child_process');
 
 const {
   createSessionRunner,
+  resolveReviewCommand,
+  REVIEW_ENV,
+  LEGACY_REVIEW_ENV,
   readSessionRegistry,
   isProcessAlive,
   parseCommandTemplate,
@@ -2061,5 +2064,110 @@ describe('the per-task history survives a restart, and admits what it lost', () 
     const runner = makeRunner({ project, command: nodeCmd("console.log('x')") });
     assert.deepStrictEqual(runner.costs(), {});
     assert.deepStrictEqual(runner.logged.error, []);
+  });
+});
+
+// ---------- which variable configures the review session (T-0305) ----------
+
+// `BRIEFBOARD_ORCHESTRATOR_CMD` names the agent above the worker, and that is a
+// claim about a role briefboard does not own: embed it under another project's
+// orchestrator and the chain reads `project orchestrator -> briefboard
+// orchestrator -> worker`, where the middle term is a REVIEW session — it reads
+// the diff, runs the tests and writes a verdict, and by T-0117 sets no status and
+// merges nothing. So the documented name is `BRIEFBOARD_REVIEW_CMD`, and the old
+// one goes on working with nothing warning about it.
+//
+// The precedence lives in resolveReviewCommand and nowhere else: server.js asks
+// it rather than repeating it, because a board and a runner that each decide for
+// themselves whether the session exists will one day disagree.
+describe('resolveReviewCommand: one place decides which variable wins (T-0305)', () => {
+  it('the documented variable alone configures it', () => {
+    const resolved = resolveReviewCommand({ [REVIEW_ENV]: 'review-agent {id}' });
+    assert.deepStrictEqual(resolved, { command: 'review-agent {id}', envName: REVIEW_ENV });
+  });
+
+  it('the legacy variable alone still configures it, and is named as itself', () => {
+    const resolved = resolveReviewCommand({ [LEGACY_REVIEW_ENV]: 'old-agent {id}' });
+    // Not REVIEW_ENV: every hint the runner writes carries this name, and one
+    // naming a variable the user never set sends them searching their own setup
+    // for it.
+    assert.deepStrictEqual(resolved, { command: 'old-agent {id}', envName: LEGACY_REVIEW_ENV });
+  });
+
+  it('with both set the documented one wins — asserted on the command, not on which branch ran', () => {
+    const resolved = resolveReviewCommand({
+      [REVIEW_ENV]: 'new-agent {id}',
+      [LEGACY_REVIEW_ENV]: 'old-agent {id}',
+    });
+    assert.strictEqual(resolved.command, 'new-agent {id}');
+    assert.strictEqual(resolved.envName, REVIEW_ENV);
+  });
+
+  // The one thing T-0305 left to the implementation, decided to match the
+  // neighbours rather than invented — the test after this one is what those
+  // neighbours do.
+  it('a blank documented variable counts as unset, so the legacy one is used', () => {
+    for (const blank of ['', '   ', '\t\n']) {
+      assert.deepStrictEqual(
+        resolveReviewCommand({ [REVIEW_ENV]: blank, [LEGACY_REVIEW_ENV]: 'old-agent {id}' }),
+        { command: 'old-agent {id}', envName: LEGACY_REVIEW_ENV },
+        `${JSON.stringify(blank)} must read as unset, not as "the session is off"`
+      );
+    }
+  });
+
+  it('blank is what every other BRIEFBOARD_*_CMD already means by unset', () => {
+    // The rule above is not this task's invention. A blank briefing command has
+    // disabled that kind since T-0076, under the same word for it as an absent
+    // one, and the review variables follow that rather than a rule of their own.
+    for (const blank of [undefined, '', '   ']) {
+      const runner = makeRunner({ command: blank });
+      assert.strictEqual(runner.enabled, false);
+      assert.strictEqual(runner.disabledReason, 'not configured');
+    }
+  });
+
+  it('neither set leaves nothing configured, under the documented name', () => {
+    assert.deepStrictEqual(resolveReviewCommand({}), { command: '', envName: REVIEW_ENV });
+    assert.deepStrictEqual(resolveReviewCommand({ [REVIEW_ENV]: '' }), {
+      command: '',
+      envName: REVIEW_ENV,
+    });
+  });
+
+  it('reads the environment it is handed, never process.env behind it', () => {
+    // What lets server.js resolve once at start-up and hand the answer down.
+    process.env[LEGACY_REVIEW_ENV] = 'from-the-machine';
+    try {
+      assert.deepStrictEqual(resolveReviewCommand({}), { command: '', envName: REVIEW_ENV });
+    } finally {
+      delete process.env[LEGACY_REVIEW_ENV];
+    }
+  });
+});
+
+// The runner is handed that name along with the command, so its diagnostics name
+// the variable that is really set (T-0305).
+describe('the review session names the variable it was configured with', () => {
+  it('an unparseable template is reported under the legacy name when that is the one set', () => {
+    const runner = makeRunner({
+      orchestratorCommand: 'agent "unclosed',
+      orchestratorEnvName: LEGACY_REVIEW_ENV,
+    });
+    assert.strictEqual(runner.orchestratorEnabled, false);
+    assert.strictEqual(runner.orchestratorDisabledReason, 'invalid command template');
+    assert.ok(
+      runner.logged.error.some((line) => line.startsWith(`${LEGACY_REVIEW_ENV} is not parseable`)),
+      `expected the legacy name in: ${JSON.stringify(runner.logged.error)}`
+    );
+    assert.ok(!runner.logged.error.some((line) => line.includes(REVIEW_ENV)));
+  });
+
+  it('and under the documented name by default', () => {
+    const runner = makeRunner({ orchestratorCommand: 'agent "unclosed' });
+    assert.ok(
+      runner.logged.error.some((line) => line.startsWith(`${REVIEW_ENV} is not parseable`)),
+      `expected the documented name in: ${JSON.stringify(runner.logged.error)}`
+    );
   });
 });
