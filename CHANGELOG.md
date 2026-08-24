@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-24
+
+**Nothing a user installs is different.** The published package carries no tests
+and no test tooling, so this release's tarball is byte for byte 0.7.0's apart
+from the version string. What it changes is the repository: the suite that
+verifies this project could not pass on a Node version the package claims to
+support, and 0.7.0 was tagged on a run that had already gone red.
+
+### Fixed
+
+- **The test suite passes on CI again.** `tests/task-cli.test.js` had grown to
+  4.1x the 120 s `--test-timeout` the runner passes. node's runner makes each
+  file a test of its own, and **Node 22 applies that bound to the file while node
+  24.18 does not** — so the same tree ran green on the maintainer's machine and
+  was cancelled on CI. The file is now nine files split by measured cost, 292
+  tests in and 292 out, the slowest at 70% of the bound measured alone. The suite
+  also got faster on the same machine: 706.0 s to 374.3 s.
+- **`tools/test-run.mjs` reports what every test file costs**, on every run
+  including green ones, against the bound node applies to a file on Node 22 —
+  because that file crossed four releases growing towards the limit with nothing
+  ever reporting how close it had come. It **does not** fail a run for it, and
+  the reason is measured rather than argued: a file's wall time is not a property
+  of the file. Same file, same machine, same day — 27.9 s run alone, over 130 s
+  with its eight siblings open. Splitting the file CI had cancelled took the
+  count of files over the bound from one to eight while making the work 3.1x
+  faster, and a gate that a correct fix makes worse is not a gate. The table
+  prints the run's mean concurrency beside the totals so the numbers read as
+  measurements. CI keeps the enforcement.
+- The stale claim in that runner's own comment — that the bound sat "far above
+  the slowest honest test here (16 s)" — is replaced by both populations it
+  governs, each naming the machine its figure came from.
+
 ## [0.7.0] - 2026-08-24
 
 0.6.0 gave an orchestrator a way to act. This release makes acting honest, and

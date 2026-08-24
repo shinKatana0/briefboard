@@ -12,9 +12,24 @@ import { COUNT_MESSAGE, RUNNING_MESSAGE } from './test-count-reporter.mjs';
 
 // An upper bound on a single test, so a wait nobody bounded ends the test
 // instead of the run: without it the suite hung forever three times in ~30 runs
-// (T-0124). Far above the slowest honest test here (16 s) so a slow machine
-// never trips it; `BRIEFBOARD_TEST_TIMEOUT_MS` overrides it, which is how the
+// (T-0124). `BRIEFBOARD_TEST_TIMEOUT_MS` overrides it, which is how the
 // mechanism itself is tested.
+//
+// It governs two populations and used to be justified by one of them, which is
+// what cost v0.7.0 its green tick (T-0335). A TEST: the slowest honest one
+// measured in this suite is 17.5s, so this is some seven times it — the claim
+// that stood here, "far above the slowest honest test here (16 s)", was stale
+// even read that way. And a FILE: node's runner makes each file a test of its
+// own and Node 22 applies this same number to it, so tests/task-cli.test.js at
+// 4.1x the bound was cancelled on CI while node v24.18.0 here ran it to the end
+// and exited 0.
+//
+// The file half is not something this machine can check on CI's behalf, and the
+// table below says so rather than pretending. Measured 2026-08-24 (Windows 11,
+// node v24.18.0, 24 cores): this suite costs 706.0s here against 169s on CI, a
+// factor of 4.2, because it is spawnSync-bound and a Windows process spawn costs
+// what a Linux one does not. No single value means the same thing on both
+// machines.
 const TEST_TIMEOUT_MS = process.env.BRIEFBOARD_TEST_TIMEOUT_MS || '120000';
 const TIMEOUT_ARG = `--test-timeout=${TEST_TIMEOUT_MS}`;
 
@@ -106,19 +121,22 @@ const STARTUP_LIMIT_MS = Number(process.env.BRIEFBOARD_STARTUP_MS || Number(TEST
 // itself is complete, and the count says how much of it was left out.
 const RUNNING_SHOWN = 8;
 
+// The runner dequeues each FILE as a test of its own, named by its path. That
+// entry is what the per-file totals are measured from (see fileTotalLines),
+// and in `runningLines` it is always older than anything inside it — so left in
+// there it would take the first line, which is the one line that has to carry
+// the answer.
+//
+// A file is named by the pattern the runner was given, so that name is its path
+// spelled either absolutely or relatively to the cwd; both are the file.
+const isFile = (e) =>
+  e.nesting === 0 && (e.name === e.file || path.resolve(e.name) === path.resolve(e.file));
+
 function runningLines(inFlight, at) {
   const all = [...inFlight.values()];
-  // The runner dequeues each FILE as a test of its own, named by its path, and
-  // that entry is always older than anything inside it — so left in, it would
-  // take the first line, which is the one line that has to carry the answer. It
-  // is kept only for a file with nothing else open, where it is all there is to
-  // say: the file is in a `before` hook, in its own top-level body, or finished
-  // holding the event loop open.
-  //
-  // A file is named by the pattern the runner was given, so that name is its
-  // path spelled either absolutely or relatively to the cwd; both are the file.
-  const isFile = (e) =>
-    e.nesting === 0 && (e.name === e.file || path.resolve(e.name) === path.resolve(e.file));
+  // The file's own entry is kept only for a file with nothing else open, where
+  // it is all there is to say: the file is in a `before` hook, in its own
+  // top-level body, or finished holding the event loop open.
   const detailed = new Set(all.filter((e) => !isFile(e)).map((e) => e.file));
   const open = all
     .filter((entry) => !isFile(entry) || !detailed.has(entry.file))
@@ -167,6 +185,71 @@ const STARTUP_KILLED = [
   'This budget bounds how fast this machine can get a process going and nothing',
   'the suite decides — BRIEFBOARD_STARTUP_MS is what moves it (T-0266).',
 ].join('\n');
+
+// What each test FILE cost, printed on every run and never failing one.
+//
+// node's runner makes each file a test of its own, so `--test-timeout` bounds
+// the file as well as the tests in it — but only where the runner applies it to
+// that entry, which CI's Node 22 does and node v24.18.0 does not. That is where
+// the bound is enforced and where it stays: on CI, by node. Reading that
+// enforcement back out of a CI run is T-0336, not this file.
+//
+// This table's job is to make growth visible BEFORE CI kills it, and it cannot
+// honestly do more, because A FILE'S WALL TIME IS NOT A PROPERTY OF THE FILE.
+// Measured 2026-08-24 (Windows 11, node v24.18.0, 24 cores) on
+// tests/task-cli.test.js: 27.9s run alone, over 130s with its eight sibling CLI
+// files open beside it — same tests, same machine, same day. Splitting the file
+// CI cancelled showed it from the other side: the work got 3.1x faster (651.5s
+// to 212.7s) while the number of files over the bound went from one to eight,
+// because the nine pieces now wait on each other. A gate that a correct fix
+// makes worse is not a gate, so this one was built, measured and demoted to a
+// report (T-0335).
+//
+// The totals come from the dequeue/complete pair the counting reporter already
+// relays for every entry, the file's own included — the same event stream the
+// silence watchdog reads, on every Node version and whatever node then decides
+// to do about it.
+// How many of the slowest files the table prints. Presentational, like
+// RUNNING_SHOWN above: every file is measured, only the head is shown.
+const FILES_SHOWN = 5;
+
+const fileTotal = ({ file, ms }) =>
+  `${String(Math.round((ms / Number(TEST_TIMEOUT_MS)) * 100)).padStart(4)}%  ${(ms / 1000).toFixed(1).padStart(7)}s  ${file}`;
+
+function fileTotalLines(totals) {
+  const all = [...totals.entries()]
+    .map(([file, { ms }]) => ({ file: path.relative(process.cwd(), file) || file, ms }))
+    .sort((a, b) => b.ms - a.ms);
+  const spans = [...totals.values()];
+  const span = Math.max(...spans.map((s) => s.to)) - Math.min(...spans.map((s) => s.from));
+  const shown = all.slice(0, FILES_SHOWN);
+  // Printed with the totals and not left to the reader, because without it the
+  // first line reads as what a file costs. It is not: the baseline run measured
+  // here held 5.10 files open at once on 24 cores, and every total above is a
+  // wall time under that load.
+  //
+  // Over the SPAN the files occupied, not over the run's wall clock. The wall
+  // clock carries node starting and two `git status` runs, which on a short run
+  // is most of it: dividing by it reported 0.90 files open at once for a
+  // two-file fixture where both files plainly ran, and a concurrency below one
+  // for two is the same wrong-denominator arithmetic this whole table exists to
+  // report on. tests/test-run.test.js pins it with two overlapping fixtures.
+  const open = (all.reduce((sum, entry) => sum + entry.ms, 0) / span).toFixed(2);
+  return {
+    all,
+    lines: [
+      '',
+      `Slowest test files, against the ${TEST_TIMEOUT_MS}ms node applies to a FILE on Node 22:`,
+      ...shown.map((entry) => `  ${fileTotal(entry)}`),
+      ...(all.length > shown.length
+        ? [`  ... and ${all.length - shown.length} more, all faster`]
+        : []),
+      `  ${open} files open at once on average, so these are wall times under that`,
+      '  load and not what a file costs alone (T-0335). CI enforces the bound; this',
+      '  table only makes a file approaching it visible first.',
+    ],
+  };
+}
 
 // Measurement scaffolding: `--timing-dir=PATH` writes what the run cost into
 // that directory, and does nothing at all without it. What it keeps is the
@@ -349,6 +432,13 @@ function runSuite() {
     // at nesting 0 — the file's own entry is the one whose name is its path, and
     // it is what tells the reader which file to open.
     const inFlight = new Map();
+    // file path -> how long that file's own entry was open, which is what a Node
+    // honouring --test-timeout for the file compares against, and when it opened
+    // and closed. The span between the first open and the last close is the only
+    // honest denominator for how many files ran at once: the wrapper's own wall
+    // clock includes node starting and two `git status` runs, and over a short
+    // run that drags the mean below one file (measured on a two-file fixture).
+    const fileMs = new Map();
     child.on('message', (message) => {
       if (message?.type === COUNT_MESSAGE && Number.isInteger(message.executed)) {
         executed = message.executed;
@@ -364,6 +454,9 @@ function runSuite() {
         } else {
           const entry = inFlight.get(key);
           if (entry && silence.on) silence.done(entry);
+          if (entry && isFile(entry)) {
+            fileMs.set(entry.file, { ms: Date.now() - entry.since, from: entry.since, to: Date.now() });
+          }
           inFlight.delete(key);
         }
       }
@@ -399,13 +492,13 @@ function runSuite() {
     child.stderr.on('data', (chunk) => heard(chunk, process.stderr));
     child.on('error', (error) => {
       clearTimeout(timer);
-      resolve({ status: 1, hung, error, executed });
+      resolve({ status: 1, hung, error, executed, fileMs });
     });
     // `close` and not `exit`: it is the one that waits for the channel the count
     // came over, along with the two pipes.
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ status: code, hung, executed });
+      resolve({ status: code, hung, executed, fileMs });
     });
     bound(STARTUP_LIMIT_MS, STARTUP_KILLED);
   });
@@ -448,6 +541,21 @@ if (!failed && !(executed > 0)) {
   );
 }
 
-silence.write({ wallMs, executed, status: run.status, hung: run.hung });
+// Empty only where no file ever completed — a run killed by either watchdog.
+// There the silence message is the diagnosis and a table of the files that did
+// finish would point away from it.
+const totals = run.fileMs.size ? fileTotalLines(run.fileMs) : null;
+if (totals) console.log(totals.lines.join('\n'));
 
+silence.write({
+  wallMs,
+  executed,
+  status: run.status,
+  hung: run.hung,
+  files: totals ? totals.all : [],
+});
+
+// A file over the bound is deliberately not part of this. It is a fact about
+// this machine's concurrency as much as about the file, so it is reported and
+// not refused; what refuses it is node on CI (T-0335, T-0336).
 process.exit(failed || dirty || ranNothing ? run.status || 1 : 0);

@@ -37,10 +37,13 @@ function git(args, cwd) {
 // The commit stays: without it the fixture files are untracked before the run as
 // well as after, and the guard, which compares the two, would have nothing to
 // notice (T-0263).
-function makeRepo(fixtureSource) {
+function makeRepo(fixtureSource, alongside = {}) {
   const root = fs.realpathSync(tempDir('briefboard-test-run-'));
   fs.writeFileSync(path.join(root, 'tracked.txt'), 'original\n');
   fs.writeFileSync(path.join(root, 'fixture.test.js'), fixtureSource);
+  for (const [name, source] of Object.entries(alongside)) {
+    fs.writeFileSync(path.join(root, name), source);
+  }
   git(['init'], root);
   git(['add', '.'], root);
   git(
@@ -856,5 +859,143 @@ describe('the run has no temporary directory to leave behind (T-0276)', () => {
     } finally {
       stopWatching();
     }
+  });
+});
+
+// `--test-timeout` carries a bound on a TEST, and node's runner makes each FILE
+// a test of its own — so it bounds the file too, on the versions that apply it
+// to that entry. CI's Node 22 does and the maintainer's v24.18.0 does not, which
+// is how tests/task-cli.test.js reached 4.1x the bound with every local run
+// green and the release commit red (T-0335).
+//
+// The wrapper measures the same thing and PRINTS it; node on CI is what enforces
+// it. That division is the point of these tests: a machine with 24 cores runs
+// enough files at once that a file's wall time stops being a property of the
+// file (27.9s alone against over 130s beside its siblings, measured), so a local
+// kill would fire on files CI is perfectly happy with, and did — splitting the
+// one file CI cancelled took the count over the bound from one to eight.
+const FILE_BOUND_MS = 3000;
+
+// Long enough that the FILE is over that bound and no single test in it is
+// anywhere near — the file is what has to show up in the table, not a test.
+// Awaited rather than blocking: a blocking fixture prints nothing until it ends
+// and would put the SILENCE budget into the experiment as well.
+const FILE_SLEEP_MS = 1000;
+const FILE_SLEEPS = 4;
+
+const SLOW_FILE_TEST = `'use strict';
+const { it } = require('node:test');
+for (let n = 1; n <= ${FILE_SLEEPS}; n++) {
+  it('sleeps ' + n, async () => {
+    await new Promise((resolve) => setTimeout(resolve, ${FILE_SLEEP_MS}));
+  });
+}
+`;
+
+// One row of the wrapper's table: `  150%      4.6s  fixture.test.js`.
+const tableRow = (out, name) =>
+  out.match(new RegExp(`^\\s*(\\d+)%\\s+([\\d.]+)s\\s+${name}$`, 'm'));
+
+describe('what every test FILE cost is measured and printed (T-0335)', () => {
+  // node takes the LAST --test-timeout on its command line, so the one passed
+  // through here is what the runner enforces while the wrapper goes on measuring
+  // against its own BRIEFBOARD_TEST_TIMEOUT_MS. That is not a shape production
+  // ever has: it is here to take node's per-file behaviour out of the experiment,
+  // so that on EVERY version this is a run node itself leaves alone — and what
+  // the table says is then the wrapper's own measurement and nothing else. Which
+  // is the whole point: the Node this code is written on is the one that says
+  // nothing about a file over the bound.
+  it('names a file over the bound on a Node whose own runner would not have', () => {
+    const { status, out } = runGuard(
+      makeRepo(SLOW_FILE_TEST),
+      { BRIEFBOARD_TEST_TIMEOUT_MS: String(FILE_BOUND_MS) },
+      ['--test-timeout=600000']
+    );
+    assert.match(
+      out,
+      /cancelled 0/,
+      `node itself had to leave the file alone, or this proves nothing: ${out}`
+    );
+    const row = tableRow(out, 'fixture\\.test\\.js');
+    assert.ok(row, `the table has to name the file and what it cost: ${out}`);
+    assert.ok(
+      Number(row[2]) * 1000 >= FILE_SLEEP_MS * FILE_SLEEPS,
+      `the total reported (${row[2]}s) is below what the fixture sleeps: ${out}`
+    );
+    assert.ok(Number(row[1]) > 100, `and over 100% of the bound: ${out}`);
+  });
+
+  // The other half of the same decision, and the one a future reader is most
+  // likely to undo. A file over the bound is as much a fact about how many files
+  // the runner had open as about the file, so the run is not failed for it: the
+  // bound is enforced by node on CI, where the concurrency is the concurrency
+  // that matters (T-0336). Splitting the file CI cancelled took this suite from
+  // one file over the bound to eight while making the work 3.1x faster — a gate
+  // a correct fix makes worse is not a gate.
+  it('and does not fail the run for it', () => {
+    const { status, out } = runGuard(
+      makeRepo(SLOW_FILE_TEST),
+      { BRIEFBOARD_TEST_TIMEOUT_MS: String(FILE_BOUND_MS) },
+      ['--test-timeout=600000']
+    );
+    assert.ok(tableRow(out, 'fixture\\.test\\.js'), `the fixture must be over the bound: ${out}`);
+    assert.strictEqual(status, 0, `a file over the bound is reported, not refused: ${out}`);
+  });
+
+  // A margin nobody can see is a margin that gets spent: the file this card is
+  // about crossed four releases growing towards the bound with every run green
+  // and nothing ever printing how close it had come.
+  it('prints the slowest files against the bound on a green run too', () => {
+    const { status, out } = runGuard(makeRepo(CLEAN_TEST));
+    assert.strictEqual(status, 0, out);
+    assert.match(
+      out,
+      new RegExp(`Slowest test files, against the ${PER_TEST_LIMIT_MS}ms`),
+      out
+    );
+    assert.ok(tableRow(out, 'fixture\\.test\\.js'), `with the file's own total: ${out}`);
+  });
+
+  // Without this number the first row reads as what a file costs, and it is not.
+  // That misreading is the entire reason the table is not a gate, so the table
+  // may not be printed without it.
+  it('prints how many files were open at once, so the totals can be read', () => {
+    // Two files that sleep for the same seconds, so they really do overlap and
+    // the honest answer is close to two. It is the denominator this catches: the
+    // wrapper's own wall clock carries node starting and two `git status` runs,
+    // and over a run this short that alone put the mean at 0.90 for two files
+    // that plainly both ran (measured while writing this).
+    const { out } = runGuard(
+      makeRepo(SLOW_FILE_TEST, { 'other.test.js': SLOW_FILE_TEST }),
+      {},
+      [],
+      '*.test.js'
+    );
+    const open = out.match(/([\d.]+) files open at once on average/);
+    assert.ok(open, `the table has to say what load its totals were paid under: ${out}`);
+    assert.ok(
+      Number(open[1]) > 1,
+      `both files slept through the same seconds, so the mean cannot be ${open[1]}: ${out}`
+    );
+  });
+
+  // Two files, and the slow one sleeps for seconds the other does not — so a
+  // wrapper that reported the RUN's wall time under every file's name would
+  // print two equal totals, and would fail here and nowhere else in this file.
+  it('times each file on its own and not on how long the run took', () => {
+    const { status, out } = runGuard(
+      makeRepo(SLOW_FILE_TEST, { 'quick.test.js': CLEAN_TEST }),
+      {},
+      [],
+      '*.test.js'
+    );
+    assert.strictEqual(status, 0, out);
+    const slow = tableRow(out, 'fixture\\.test\\.js');
+    const quick = tableRow(out, 'quick\\.test\\.js');
+    assert.ok(slow && quick, `both files belong in the table: ${out}`);
+    assert.ok(
+      Number(slow[2]) > Number(quick[2]),
+      `the sleeping file must cost more than the empty one (${slow[2]}s vs ${quick[2]}s): ${out}`
+    );
   });
 });

@@ -168,6 +168,11 @@ function pipedStdout(code) {
 // must ignore is prose, and what it must still catch is a call (T-0138). Every
 // fixture is a quoted string, which is also why this file needs no bounded
 // fetch of its own.
+// A root `beforeEach` that awaits a macrotask: the pacing hook of T-0311, whose
+// one home is tests/helpers/task-cli.js. Matched on the shape rather than on a
+// list of files, which needs no exemption and holds for next year's copy.
+const MACROTASK_HOOK = /beforeEach\(\s*async[^)]*\)\s*=>\s*\{[^}]*setImmediate/;
+
 describe('the scan reads code, not the prose around it (T-0138)', () => {
   it('a call in a comment is not a call', () => {
     assert.deepStrictEqual(fetchCalls('// the habit this replaces: fetch(url)\n'), []);
@@ -522,4 +527,42 @@ describe('the suite brings its own environment (T-0119)', () => {
       );
     });
   }
+});
+
+// T-0311 gave the CLI tests a root `beforeEach` that awaits one macrotask, so a
+// file of blocking `spawnSync` tests reports its marks as they happen instead of
+// in one stretch at the end. T-0335 split that file into nine, and the hook came
+// with them.
+//
+// It is four lines; the measurement that explains why it is there is thirty, and
+// that explanation is the only thing standing between the hook and someone
+// deleting it as a pointless delay. Two copies of a measured explanation drift
+// apart, and the drifted one is the one that gets believed. So the hook is
+// registered once, on require, and the files take it from there.
+describe('the pacing hook has one home (T-0311, T-0335)', () => {
+  // `emptyStrings` for the same reason `fetchCalls` uses it (T-0138): the hook
+  // is quoted inside a fixture string in the case below, and without it this
+  // file reported ITSELF as a second place the hook is registered — a guard
+  // failing on its own prose, which is how that rule was learnt the first time.
+  const registrars = () =>
+    sources({ withBounded: true })
+      .filter(({ text }) => MACROTASK_HOOK.test(stripProse(text, { emptyStrings: true })))
+      .map(({ name }) => name);
+
+  it('is registered in exactly one file', () => {
+    assert.deepStrictEqual(registrars(), ['tests/helpers/task-cli.js']);
+  });
+
+  // Without this the assertion above passes just as well when the shape it looks
+  // for has been renamed out from under it and nothing registers the hook at all.
+  it('and the shape asserted on is the shape that is really written', () => {
+    assert.ok(
+      MACROTASK_HOOK.test('beforeEach(async () => {\n  await new Promise((r) => setImmediate(r));\n});'),
+      'the pattern no longer matches the hook it is meant to find'
+    );
+    assert.ok(
+      !MACROTASK_HOOK.test('beforeEach(async () => {\n  await board.stop();\n});'),
+      'and it must not match every beforeEach in the suite'
+    );
+  });
 });

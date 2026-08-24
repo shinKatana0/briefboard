@@ -37,6 +37,12 @@ Key rules:
   do not expand it. If you find a new problem along the way, file a separate task
   instead of fixing it silently.
 - Work on a dedicated branch named `task/T-NNNN-short-slug`.
+- **To undo something you have already committed, diff against the branch point,
+  not `git status`.** `git checkout <path>` restores the file from *your own
+  commit*, so a change you decided against comes back looking reverted while
+  still carrying the edit — `git status` is clean and the edit ships. What shows
+  it is `git diff --stat main --` over the whole branch. This cost T-0335 a
+  guard that went on passing while the claim it asserted had stopped being true.
 - Never set `done` as a worker — only the orchestrator does that, after review
   and merge.
 
@@ -89,7 +95,8 @@ node tools/test-run.mjs --timing-dir=/some/directory/outside/the/repository
 It changes nothing about the run and does nothing without the flag. Each test
 process writes what every bounded wait cost to `<dir>/<pid>.jsonl` — `fetch`,
 `waitFor`, `waitForExit`, `waitUntilReady`, spawn to a board answering — and the
-wrapper writes `<dir>/run-<pid>.json` with the run's wall time, the ten longest
+wrapper writes `<dir>/run-<pid>.json` with the run's wall time, what every test
+FILE cost under `files`, the ten longest
 stretches with no mark printed, and how long every test took. Keep the directory
 outside the working copy, or the run's own dirty check will fail it, and rightly.
 
@@ -152,6 +159,33 @@ habits caused it, and five rules keep it impossible:
   place and no npm script calls `node --test` itself. It is far above the
   slowest honest test — measure before lowering it — and it is the backstop:
   whatever else is missed, a stuck test is failed at the limit.
+- **The same number bounds every test FILE, and CI is where that is enforced.**
+  node's runner makes each file a test of its own, so `--test-timeout` bounds
+  the file too — on the versions that apply it to that entry. Node 22 does and
+  node 24.18 does not, which is how `tests/task-cli.test.js` reached 4.1x the
+  limit with every local run green and the release commit red on CI (T-0335).
+  So the wrapper times each file itself, off the same
+  `test:dequeue`/`test:complete` pair the silence watchdog reads, and prints the
+  slowest files against the limit on every run, green ones included. **It does
+  not fail the run for it, and must not be made to.** A margin nobody can see is
+  a margin that gets spent — that file crossed four releases growing towards
+  this one with nothing ever reporting how close it had come — but a local kill
+  would be measuring the wrong thing:
+
+  **A file's wall time is not a property of the file.** It is a property of how
+  many files the runner has open beside it, and node scales that with the core
+  count. Measured 2026-08-24 (Windows 11, node v24.18.0, 24 cores) on
+  `tests/task-cli.test.js`: **27.9s run alone, over 130s with its eight sibling
+  CLI files running** — same tests, same machine, same day. Splitting the file
+  CI had cancelled showed it from the other side: the work got 3.1x faster
+  (651.5s to 212.7s) while the number of files over the limit went from one to
+  eight, because the nine pieces now wait on each other. A gate that a correct
+  fix makes worse is not a gate. On top of that the suite costs 706.0s here
+  against 169s on CI — 4.2x, it is `spawnSync`-bound and a Windows spawn costs
+  what a Linux one does not — so no single value means the same thing on both
+  machines. The table prints the run's mean concurrency beside the totals for
+  exactly this reason; read the totals with it, and re-measure a suspect file
+  **alone** before concluding it grew.
 - **A run that goes silent is killed.** Failing the test is not the same as
   ending the run. A test that hangs while holding the event loop open — a live
   timer, a server still listening — was reported failed at the limit and then
@@ -186,7 +220,10 @@ habits caused it, and five rules keep it impossible:
   the slowest single test rather than by a whole `describe`, which is the bound
   such a file can have; the ten longest stretches after it sit within 7.0-8.1s
   of each other and no one file owns them. If you add a file of blocking tests,
-  add the hook with it.
+  add the hook with it — for the CLI tests it arrives with
+  `tests/helpers/task-cli.js`, which registers it on require the way
+  `helpers/tmp.js` registers its `after()`, so the measurement explaining it has
+  one home and cannot drift into a second copy (T-0335).
 
   Silence is counted from the run's first output, not from its spawn, and the
   span before that has a budget of its own (`BRIEFBOARD_STARTUP_MS`, against

@@ -1222,6 +1222,20 @@ describe('CONTRIBUTING.md describes the test wrapper that exists (T-0256)', () =
     assert.match(text, /process \*{0,2}tree/, 'the silent run, and how far the kill reaches');
     assert.match(text, /executed nothing|executed no tests/, 'and the run that ran nothing (T-0250)');
   });
+
+  // A fourth thing the wrapper measures and a third it refuses: what every test
+  // FILE cost is printed and nothing more is done with it, because a file's wall
+  // time is not a property of the file (T-0335). The section has to say both
+  // halves. Saying only the first would read as a refusal the wrapper does not
+  // make, and would send the next reader to add a kill that this suite measured
+  // as worse than useless: splitting the one file CI cancelled took the count
+  // over the bound from one to eight.
+  it('says the per-file total is printed here and enforced on CI, not the other way round', () => {
+    const text = running();
+
+    assert.match(text, /every test FILE/, 'the file half of what the limit bounds');
+    assert.match(text, /does\s+not fail the run for it/, 'and that the wrapper only reports it');
+  });
 });
 
 // T-0254: this file is read once per release, by someone about to publish, and
